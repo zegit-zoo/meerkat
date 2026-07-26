@@ -141,12 +141,42 @@ is small but worth being explicit about:
 
 | Asset | Threat | Mitigation |
 |-------|--------|-----------|
-| Embedded wiki content | Tampering between source and binary | Content is embedded at build time; `mk version` records the content commit it was built from. The release binary's SHA256 is published and cosign-signed, so consumers can verify the exact bytes. |
+| Embedded wiki content | Tampering between source and binary | Content is embedded at build time; `mk version`'s `kb_commit` records the content commit it was built from. The release binary's SHA256 is published and cosign-signed, so consumers can verify the exact bytes — **this mitigation covers embedded content only** (see the next row). |
+| Runtime KB content (`--kb-dir` flag / `MEERKAT_KB_DIR` env var) | Tampering, or malicious content, in a directory an operator points meerkat at | **Not covered by the cosign signature, the checksums file, or `kb_commit`.** `kb_commit` always names the build-time embedded content's commit regardless of what's actually being served — it says nothing about a `--kb-dir` directory's contents. `mk version`'s `kb_source` field (`embedded` or `disk:<path>`) reports which content is actually in effect, so operators and auditors can tell the two apart, but it is a provenance label, not an integrity guarantee: meerkat performs no signature check, hashing, or sandboxing of runtime KB content. An operator who sets `--kb-dir`/`MEERKAT_KB_DIR` is trusting that directory themselves, at the moment of every invocation — comparable in posture to `--trust-sources` for ingestion (below). |
 | User's GitHub token (used by `mk update` and `mk ingest` git auth) | Disclosure via argv, on-disk config, or logging | The token (from the `gh` auth cache) is handed to the clone/fetch subprocess only via a `credential.helper` script that reads it back from an env var (`MEERKAT_GIT_TOKEN`) at request time — it never appears in argv, in the persisted remote URL, or in `.git/config`. The remote URL is scrubbed back to its tokenless form in a `defer` immediately after clone/fetch, including on error paths, so a live credential doesn't linger in the cache dir. |
 | Downloaded release binary (in `mk update` flow) | Supply-chain swap | SHA256 verified against published `checksums.txt`; cosign signature on the checksums file (Rekor-logged); staged in a user-owned temp dir before final copy/move; `.old` backup during swap |
 | `mk http serve` API key | Disclosure | `subtle.ConstantTimeCompare`; key never echoed; required (no anonymous mode) |
 | `mk ingest --execute` spawns an agent CLI (`opencode` or `claude`) | Prompt injection: `Task.Prompt` is rendered from `ingestion/prompts/*.md` in the ingested content source, so a malicious prompt file in any source repo in `sources.yaml` is an arbitrary-action path, running with `cmd.Dir`/`--dir` set to a working copy that holds push credentials, at the operator's full privilege. The generated instruction itself includes a `git push` recipe. | Ingested content is treated as **trusted input** to the agent — meerkat does not sandbox or vet it. The real control is permission prompts: by default the agent CLI runs *with* its normal permission prompts, so an injected instruction still has to get past those before it acts. `--trust-sources` disables the prompts (passes `--dangerously-skip-permissions` to the agent CLI) for unattended/CI runs; it prints a stderr warning before executing. Operators who enable `--trust-sources` must trust every source repo listed in `sources.yaml` — as much as they trust code they'd merge unreviewed. |
-| Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk |
+| Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk. **When served from `--kb-dir`/`MEERKAT_KB_DIR` instead, the same gap as the runtime KB content row above applies**: they're read from the operator-supplied directory at runtime, outside the gosec walk and the cosign-signed release. |
+
+### `kb_commit` vs. `kb_source`: the provenance split
+
+`mk version` exposes two fields that answer different questions and must
+not be conflated:
+
+- **`kb_commit`** — the commit of the content source `content-source.yaml`
+  pointed at when *this binary* was built. Fixed at build time. Unaffected
+  by `--kb-dir`/`MEERKAT_KB_DIR` — it never changes to reflect a runtime
+  directory.
+- **`kb_source`** — what's actually being served for *this invocation*:
+  `embedded` or `disk:<path>`. Set from `--kb-dir`/`MEERKAT_KB_DIR` before
+  any subcommand runs.
+
+When `kb_source` is `embedded`, `kb_commit` describes what's being served,
+and the "Embedded wiki content" mitigation above applies in full. When
+`kb_source` is `disk:<path>`, `kb_commit` is still reporting the build-time
+embedded commit — content that is **not** being served — and no part of
+the release's SHA256/cosign coverage extends to `<path>`. That directory
+could hold anything: content edited by hand after `mk ingest`, a stale
+checkout, or a directory swapped in by anyone with filesystem access.
+Meerkat does not check, hash, or sandbox it.
+
+This is deliberate, not an oversight: `kb_source` exists as its own field
+precisely so `mk version`'s output cannot be read as implying an integrity
+guarantee it doesn't have. An operator who sets `--kb-dir`/`MEERKAT_KB_DIR`
+is trusting that directory themselves, the same way `--trust-sources`
+requires trusting every source repo in `sources.yaml` — full operator
+responsibility, no meerkat-side verification.
 
 ---
 

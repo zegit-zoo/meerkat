@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/update"
 )
 
@@ -36,6 +37,14 @@ var (
 	kbCommit = "unknown"
 )
 
+// kbSourceProvenance is the kb_source value `mk version` reports:
+// "embedded" or "disk:<path>". Set once per invocation by the root
+// command's PersistentPreRunE (see kbDirFlag below), before any
+// subcommand's RunE runs. Defaults to embedded so direct callers of
+// newVersionCmd() in tests (which bypass the root command) still get
+// a sane, correct answer: no --kb-dir means embedded.
+var kbSourceProvenance = kbdir.SourceEmbedded
+
 // Cobra command groups so `meerkat --help` clusters subcommands by
 // purpose instead of one alphabetised wall.
 const (
@@ -47,6 +56,8 @@ const (
 // NewRootCmd builds the top-level meerkat command. Kept as a
 // constructor so tests can spin up isolated trees.
 func NewRootCmd() *cobra.Command {
+	var kbDirFlag string
+
 	root := &cobra.Command{
 		Use:   "meerkat",
 		Short: "Meerkat — the vigilant guard and informer (knowledge-base CLI)",
@@ -54,9 +65,12 @@ func NewRootCmd() *cobra.Command {
 CLI subcommands, an MCP server (for agent harnesses / OpenCode), and an
 HTTP/OpenAPI server (for OpenWebUI).
 
-All wiki content is bundled into the binary at build time. No
-network access is required for search, show, or list. Live
-sub-commands (planned: ingest, mcp serve, http serve) layer on top.
+All wiki content is bundled into the binary at build time and served
+from there by default. No network access is required for search,
+show, or list. Point --kb-dir (or MEERKAT_KB_DIR) at a content-repo
+directory (the layout content-source.yaml describes and 'mk ingest'
+writes into) to serve updated content without rebuilding the binary —
+the embed remains the fallback when neither is set.
 
 Page IDs are slash-paths from the wiki root without ".md" — e.g.
 "concepts/Some-Concept", "systems/backend/some-service".
@@ -66,9 +80,27 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
   meerkat search "some term"
   meerkat show concepts/Some-Concept
   meerkat list --prefix systems/backend/
-  meerkat list --category policies --status placeholder`,
+  meerkat list --category policies --status placeholder
+
+  # Serve content from disk instead of the embedded build
+  meerkat --kb-dir ./meerkat-kb search "some term"
+  MEERKAT_KB_DIR=./meerkat-kb meerkat list`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// PersistentPreRunE resolves --kb-dir/MEERKAT_KB_DIR once per
+		// invocation, before any subcommand's RunE, and points
+		// internal/kb + internal/sources at the result (disk directory
+		// or embedded fallback). It runs for every subcommand since none
+		// of them define their own PersistentPreRun.
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			dir := kbdir.Resolve(kbDirFlag)
+			source, err := kbdir.Configure(dir)
+			if err != nil {
+				return err
+			}
+			kbSourceProvenance = source
+			return nil
+		},
 		// PersistentPostRun fires after every (sub-)command's RunE.
 		// We use it to nag about new releases — but only when the
 		// command was interactive (stderr is a TTY) and isn't on the
@@ -84,6 +116,12 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 			update.MaybeNotify(cmd.Context(), version, os.Stderr)
 		},
 	}
+
+	root.PersistentFlags().StringVar(&kbDirFlag, "kb-dir", "",
+		"Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, "+
+			"ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. "+
+			"The directory must exist; a missing wiki/ingestion/templates subdirectory inside it "+
+			"degrades to empty rather than erroring.")
 
 	root.AddGroup(
 		&cobra.Group{ID: groupKB, Title: "Knowledge base (always available, offline):"},

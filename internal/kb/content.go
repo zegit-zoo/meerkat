@@ -6,6 +6,12 @@
 // content-source.yaml) and embedded verbatim. Files matching excludedFiles
 // are filtered at access time so we never serve build artefacts.
 //
+// At run time the embed can be overridden by a directory on disk (see
+// UseFS and internal/kbdir) — the --kb-dir flag / MEERKAT_KB_DIR env
+// var let an operator update KB content without rebuilding the binary.
+// The embedded content remains the fallback when no directory is
+// configured.
+//
 // Each page may carry YAML frontmatter delimited by '---'. We parse
 // it into Frontmatter and expose category / owner / status / source
 // / tags / related as first-class fields the search index can boost
@@ -26,6 +32,30 @@ import (
 
 //go:embed all:content
 var wikiFS embed.FS
+
+// currentFS is the filesystem List/Load/FS actually read from. It
+// defaults to the build-time embedded content and can be redirected to
+// a directory on disk via UseFS — see internal/kbdir, which adapts a
+// content-repo-layout directory onto the "content/..." paths this
+// package expects, and wires it up from the --kb-dir flag /
+// MEERKAT_KB_DIR env var at CLI startup.
+//
+// This is deliberately simple global state, set once before any
+// concurrent readers start (mirrors how -ldflags variables work).
+// Tests that want isolation without touching it should build kb.Page
+// values directly instead (see internal/search/inject_test.go's
+// NewFromPages pattern) rather than pointing UseFS at a fixture.
+var currentFS fs.FS = wikiFS
+
+// UseFS redirects List/Load/FS to read from fsys instead of the
+// embedded content. Passing nil restores the embedded default.
+func UseFS(fsys fs.FS) {
+	if fsys == nil {
+		currentFS = wikiFS
+		return
+	}
+	currentFS = fsys
+}
 
 var excludedFiles = []string{
 	"content/lint-report.md",
@@ -84,13 +114,20 @@ type Page struct {
 // ErrNotFound is returned by Load when a page does not exist.
 var ErrNotFound = errors.New("page not found")
 
-// FS returns the underlying embedded filesystem.
-func FS() fs.FS { return wikiFS }
+// FS returns the filesystem List/Load currently read from — the
+// embedded content by default, or a disk directory after UseFS.
+func FS() fs.FS { return currentFS }
 
 // List returns all wiki pages, sorted by ID for deterministic output.
+//
+// A completely missing content root (e.g. a --kb-dir directory whose
+// wiki/ subdirectory doesn't exist) degrades to an empty slice rather
+// than an error, mirroring sources.All's treatment of a missing
+// sources.yaml: a partially-populated runtime directory should serve
+// what it has, not hard-fail.
 func List() ([]Page, error) {
 	var pages []Page
-	err := fs.WalkDir(wikiFS, "content", func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(currentFS, "content", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -111,6 +148,9 @@ func List() ([]Page, error) {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	sort.Slice(pages, func(i, j int) bool { return pages[i].ID < pages[j].ID })
@@ -170,7 +210,7 @@ func ByPrefix(prefix string) FilterFunc {
 }
 
 func loadByPath(p string) (Page, error) {
-	body, err := fs.ReadFile(wikiFS, p)
+	body, err := fs.ReadFile(currentFS, p)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return Page{}, ErrNotFound

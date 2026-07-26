@@ -3,6 +3,12 @@
 // page templates from the configured content source. They're embedded
 // into the binary at build time so `mk ingest` works without the
 // content repo on disk.
+//
+// At run time the embed can be overridden by a directory on disk (see
+// UseFS and internal/kbdir) — the --kb-dir flag / MEERKAT_KB_DIR env
+// var let an operator update ingestion config without rebuilding the
+// binary. The embedded content remains the fallback when no directory
+// is configured.
 package sources
 
 import (
@@ -18,6 +24,22 @@ import (
 
 //go:embed all:etc
 var etcFS embed.FS
+
+// currentFS is the filesystem All/Prompt/Template/FS actually read
+// from. It defaults to the build-time embedded registry and can be
+// redirected to a directory on disk via UseFS. See kb.UseFS's doc
+// comment — the same global-state caveats apply here.
+var currentFS fs.FS = etcFS
+
+// UseFS redirects All/Prompt/Template/FS to read from fsys instead of
+// the embedded registry. Passing nil restores the embedded default.
+func UseFS(fsys fs.FS) {
+	if fsys == nil {
+		currentFS = etcFS
+		return
+	}
+	currentFS = fsys
+}
 
 // Source is one entry in sources.yaml — see the comment block at the
 // top of that file for field semantics.
@@ -64,7 +86,7 @@ var ErrNotFound = errors.New("source not found")
 // declaration order. Sources commented out in the YAML are not
 // returned.
 func All() ([]Source, error) {
-	body, err := fs.ReadFile(etcFS, "etc/sources.yaml")
+	body, err := fs.ReadFile(currentFS, "etc/sources.yaml")
 	if errors.Is(err, fs.ErrNotExist) {
 		// No source registry embedded (e.g. a build with no configured
 		// content source). Treat as an empty registry rather than an error.
@@ -144,7 +166,7 @@ func Get(id string) (Source, error) {
 func Prompt(promptPath string) (string, error) {
 	// Tolerate either "prompts/policy.md" or just "policy.md".
 	rel := strings.TrimPrefix(promptPath, "prompts/")
-	body, err := fs.ReadFile(etcFS, path.Join("etc", "prompts", rel))
+	body, err := fs.ReadFile(currentFS, path.Join("etc", "prompts", rel))
 	if err != nil {
 		return "", fmt.Errorf("read prompt %q: %w", promptPath, err)
 	}
@@ -154,12 +176,13 @@ func Prompt(promptPath string) (string, error) {
 // Template returns the contents of an embedded page template.
 // templateName is the value of Source.Template, e.g. "policy.md".
 func Template(templateName string) (string, error) {
-	body, err := fs.ReadFile(etcFS, path.Join("etc", "templates", templateName))
+	body, err := fs.ReadFile(currentFS, path.Join("etc", "templates", templateName))
 	if err != nil {
 		return "", fmt.Errorf("read template %q: %w", templateName, err)
 	}
 	return string(body), nil
 }
 
-// FS returns the underlying embedded filesystem (for tests / debug).
-func FS() fs.FS { return etcFS }
+// FS returns the filesystem All/Prompt/Template currently read from —
+// the embedded registry by default, or a disk directory after UseFS.
+func FS() fs.FS { return currentFS }

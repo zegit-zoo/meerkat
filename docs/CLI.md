@@ -12,9 +12,12 @@ Meerkat embeds a knowledge-base wiki and exposes it via
 CLI subcommands, an MCP server (for agent harnesses / OpenCode), and an
 HTTP/OpenAPI server (for OpenWebUI).
 
-All wiki content is bundled into the binary at build time. No
-network access is required for search, show, or list. Live
-sub-commands (planned: ingest, mcp serve, http serve) layer on top.
+All wiki content is bundled into the binary at build time and served
+from there by default. No network access is required for search,
+show, or list. Point --kb-dir (or MEERKAT_KB_DIR) at a content-repo
+directory (the layout content-source.yaml describes and 'mk ingest'
+writes into) to serve updated content without rebuilding the binary —
+the embed remains the fallback when neither is set.
 
 Page IDs are slash-paths from the wiki root without ".md" — e.g.
 "concepts/Some-Concept", "systems/backend/some-service".
@@ -30,6 +33,10 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).
   meerkat show concepts/Some-Concept
   meerkat list --prefix systems/backend/
   meerkat list --category policies --status placeholder
+
+  # Serve content from disk instead of the embedded build
+  meerkat --kb-dir ./meerkat-kb search "some term"
+  MEERKAT_KB_DIR=./meerkat-kb meerkat list
 ```
 
 ## Commands
@@ -61,9 +68,12 @@ Meerkat embeds a knowledge-base wiki and exposes it via
 CLI subcommands, an MCP server (for agent harnesses / OpenCode), and an
 HTTP/OpenAPI server (for OpenWebUI).
 
-All wiki content is bundled into the binary at build time. No
-network access is required for search, show, or list. Live
-sub-commands (planned: ingest, mcp serve, http serve) layer on top.
+All wiki content is bundled into the binary at build time and served
+from there by default. No network access is required for search,
+show, or list. Point --kb-dir (or MEERKAT_KB_DIR) at a content-repo
+directory (the layout content-source.yaml describes and 'mk ingest'
+writes into) to serve updated content without rebuilding the binary —
+the embed remains the fallback when neither is set.
 
 Page IDs are slash-paths from the wiki root without ".md" — e.g.
 "concepts/Some-Concept", "systems/backend/some-service".
@@ -87,6 +97,12 @@ meerkat
 - `update` — Check for or install meerkat updates
 - `version` — Print version information
 
+**Flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
+```
+
 **Examples**
 
 ```sh
@@ -95,6 +111,10 @@ meerkat
   meerkat show concepts/Some-Concept
   meerkat list --prefix systems/backend/
   meerkat list --category policies --status placeholder
+
+  # Serve content from disk instead of the embedded build
+  meerkat --kb-dir ./meerkat-kb search "some term"
+  MEERKAT_KB_DIR=./meerkat-kb meerkat list
 ```
 
 ---
@@ -115,6 +135,12 @@ meerkat http
 **Subcommands**
 
 - `serve` — Serve the meerkat KB tools over HTTP/JSON with bearer auth
+
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
+```
 
 ---
 
@@ -151,6 +177,12 @@ meerkat http serve [flags]
       --api-key string   Static bearer token. Required (or set MEERKAT_API_KEY).
       --host string      Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
       --port int         Bind port (default 4004)
+```
+
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
 ```
 
 ---
@@ -203,6 +235,12 @@ meerkat ingest [flags]
       --workdir-kb string              Content working copy to write to. Overrides the source resolved from content-source.yaml.
 ```
 
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
+```
+
 ---
 
 ### `meerkat ingest sources`
@@ -221,6 +259,12 @@ meerkat ingest sources [flags]
 
 ```
       --json   Output as JSON
+```
+
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
 ```
 
 ---
@@ -255,6 +299,12 @@ meerkat list [flags]
       --status string     Only pages with this frontmatter status
 ```
 
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
+```
+
 ---
 
 ### `meerkat mcp`
@@ -285,6 +335,12 @@ meerkat mcp
 
 - `serve` — Serve the meerkat KB tools over MCP/stdio
 
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
+```
+
 ---
 
 ### `meerkat mcp serve`
@@ -304,6 +360,12 @@ The server runs until stdin closes or it receives SIGINT/SIGTERM.
 
 ```
 meerkat mcp serve
+```
+
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
 ```
 
 ---
@@ -337,6 +399,12 @@ meerkat search <query> [flags]
       --limit int   Maximum number of results (default 10)
 ```
 
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
+```
+
 ---
 
 ### `meerkat show`
@@ -361,6 +429,12 @@ meerkat show <page-id> [flags]
 
 ```
       --json   Output as JSON (page metadata + body)
+```
+
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
 ```
 
 ---
@@ -402,6 +476,12 @@ meerkat update [flags]
   -y, --yes              Skip the confirmation prompt.
 ```
 
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
+```
+
 ---
 
 ### `meerkat version`
@@ -418,6 +498,12 @@ meerkat version [flags]
 
 ```
       --json   Output as JSON
+```
+
+**Inherited flags**
+
+```
+      --kb-dir string   Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring.
 ```
 
 ---

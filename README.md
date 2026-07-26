@@ -92,7 +92,9 @@ mk update               # download + verified swap
 > any other host) has no credential borrowing — use a full clone URL / SSH
 > spec, or your normal git credential configuration, for private access.
 > `make build` runs `make sync`, which reads this file and populates the
-> embed dirs before compiling.
+> embed dirs before compiling. To update content **without** rebuilding, see
+> ["Serving content at runtime (`--kb-dir`)"](#serving-content-at-runtime---kb-dir)
+> below.
 
 ```bash
 # Knowledge base (offline, always available)
@@ -202,6 +204,60 @@ The Go binary ships **without LLM credentials**. The actual model calls happen
 inside `opencode run` subprocess sessions, which inherit the user's OpenCode
 config (model providers, MCP server connections, etc).
 
+## Serving content at runtime (`--kb-dir`)
+
+By default the wiki is embedded at build time (see ["Use"](#use) above), so
+picking up new content means rebuilding. `--kb-dir <path>` (or
+`MEERKAT_KB_DIR`) points meerkat at a directory on disk instead — `mk
+search`/`show`/`list` then serve that content directly, no rebuild required:
+
+```bash
+mk --kb-dir ./meerkat-kb search "rate limiting"
+MEERKAT_KB_DIR=./meerkat-kb mk list
+```
+
+Precedence: `--kb-dir` flag, then `MEERKAT_KB_DIR`, then the embedded
+content (the fallback when neither is set — the single-self-contained-binary
+property is unchanged when no directory is configured).
+
+The directory uses the **content-repo layout** — the same layout
+`content-source.yaml` describes and `mk ingest` writes into — not the
+internal embed layout:
+
+```
+meerkat-kb/
+├── wiki/                       # markdown pages
+│   ├── index.md
+│   └── concepts/
+│       └── widgets.md
+├── ingestion/
+│   ├── sources.yaml            # source registry
+│   └── prompts/
+│       └── general.md          # per-source sub-agent prompts
+└── templates/
+    └── default.md               # page templates
+```
+
+Because this is the same layout `mk ingest --execute` commits into, pointing
+`--kb-dir` at a working copy of your content repo means ingest output
+becomes visible with no rebuild between ingesting a page and searching it.
+
+A `--kb-dir` that doesn't exist is a hard error (exit 1). A directory that
+exists but is missing `wiki/`, `ingestion/`, or `templates/` degrades to
+empty for the missing piece — same as the public build's zero-content embed.
+
+**Limitation:** custom `layout:` overrides in `content-source.yaml` (see
+[docs/design/content-sources.md](docs/design/content-sources.md)) are not
+honoured at runtime yet — `--kb-dir`/`MEERKAT_KB_DIR` only understand the
+defaults shown above. A content repo with a non-default layout will look
+empty through `--kb-dir`.
+
+`mk version` reports which content is actually being served via the
+`kb_source` field (`embedded` or `disk:<path>`). `kb_commit` is unchanged by
+`--kb-dir` — it always names the build-time embedded content's commit, never
+the runtime directory. See [docs/SECURITY.md](docs/SECURITY.md) for what
+that split means for provenance.
+
 ## How search works
 
 Bleve full-text BM25 index, built in-memory at startup from the embedded
@@ -282,6 +338,7 @@ make build
 cmd/meerkat/main.go         entrypoint
 internal/
   kb/         Page + Frontmatter, //go:embed all:content
+  kbdir/      resolves --kb-dir/MEERKAT_KB_DIR, adapts it onto kb/sources
   search/     Bleve in-memory BM25 index
   sources/    embeds sources.yaml + prompts + templates
   ingest/     Plan(opts) + Run(ctx, tasks) — planner + executor
