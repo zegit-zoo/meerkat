@@ -1,0 +1,401 @@
+package contentsource
+
+import (
+	"errors"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// --- config / validate ---
+
+func TestLoad_MissingFileIsNone(t *testing.T) {
+	cfg, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Content.Type != TypeNone {
+		t.Errorf("missing config -> type %q, want none", cfg.Content.Type)
+	}
+}
+
+func TestLoad_AppliesLayoutDefaults(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, ConfigFile), "content:\n  type: local\n  path: ./kb\n")
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	l := cfg.Content.Layout
+	if l.Wiki != "wiki" || l.Sources != "ingestion/sources.yaml" || l.Prompts != "ingestion/prompts" || l.Templates != "templates" {
+		t.Errorf("layout defaults not applied: %+v", l)
+	}
+}
+
+func TestValidate_Errors(t *testing.T) {
+	cases := map[string]Source{
+		"bad type":       {Type: "ftp", Layout: defaultLayout()},
+		"local no path":  {Type: TypeLocal, Layout: defaultLayout()},
+		"git no repo":    {Type: TypeGit, Ref: "v1", Layout: defaultLayout()},
+		"git no ref":     {Type: TypeGit, Repo: "o/r", Layout: defaultLayout()},
+		"git bad host":   {Type: TypeGit, Repo: "o/r", Ref: "v1", Host: "bitbucket", Layout: defaultLayout()},
+		"submodule none": {Type: TypeSubmodule, Layout: defaultLayout()},
+	}
+	for name, s := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := s.Validate(); err == nil {
+				t.Errorf("expected validation error for %q", name)
+			}
+		})
+	}
+}
+
+func TestValidate_OK(t *testing.T) {
+	for _, s := range []Source{
+		{Type: TypeNone},
+		{Type: TypeLocal, Path: "kb", Layout: defaultLayout()},
+		{Type: TypeGit, Repo: "o/r", Ref: "v1", Host: "github", Layout: defaultLayout()},
+		{Type: TypeSubmodule, Submodule: "kb", Layout: defaultLayout()},
+	} {
+		if err := s.Validate(); err != nil {
+			t.Errorf("type %s: unexpected error %v", s.Type, err)
+		}
+	}
+}
+
+func TestMovingRef(t *testing.T) {
+	pinned := []string{"v1.2.0", "1.2.3", "0a1b2c3", "0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b"}
+	moving := []string{"", "main", "develop", "release-candidate"}
+	for _, r := range pinned {
+		if MovingRef(r) {
+			t.Errorf("MovingRef(%q) = true, want false (pinned)", r)
+		}
+	}
+	for _, r := range moving {
+		if !MovingRef(r) {
+			t.Errorf("MovingRef(%q) = false, want true (moving)", r)
+		}
+	}
+}
+
+// --- sync: none ---
+
+func TestSync_None_NoOp(t *testing.T) {
+	root := newRepo(t)
+	stale := filepath.Join(root, destContent, "stale.md")
+	write(t, stale, "leftover")
+	// No content-source.yaml -> none -> must not touch the embed dirs.
+	commit, err := Sync(root, io.Discard)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if commit != "none" {
+		t.Errorf("commit = %q, want none", commit)
+	}
+	if !exists(stale) {
+		t.Error("none sync must not delete existing content")
+	}
+	if got := readStamp(t, root); got != "none" {
+		t.Errorf("stamp = %q, want none", got)
+	}
+}
+
+// --- sync: local ---
+
+func TestSync_Local(t *testing.T) {
+	root := newRepo(t)
+	srcBase := filepath.Join(t.TempDir(), "kb")
+	writeFixtureContent(t, srcBase)
+	// A stale page that must be cleaned out.
+	write(t, filepath.Join(root, destContent, "old", "stale.md"), "stale")
+
+	writeConfig(t, root, "content:\n  type: local\n  path: "+srcBase+"\n")
+
+	commit, err := Sync(root, io.Discard)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if !strings.HasPrefix(commit, "local") {
+		t.Errorf("commit = %q, want local prefix", commit)
+	}
+	// wiki copied (with subdirs), stale removed, placeholder kept.
+	assertExists(t, filepath.Join(root, destContent, "concepts", "rate-limiting.md"))
+	assertExists(t, filepath.Join(root, destContent, "index.md"))
+	assertExists(t, filepath.Join(root, destContent, ".gitkeep"))
+	if exists(filepath.Join(root, destContent, "old", "stale.md")) {
+		t.Error("stale .md should have been cleaned before copy")
+	}
+	// sources/prompts/templates copied.
+	assertExists(t, filepath.Join(root, destEtc, "sources.yaml"))
+	assertExists(t, filepath.Join(root, destEtc, "prompts", "general.md"))
+	assertExists(t, filepath.Join(root, destEtc, "templates", "default.md"))
+	assertExists(t, filepath.Join(root, destEtc, ".gitkeep"))
+}
+
+func TestSync_Local_MissingPathErrors(t *testing.T) {
+	root := newRepo(t)
+	writeConfig(t, root, "content:\n  type: local\n  path: /no/such/dir\n")
+	if _, err := Sync(root, io.Discard); err == nil {
+		t.Error("expected error for a missing local path")
+	}
+}
+
+// --- sync: git (local file:// repo, hermetic) ---
+
+func TestSync_Git_LocalRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	// Redirect the content cache to a temp dir on both Linux and macOS.
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("HOME", cache)
+
+	// Build a real git repo with fixture content + a tag.
+	gitsrc := filepath.Join(t.TempDir(), "kbrepo")
+	writeFixtureContent(t, gitsrc)
+	gitInit(t, gitsrc)
+
+	root := newRepo(t)
+	writeConfig(t, root, "content:\n  type: git\n  repo: file://"+gitsrc+"\n  ref: v0.0.1\n")
+
+	commit, err := Sync(root, io.Discard)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if commit == "" || commit == "git" {
+		t.Errorf("expected a resolved commit SHA, got %q", commit)
+	}
+	assertExists(t, filepath.Join(root, destContent, "concepts", "rate-limiting.md"))
+	assertExists(t, filepath.Join(root, destEtc, "sources.yaml"))
+	if got := readStamp(t, root); got != commit {
+		t.Errorf("stamp %q != returned commit %q", got, commit)
+	}
+}
+
+// --- git auth: token never in argv, always scrubbed from the persisted remote ---
+
+// TestCloneURL_NeverCarriesCredentials: the persisted-remote URL is always
+// plain — no username, no token — regardless of Host.
+func TestCloneURL_NeverCarriesCredentials(t *testing.T) {
+	for _, s := range []Source{
+		{Repo: "o/r", Host: "github"},
+		{Repo: "o/r", Host: "gitlab"},
+		{Repo: "o/r"}, // default host
+	} {
+		got := cloneURL(s)
+		if strings.Contains(got, "@") {
+			t.Errorf("cloneURL(%+v) = %q, want no embedded credentials", s, got)
+		}
+	}
+	// A full URL/SSH spec in Repo is used verbatim (caller's own auth).
+	if got := cloneURL(Source{Repo: "git@host:o/r.git"}); got != "git@host:o/r.git" {
+		t.Errorf("cloneURL passthrough = %q", got)
+	}
+}
+
+// TestAuthClone_GitLab_NeverBorrowsCredentials: token borrowing is
+// GitHub-only. host: gitlab must always get the plain tokenless URL and
+// no extra git args/env, regardless of any locally cached credentials —
+// GitLab access relies on anonymous fetch or the user's own git
+// credential configuration, never on meerkat borrowing anything.
+func TestAuthClone_GitLab_NeverBorrowsCredentials(t *testing.T) {
+	url, args, env := authClone(Source{Repo: "o/r", Host: "gitlab"})
+	if url != "https://gitlab.com/o/r.git" {
+		t.Errorf("url = %q", url)
+	}
+	if len(args) != 0 || len(env) != 0 {
+		t.Errorf("expected no extra git args/env for gitlab, got args=%v env=%v", args, env)
+	}
+}
+
+// TestAuthClone_GitHub_NoToken_FallsBackToPlainURL: with no cached gh
+// token (the common case once meerkat's own repo is public), authClone
+// must still hand back a usable, tokenless URL and no extra git args/env.
+func TestAuthClone_GitHub_NoToken_FallsBackToPlainURL(t *testing.T) {
+	orig := resolveGitHubToken
+	defer func() { resolveGitHubToken = orig }()
+	resolveGitHubToken = func() (string, error) {
+		return "", errors.New("not logged into github.com")
+	}
+
+	url, args, env := authClone(Source{Repo: "o/r", Host: "github"})
+	if url != "https://github.com/o/r.git" {
+		t.Errorf("url = %q", url)
+	}
+	if len(args) != 0 || len(env) != 0 {
+		t.Errorf("expected no extra git args/env without a cached token, got args=%v env=%v", args, env)
+	}
+}
+
+// TestAuthClone_GitHub_WithToken_KeepsTokenOutOfURLAndArgv proves the
+// actual security property: when a gh token IS cached, it shows up only
+// in the returned env slice, never in the URL or the git args slice (the
+// two things that end up on argv / in .git/config).
+func TestAuthClone_GitHub_WithToken_KeepsTokenOutOfURLAndArgv(t *testing.T) {
+	orig := resolveGitHubToken
+	defer func() { resolveGitHubToken = orig }()
+	resolveGitHubToken = func() (string, error) {
+		return "ghs_supersecrettoken", nil
+	}
+
+	url, args, env := authClone(Source{Repo: "o/r", Host: "github"})
+	if strings.Contains(url, "ghs_supersecrettoken") {
+		t.Fatalf("token leaked into URL: %q", url)
+	}
+	if url != "https://x-access-token@github.com/o/r.git" {
+		t.Errorf("url = %q, want a plain (secret-free) username@host form", url)
+	}
+	for _, a := range args {
+		if strings.Contains(a, "ghs_supersecrettoken") {
+			t.Fatalf("token leaked into git args (argv): %v", args)
+		}
+	}
+	foundInEnv := false
+	for _, e := range env {
+		if e == "MEERKAT_GIT_TOKEN=ghs_supersecrettoken" {
+			foundInEnv = true
+		}
+	}
+	if !foundInEnv {
+		t.Errorf("expected token in env, got %v", env)
+	}
+}
+
+// TestCredentialHelperScript_SuppliesTokenViaEnv is an end-to-end check of
+// the actual git plumbing: invoking `git credential fill` with our -c
+// credential.helper arg and MEERKAT_GIT_TOKEN in the environment (exactly
+// as resolveGit does for clone/fetch) must resolve to the right password,
+// proving the mechanism works and that the token only ever needs to travel
+// through the environment, never through a command-line argument.
+func TestCredentialHelperScript_SuppliesTokenViaEnv(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	cmd := exec.Command("git", "-c", "credential.helper="+credentialHelperScript, "credential", "fill")
+	cmd.Env = append(os.Environ(), "MEERKAT_GIT_TOKEN=glpat-supersecrettoken")
+	cmd.Stdin = strings.NewReader("protocol=https\nhost=gitlab.com\nusername=oauth2\n\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git credential fill: %v", err)
+	}
+	if !strings.Contains(string(out), "password=glpat-supersecrettoken") {
+		t.Errorf("credential fill output = %q, want it to contain the password from env", out)
+	}
+}
+
+// --- working copy + branch derivation ---
+
+func TestResolvedBranch(t *testing.T) {
+	nonRepo := t.TempDir() // git calls fail -> fall through
+	if b := (Source{Ref: "v1.2.0"}).resolvedBranch(nonRepo); b != "main" {
+		t.Errorf("tag ref -> %q, want main", b)
+	}
+	if b := (Source{Ref: "develop"}).resolvedBranch(nonRepo); b != "develop" {
+		t.Errorf("branch-like ref -> %q, want develop", b)
+	}
+	if b := (Source{Branch: "release", Ref: "v1.0.0"}).resolvedBranch(nonRepo); b != "release" {
+		t.Errorf("explicit branch -> %q, want release", b)
+	}
+}
+
+func TestResolveWorkingCopy_NoneErrors(t *testing.T) {
+	if _, err := ResolveWorkingCopy(t.TempDir(), io.Discard); err == nil {
+		t.Error("expected error for a none/absent source")
+	}
+}
+
+func TestResolveWorkingCopy_Local(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(t.TempDir(), "kb")
+	writeFixtureContent(t, src)
+	writeConfig(t, root, "content:\n  type: local\n  path: "+src+"\n")
+	wc, err := ResolveWorkingCopy(root, io.Discard)
+	if err != nil {
+		t.Fatalf("ResolveWorkingCopy: %v", err)
+	}
+	if wc.Path != src {
+		t.Errorf("path = %q, want %q", wc.Path, src)
+	}
+	if wc.WikiDir != "wiki" {
+		t.Errorf("wikiDir = %q, want wiki", wc.WikiDir)
+	}
+	if wc.Branch == "" {
+		t.Error("branch should not be empty")
+	}
+}
+
+// --- helpers ---
+
+func newRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	write(t, filepath.Join(root, destContent, ".gitkeep"), "")
+	write(t, filepath.Join(root, destEtc, ".gitkeep"), "")
+	return root
+}
+
+func writeFixtureContent(t *testing.T, base string) {
+	t.Helper()
+	write(t, filepath.Join(base, "wiki", "index.md"), "---\nid: index\ntitle: Index\n---\nhome")
+	write(t, filepath.Join(base, "wiki", "concepts", "rate-limiting.md"), "---\nid: concepts/rate-limiting\ntitle: Rate Limiting\ncategory: concepts\n---\nthrottle")
+	write(t, filepath.Join(base, "ingestion", "sources.yaml"), "sources: []\n")
+	write(t, filepath.Join(base, "ingestion", "prompts", "general.md"), "# Instructions\n")
+	write(t, filepath.Join(base, "templates", "default.md"), "---\n---\n")
+}
+
+func gitInit(t *testing.T, dir string) {
+	t.Helper()
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	run("config", "user.email", "t@e")
+	run("config", "user.name", "t")
+	run("add", ".")
+	run("commit", "-q", "-m", "fixture")
+	run("tag", "v0.0.1")
+}
+
+func write(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeConfig(t *testing.T, root, body string) {
+	t.Helper()
+	write(t, filepath.Join(root, ConfigFile), body)
+}
+
+func readStamp(t *testing.T, root string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, StampFile))
+	if err != nil {
+		t.Fatalf("read stamp: %v", err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func exists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+func assertExists(t *testing.T, p string) {
+	t.Helper()
+	if !exists(p) {
+		t.Errorf("expected file to exist: %s", p)
+	}
+}

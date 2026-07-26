@@ -1,0 +1,31 @@
+# Build output
+bin/
+
+# Embedded content is synced from kb/ submodule at build time;
+# never commit the synced copy. The dirs are kept in repo via
+# .gitkeep so //go:embed has something to attach to.
+internal/kb/content/*
+!internal/kb/content/.gitkeep
+internal/sources/etc/*
+!internal/sources/etc/.gitkeep
+!internal/sources/etc/prompts/.gitkeep
+!internal/sources/etc/templates/.gitkeep
+
+# Test/coverage artefacts. Listed explicitly so goreleaser's
+# dirty-state check passes at release.
+/coverage.out
+/coverage.xml
+
+# Generated at build time by gen-third-party-licenses.go (wired into
+# .goreleaser.yaml's before.hooks); not committed since it's derived
+# from go.sum and regenerated on every build/release.
+/THIRD-PARTY-LICENSES.txt
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*~
+/dist/
+
+# content-source sync provenance stamp (written by `make sync`)
+.meerkat-content-stamp

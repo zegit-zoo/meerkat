@@ -1,0 +1,57 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosec
+    - misspell
+    - unconvert
+    - unparam
+    - prealloc
+    - whitespace
+    - bodyclose
+  settings:
+    gosec:
+      severity: low
+      confidence: low
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+          - prealloc
+          - unparam
+      - linters: [errcheck]
+        text: "Error return value of .*(Write|Close|Setenv|Unsetenv|Remove|RemoveAll|MkdirAll|Fprintf|Fprintln|Fprint|Chdir).* is not checked"
+      - linters: [staticcheck]
+        text: "QF1003:|SA9003:"
+      # internal/update, internal/ingest and internal/auth are by-design system
+      # tools: they read user/release-specified paths (G304), shell out to fixed
+      # external commands (G204), extract meerkat's own cosign-verified release
+      # tarball (G110), and write cache/backup files at readable perms
+      # (G104/G301/G306). meerkat's standalone gosec already treated
+      # G304/G302/G306 here as intentional; these are the same calls.
+      - linters: [gosec]
+        text: "G104:|G110:|G204:|G301:|G304:|G306:"
+        path: "internal/(update|ingest|auth)/"
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/zegit-zoo/meerkat

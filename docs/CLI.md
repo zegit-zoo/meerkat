@@ -1,0 +1,424 @@
+# meerkat CLI reference
+
+Auto-generated from the cobra command tree.
+Do NOT edit by hand — run `make docs` to regenerate.
+
+Source of truth: `internal/cli/*.go`. Source generator: `internal/clidocs/clidocs.go`.
+
+## Synopsis
+
+```
+Meerkat embeds a knowledge-base wiki and exposes it via
+CLI subcommands, an MCP server (for agent harnesses / OpenCode), and an
+HTTP/OpenAPI server (for OpenWebUI).
+
+All wiki content is bundled into the binary at build time. No
+network access is required for search, show, or list. Live
+sub-commands (planned: ingest, mcp serve, http serve) layer on top.
+
+Page IDs are slash-paths from the wiki root without ".md" — e.g.
+"concepts/Some-Concept", "systems/backend/some-service".
+
+Short alias: 'mk' (installed as a symlink alongside meerkat).
+```
+
+## Examples
+
+```sh
+# Knowledge base (offline)
+  meerkat search "some term"
+  meerkat show concepts/Some-Concept
+  meerkat list --prefix systems/backend/
+  meerkat list --category policies --status placeholder
+```
+
+## Commands
+
+### Knowledge base (always available, offline)
+
+- [`meerkat list`](#meerkat-list) — List wiki pages, optionally filtered
+- [`meerkat search`](#meerkat-search) — Full-text search across the embedded wiki
+- [`meerkat show`](#meerkat-show) — Print a single wiki page
+
+### Servers
+
+- [`meerkat http`](#meerkat-http) — Run an HTTP/OpenAPI server
+- [`meerkat mcp`](#meerkat-mcp) — Run an MCP (Model Context Protocol) server
+
+### Operations
+
+- [`meerkat ingest`](#meerkat-ingest) — Plan and execute ingestion of placeholder KB pages
+- [`meerkat update`](#meerkat-update) — Check for or install meerkat updates
+- [`meerkat version`](#meerkat-version) — Print version information
+
+## Reference
+
+### `meerkat`
+
+Meerkat — the vigilant guard and informer (knowledge-base CLI)
+
+Meerkat embeds a knowledge-base wiki and exposes it via
+CLI subcommands, an MCP server (for agent harnesses / OpenCode), and an
+HTTP/OpenAPI server (for OpenWebUI).
+
+All wiki content is bundled into the binary at build time. No
+network access is required for search, show, or list. Live
+sub-commands (planned: ingest, mcp serve, http serve) layer on top.
+
+Page IDs are slash-paths from the wiki root without ".md" — e.g.
+"concepts/Some-Concept", "systems/backend/some-service".
+
+Short alias: 'mk' (installed as a symlink alongside meerkat).
+
+**Usage**
+
+```
+meerkat
+```
+
+**Subcommands**
+
+- `http` — Run an HTTP/OpenAPI server
+- `ingest` — Plan and execute ingestion of placeholder KB pages
+- `list` — List wiki pages, optionally filtered
+- `mcp` — Run an MCP (Model Context Protocol) server
+- `search` — Full-text search across the embedded wiki
+- `show` — Print a single wiki page
+- `update` — Check for or install meerkat updates
+- `version` — Print version information
+
+**Examples**
+
+```sh
+# Knowledge base (offline)
+  meerkat search "some term"
+  meerkat show concepts/Some-Concept
+  meerkat list --prefix systems/backend/
+  meerkat list --category policies --status placeholder
+```
+
+---
+
+### `meerkat http`
+
+Run an HTTP/OpenAPI server
+
+Serve the meerkat KB over HTTP for OpenWebUI tool servers and
+similar clients. The endpoint surface mirrors MCP 1:1.
+
+**Usage**
+
+```
+meerkat http
+```
+
+**Subcommands**
+
+- `serve` — Serve the meerkat KB tools over HTTP/JSON with bearer auth
+
+---
+
+### `meerkat http serve`
+
+Serve the meerkat KB tools over HTTP/JSON with bearer auth
+
+Run an HTTP/OpenAPI server. Endpoints:
+
+  POST /search        full-text search
+  POST /show          retrieve one page (body + frontmatter)
+  POST /list          enumerate pages with filters
+  GET  /openapi.json  schema (no auth)
+  GET  /healthz       liveness (no auth)
+
+Authentication: all data endpoints require an Authorization: Bearer
+header carrying the configured API key. The key is supplied via
+--api-key or the MEERKAT_API_KEY env var (env wins if both set).
+The server refuses to start without a key — there is no anonymous
+mode.
+
+Register http://<host>:<port>/openapi.json with OpenWebUI as a Tool
+Server.
+
+**Usage**
+
+```
+meerkat http serve [flags]
+```
+
+**Flags**
+
+```
+      --api-key string   Static bearer token. Required (or set MEERKAT_API_KEY).
+      --host string      Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
+      --port int         Bind port (default 4004)
+```
+
+---
+
+### `meerkat ingest`
+
+Plan and execute ingestion of placeholder KB pages
+
+Drive Meerkat's ingestion pipeline.
+
+The default behaviour is plan-only: print the JSONL batch that
+would be executed. Add --execute to spawn one opencode session
+per page (the actual ingestion).
+
+Examples:
+  mk ingest --source policies               # plan only, all stale policy pages
+  mk ingest --source policies --execute     # run them
+  mk ingest --page concepts/Rate-Limiting --execute
+  mk ingest --execute --max-parallel 4      # everything stale, 4-wide
+  mk ingest --batch-file batch.jsonl        # plan to file, no execute
+
+**Usage**
+
+```
+meerkat ingest [flags]
+```
+
+**Subcommands**
+
+- `sources` — List the embedded ingestion source registry
+
+**Flags**
+
+```
+      --batch-file string              Plan-only: write the JSONL batch to this file instead of stdout.
+      --branch string                  Push target branch. Overrides the branch derived from content-source.yaml.
+      --dry-run                        With --execute, print the planned commands without running them.
+      --execute                        Actually run the tasks (otherwise plan-only).
+      --executor string                Agent CLI to run each page: opencode | claude. (default "opencode")
+      --max-consecutive-failures int   Stop the executor after this many consecutive failures (0 = never auto-stop).
+      --max-parallel int               Max concurrent opencode sessions when --execute (default 1). (default 1)
+      --model string                   Model override (default: openai/gpt-5.5-fast or per-source override in sources.yaml).
+      --page string                    Plan exactly one page (e.g. 'concepts/Rate-Limiting' or 'wiki/policies/foo.md'). Overrides --source/--statuses.
+      --reverse                        Process tasks in reverse ID order. Useful when running a second batch alongside a forward one — collisions skip cheaply because the executor checks page status before spawning opencode.
+      --source string                  Restrict to one source id from sources.yaml (e.g. policies, adr, runbooks).
+      --status strings                 Restrict to pages with these frontmatter statuses (default: placeholder,ingest-failed).
+      --subagent string                OpenCode subagent type (default: general).
+      --trust-sources                  Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged.
+      --wall-clock-cap int             Per-page wall-clock cap in seconds. (default 300)
+      --workdir-kb string              Content working copy to write to. Overrides the source resolved from content-source.yaml.
+```
+
+---
+
+### `meerkat ingest sources`
+
+List the embedded ingestion source registry
+
+Print every source from the embedded sources.yaml.
+
+**Usage**
+
+```
+meerkat ingest sources [flags]
+```
+
+**Flags**
+
+```
+      --json   Output as JSON
+```
+
+---
+
+### `meerkat list`
+
+List wiki pages, optionally filtered
+
+List pages embedded in this meerkat binary.
+
+Filters compose (AND):
+  --prefix    page ID prefix, e.g. "systems/backend/"
+  --category  frontmatter 'category' field, e.g. "policies"
+  --status    frontmatter 'status' field, e.g. "placeholder", "reviewed"
+  --owner     frontmatter 'owner' field, e.g. "team-payments"
+
+Default output is "id  title  status". --json adds frontmatter.
+
+**Usage**
+
+```
+meerkat list [flags]
+```
+
+**Flags**
+
+```
+      --category string   Only pages with this frontmatter category
+      --json              Output as JSON (includes frontmatter)
+      --owner string      Only pages with this frontmatter owner
+      --prefix string     Only pages whose ID starts with this prefix
+      --status string     Only pages with this frontmatter status
+```
+
+---
+
+### `meerkat mcp`
+
+Run an MCP (Model Context Protocol) server
+
+Manage MCP servers exposing the meerkat KB.
+
+Wire into OpenCode by adding to ~/.config/opencode/opencode.json:
+
+  {
+    "mcp": {
+      "meerkat": {
+        "type": "local",
+        "command": ["mk", "mcp", "serve"],
+        "enabled": true
+      }
+    }
+  }
+
+**Usage**
+
+```
+meerkat mcp
+```
+
+**Subcommands**
+
+- `serve` — Serve the meerkat KB tools over MCP/stdio
+
+---
+
+### `meerkat mcp serve`
+
+Serve the meerkat KB tools over MCP/stdio
+
+Run a Model Context Protocol server on stdio. Exposes:
+
+  mk_search  - full-text search across the embedded KB
+  mk_show    - retrieve one page by ID (returns body + frontmatter)
+  mk_list    - list pages, optionally filtered (prefix/category/status/owner)
+
+Designed to be spawned by an MCP client (OpenCode, Claude Desktop, etc.).
+The server runs until stdin closes or it receives SIGINT/SIGTERM.
+
+**Usage**
+
+```
+meerkat mcp serve
+```
+
+---
+
+### `meerkat search`
+
+Full-text search across the embedded wiki
+
+Run a BM25 full-text search over every embedded wiki page.
+
+Title and ID matches are boosted so page-name lookups (e.g. "FAM-Guide",
+"PowerGrid") rank above incidental body mentions.
+
+Examples:
+  btkb search "crispy agent"
+  btkb search "PGS PLC password"
+  btkb search title:eviction        # field-targeted query
+  btkb search "30 minute" --limit 20
+
+**Usage**
+
+```
+meerkat search <query> [flags]
+```
+
+**Flags**
+
+```
+      --body        Print the full body of every hit
+      --json        Output results as JSON
+      --limit int   Maximum number of results (default 10)
+```
+
+---
+
+### `meerkat show`
+
+Print a single wiki page
+
+Print the raw markdown for a single wiki page.
+
+Page IDs are slash-separated paths from the wiki root, without the .md
+suffix. Examples:
+  btkb show index
+  btkb show concepts/PowerGrid
+  btkb show systems/BAF/access
+
+**Usage**
+
+```
+meerkat show <page-id> [flags]
+```
+
+**Flags**
+
+```
+      --json   Output as JSON (page metadata + body)
+```
+
+---
+
+### `meerkat update`
+
+Check for or install meerkat updates
+
+Check the GitHub Releases page for newer meerkat versions and,
+unless --check is given, download + atomically swap the binary
++ re-exec.
+
+The repository is public, so this works with no authentication at
+all. If you've run 'gh auth login', meerkat borrows the cached
+token from gh's OAuth credential cache and sends it for the higher
+authenticated GitHub API rate limit — there are no PATs to paste
+either way.
+
+Examples:
+  mk update --check                  # just print latest version
+  mk update                          # interactive: prompt before swap
+  mk update --yes                    # download + swap without prompt
+  mk update --version v0.4.0         # pin to a specific tag
+  mk update --force                  # downgrade or re-install same
+
+**Usage**
+
+```
+meerkat update [flags]
+```
+
+**Flags**
+
+```
+      --check            Just report the latest version; don't download or install.
+      --force            Re-install even if already on the target version (downgrade-friendly).
+      --skip-cosign      Skip cosign signature verification (NOT recommended — sha256-only).
+      --version string   Install a specific tag (e.g. v0.4.0) instead of latest.
+  -y, --yes              Skip the confirmation prompt.
+```
+
+---
+
+### `meerkat version`
+
+Print version information
+
+**Usage**
+
+```
+meerkat version [flags]
+```
+
+**Flags**
+
+```
+      --json   Output as JSON
+```
+
+---
+

@@ -1,0 +1,43 @@
+# content-source.example.yaml
+#
+# Copy to `content-source.yaml` (gitignored or committed per deployment) to
+# tell `make sync` where to pull embeddable knowledge-base content from before
+# the build embeds it. See docs/design/content-sources.md.
+#
+# Absent file, or type: none -> build with the committed empty placeholders
+# (the open-source default; the public repo ships no content-source.yaml).
+#
+# Credentials: `local` needs none at all — this is the default for most
+# users, who build from their own knowledge-base directory on disk. A
+# private GitHub repo (type: git, host: github) will automatically use a
+# cached `gh` CLI token if one is present — nothing to configure. GitLab (or
+# any other host) has no credential borrowing built in: give it a full clone
+# URL / SSH spec, or rely on your normal git credential configuration
+# (credential helper, SSH agent, etc.) for private access.
+
+content:
+  # type: none | local | git | submodule
+  type: local
+
+  # --- type: local ---------------------------------------------------------
+  # The default: build from a local content directory, no credentials of
+  # any kind required. Most users build from source with their own
+  # knowledge-base material, so this is the happy path.
+  path: ../meerkat-kb            # content root, relative to repo root or absolute
+
+  # --- type: git -----------------------------------------------------------
+  # repo: your-org/meerkat-kb        # owner/repo slug (with host below), or a full clone URL
+  # host: github                     # github | gitlab — github gets a cached gh token automatically;
+  #                                   # gitlab (or any other host) relies on your own git credentials
+  # ref: v1.2.0                      # tag or commit SHA (pin for reproducible builds; a branch warns)
+
+  # --- type: submodule -------------------------------------------------------
+  # submodule: kb                  # path of the content submodule (legacy default)
+
+  # Layout: where each artifact lives WITHIN the resolved source.
+  # Defaults shown; override only if your content repo differs.
+  layout:
+    wiki:      wiki                  # markdown pages    -> internal/kb/content/
+    sources:   ingestion/sources.yaml # source registry  -> internal/sources/etc/sources.yaml
+    prompts:   ingestion/prompts     # per-source prompts -> internal/sources/etc/prompts/
+    templates: templates             # page templates    -> internal/sources/etc/templates/

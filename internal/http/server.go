@@ -1,0 +1,372 @@
+// Package http exposes the embedded knowledge base over an
+// HTTP/JSON API designed to be consumed by OpenWebUI tool servers
+// and similar clients.
+//
+// The endpoint surface mirrors the MCP tool set 1:1 so that an
+// OpenWebUI tool definition matches what an MCP client sees:
+//
+//	POST /search        body: {"query":"...", "limit":10}        -> [{id,title,score,snippet,category,status}]
+//	POST /show          body: {"id":"concepts/Rate-Limiting"} -> {id,title,body,front}
+//	POST /list          body: {"prefix":"systems/", "category":"systems", "status":"placeholder"} -> [{id,title,category,status,owner,source}]
+//	GET  /openapi.json  OpenAPI 3.1 schema
+//	GET  /healthz       liveness probe (always 200)
+//	GET  /              human-readable banner
+//
+// Authentication: a single static bearer token is required on all
+// endpoints except /healthz and /openapi.json. The token is supplied
+// via --api-key flag or MEERKAT_API_KEY env. The server refuses to
+// start with no key configured (no anonymous mode).
+package http
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/zegit-zoo/meerkat/internal/kb"
+	"github.com/zegit-zoo/meerkat/internal/search"
+)
+
+// Config controls how the HTTP server is constructed. Zero values
+// yield safe defaults except APIKey, which is required.
+type Config struct {
+	// Addr is the bind address ("host:port"). Empty means ":4004".
+	Addr string
+	// APIKey is the static bearer token. Required; the constructor
+	// returns an error if it's empty.
+	APIKey string
+	// ReadTimeout limits how long the server waits for a request
+	// body. Defaults to 10s.
+	ReadTimeout time.Duration
+	// WriteTimeout limits how long the server has to write a
+	// response. Defaults to 30s.
+	WriteTimeout time.Duration
+	// Version is the meerkat version surfaced in /openapi.json and
+	// the root banner. Empty falls back to "dev".
+	Version string
+}
+
+// Server bundles the HTTP server and its in-memory search index so
+// callers can manage lifecycles together.
+type Server struct {
+	cfg Config
+	mux *http.ServeMux
+	srv *http.Server
+	idx *search.Index
+}
+
+// New builds a Server with the search index already populated.
+// Returns an error if APIKey is empty. Caller must call Close to
+// release the index when done.
+func New(cfg Config) (*Server, error) {
+	if cfg.APIKey == "" {
+		return nil, errors.New("APIKey is required (set --api-key or MEERKAT_API_KEY)")
+	}
+	if cfg.Addr == "" {
+		cfg.Addr = ":4004"
+	}
+	if cfg.ReadTimeout == 0 {
+		cfg.ReadTimeout = 10 * time.Second
+	}
+	if cfg.WriteTimeout == 0 {
+		cfg.WriteTimeout = 30 * time.Second
+	}
+	if cfg.Version == "" {
+		cfg.Version = "dev"
+	}
+
+	idx, err := search.New()
+	if err != nil {
+		return nil, fmt.Errorf("build search index: %w", err)
+	}
+
+	s := &Server{cfg: cfg, idx: idx, mux: http.NewServeMux()}
+	s.routes()
+	s.srv = &http.Server{
+		Addr:         cfg.Addr,
+		Handler:      s.mux,
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+	}
+	return s, nil
+}
+
+// Handler exposes the underlying mux for tests.
+func (s *Server) Handler() http.Handler { return s.mux }
+
+// Addr returns the configured listen address (post-default).
+func (s *Server) Addr() string { return s.cfg.Addr }
+
+// ListenAndServe blocks until the server stops. Honours ctx
+// cancellation by issuing a graceful shutdown.
+func (s *Server) ListenAndServe(ctx context.Context) error {
+	errCh := make(chan error, 1)
+	go func() {
+		err := s.srv.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.srv.Shutdown(shutdownCtx)
+		return ctx.Err()
+	case err := <-errCh:
+		return err
+	}
+}
+
+// Close releases the search index. Safe to call multiple times.
+func (s *Server) Close() error {
+	if s.idx == nil {
+		return nil
+	}
+	err := s.idx.Close()
+	s.idx = nil
+	return err
+}
+
+func (s *Server) routes() {
+	s.mux.Handle("POST /search", s.requireAuth(http.HandlerFunc(s.handleSearch)))
+	s.mux.Handle("POST /show", s.requireAuth(http.HandlerFunc(s.handleShow)))
+	s.mux.Handle("POST /list", s.requireAuth(http.HandlerFunc(s.handleList)))
+
+	// Public endpoints — needed by OpenWebUI / health probes.
+	s.mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
+	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /", s.handleRoot)
+}
+
+// requireAuth enforces a constant-time bearer-token comparison.
+func (s *Server) requireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if !strings.HasPrefix(header, prefix) {
+			writeError(w, http.StatusUnauthorized, "missing or malformed Authorization header (expected 'Bearer <key>')")
+			return
+		}
+		got := []byte(strings.TrimPrefix(header, prefix))
+		want := []byte(s.cfg.APIKey)
+		// ConstantTimeCompare requires equal lengths to be useful;
+		// it returns 0 for unequal lengths so the check is safe but
+		// also cheaply rejects different lengths early.
+		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
+			writeError(w, http.StatusUnauthorized, "invalid API key")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// --- request/response payloads -------------------------------
+
+type searchRequest struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+type searchHit struct {
+	ID       string  `json:"id"`
+	Title    string  `json:"title"`
+	Category string  `json:"category"`
+	Status   string  `json:"status"`
+	Score    float64 `json:"score"`
+	Snippet  string  `json:"snippet"`
+}
+
+type showRequest struct {
+	ID string `json:"id"`
+}
+
+type listRequest struct {
+	Prefix   string `json:"prefix,omitempty"`
+	Category string `json:"category,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Owner    string `json:"owner,omitempty"`
+}
+
+type listEntry struct {
+	ID       string    `json:"id"`
+	Title    string    `json:"title"`
+	Category string    `json:"category"`
+	Status   string    `json:"status"`
+	Owner    string    `json:"owner,omitempty"`
+	Source   kb.Source `json:"source,omitempty"`
+}
+
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
+// --- handlers -----------------------------------------------
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	var req searchRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		writeError(w, http.StatusBadRequest, "query is required")
+		return
+	}
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	results, err := s.idx.Query(req.Query, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("search: %v", err))
+		return
+	}
+	out := make([]searchHit, len(results))
+	for i, r := range results {
+		out[i] = searchHit{
+			ID:       r.Page.ID,
+			Title:    r.Page.Title,
+			Category: r.Page.Front.Category,
+			Status:   r.Page.Front.Status,
+			Score:    r.Score,
+			Snippet:  oneLine(r.Snippet),
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
+	var req showRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	page, err := kb.Load(req.ID)
+	if err != nil {
+		if errors.Is(err, kb.ErrNotFound) {
+			writeError(w, http.StatusNotFound,
+				fmt.Sprintf("page %q not found - try POST /list", req.ID))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	var req listRequest
+	if r.ContentLength > 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	pages, err := kb.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if f := kb.ByPrefix(req.Prefix); f != nil {
+		pages = kb.Filter(pages, f)
+	}
+	if req.Category != "" {
+		pages = kb.Filter(pages, kb.ByCategory(req.Category))
+	}
+	if req.Status != "" {
+		pages = kb.Filter(pages, kb.ByStatus(req.Status))
+	}
+	if req.Owner != "" {
+		pages = kb.Filter(pages, kb.ByOwner(req.Owner))
+	}
+	out := make([]listEntry, 0, len(pages))
+	for _, p := range pages {
+		out = append(out, listEntry{
+			ID:       p.ID,
+			Title:    p.Title,
+			Category: p.Front.Category,
+			Status:   p.Front.Status,
+			Owner:    p.Front.Owner,
+			Source:   p.Front.Source,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, openAPISchema(s.cfg.Version))
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "meerkat http server (version %s)\n\n", s.cfg.Version)
+	fmt.Fprintln(w, "Endpoints (require Authorization: Bearer <api-key>):")
+	fmt.Fprintln(w, "  POST /search   body: {\"query\": \"...\", \"limit\": 10}")
+	fmt.Fprintln(w, "  POST /show     body: {\"id\": \"concepts/Rate-Limiting\"}")
+	fmt.Fprintln(w, "  POST /list     body: {\"prefix\": \"systems/\", \"category\": \"...\", \"status\": \"...\"}")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Public endpoints (no auth):")
+	fmt.Fprintln(w, "  GET  /openapi.json")
+	fmt.Fprintln(w, "  GET  /healthz")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Register /openapi.json with OpenWebUI as a Tool Server.")
+}
+
+// --- helpers ------------------------------------------------
+
+func decodeJSON(r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return fmt.Errorf("invalid request body: %w", err)
+	}
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(body)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, errorResponse{Error: msg})
+}
+
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// ResolveListenAddr picks a usable bind string from a host+port pair,
+// returning the same shape http.Server expects.
+func ResolveListenAddr(host string, port int) string {
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	return net.JoinHostPort(host, fmt.Sprintf("%d", port))
+}

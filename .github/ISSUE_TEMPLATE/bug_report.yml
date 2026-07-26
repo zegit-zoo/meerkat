@@ -1,0 +1,41 @@
+name: Bug report
+description: Something in mk is broken
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, what did you expect, what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: version
+    attributes:
+      label: Version
+      description: |
+        Output of `mk version --json`. Paste it verbatim — it carries the
+        version, commit, kb_commit, and os/arch we need to triage.
+      render: json
+      placeholder: |
+        mk version --json
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands, in order.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Command output, stack trace, or logs. Redact anything sensitive.
+      render: shell
+    validations:
+      required: false

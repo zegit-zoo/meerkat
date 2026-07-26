@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport json, sys, re\ntry:\n    d = json.load(sys.stdin)\n    cmd = d.get('command', '')\n    if re.search(r'--no-verify|SKIP=', cmd):\n        print('BLOCKED: --no-verify and SKIP= bypass the pre-commit gate and are prohibited.')\n        print('Fix the failing hook instead.')\n        sys.exit(1)\nexcept Exception:\n    pass\n\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pre-commit run --files $CLAUDE_TOOL_OUTPUT_FILE 2>&1 | head -100"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,138 @@
+version: 2
+
+project_name: meerkat
+
+before:
+  hooks:
+    # Populate the embed dirs from content-source.yaml before compiling.
+    - go run ./internal/contentsync
+    # Regenerate THIRD-PARTY-LICENSES.txt from the modules actually
+    # linked into ./cmd/meerkat (CGO_ENABLED=0, so cgo-only deps like
+    # blevesearch/go-faiss are correctly excluded). Deterministic and
+    # offline: it only reads the module cache `go mod download`
+    # already populated. See gen-third-party-licenses.go.
+    - go run gen-third-party-licenses.go
+
+builds:
+  - id: meerkat
+    main: ./cmd/meerkat
+    binary: meerkat
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/zegit-zoo/meerkat/internal/cli.version={{.Version}}
+      - -X github.com/zegit-zoo/meerkat/internal/cli.commit={{.ShortCommit}}
+      - -X github.com/zegit-zoo/meerkat/internal/cli.date={{.Date}}
+      - -X github.com/zegit-zoo/meerkat/internal/cli.kbCommit={{.Env.KB_COMMIT}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Goreleaser appends .exe automatically when goos is windows,
+    # so the `binary: meerkat` setting above yields meerkat.exe
+    # inside the Windows zip.
+
+archives:
+  - id: default
+    # Default to tar.gz for Unix-y OSes. Windows users expect zip
+    # archives — Expand-Archive is built into PowerShell and works
+    # without extra tooling. format_overrides handles that delta.
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE*
+      - NOTICE
+      - THIRD-PARTY-LICENSES.txt
+      - README.md
+    # Symlink mk -> meerkat at install time. For Unix tarball
+    # users this is documented in docs/INSTALL.md; for Windows
+    # users a copy of meerkat.exe to mk.exe (or a mk.cmd shim)
+    # is recommended in the same doc.
+
+checksum:
+  name_template: '{{ .ProjectName }}_{{ .Version }}_checksums.txt'
+  algorithm: sha256
+
+# SPDX SBOM per artifact via syft (must be on PATH; CI installs it
+# in the release job's before_script). One .sbom.json per archive +
+# one for the source tree.
+sboms:
+  - id: archive
+    artifacts: archive
+    documents:
+      - '${artifact}.sbom.json'
+  - id: source
+    artifacts: source
+    documents:
+      - '{{ .ProjectName }}_{{ .Version }}_source.sbom.json'
+
+# Sign the checksums file (and therefore, transitively, every
+# artifact whose hash is in it) with cosign in keyless mode. The
+# release workflow sets id-token: write so cosign auto-detects the
+# ambient GitHub OIDC token and exchanges it for a Fulcio cert; the
+# signature is logged in Rekor.
+#
+# Verification (consumer side):
+#   cosign verify-blob \
+#     --certificate-identity-regexp '^https://github.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v' \
+#     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+#     --signature meerkat_<v>_checksums.txt.sig \
+#     --certificate meerkat_<v>_checksums.txt.pem \
+#     meerkat_<v>_checksums.txt
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: '${artifact}.sig'
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - '--output-signature=${signature}'
+      - '--output-certificate=${certificate}'
+      - '${artifact}'
+      - '--yes'
+
+snapshot:
+  version_template: '{{ .Tag }}-next'
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - 'Merge pull request'
+      - 'Merge branch'
+
+release:
+  # GitHub owner/repo is auto-detected from the git remote (origin url).
+  draft: false
+  replace_existing_draft: true
+  header: |
+    ## meerkat {{ .Version }}
+
+    Built {{ .Date }}.
+  footer: |
+    ---
+
+    Run `mk version` to see the knowledge-base commit embedded in this
+    build.
+
+    Third-party licenses for statically linked dependencies are
+    included in each archive as `THIRD-PARTY-LICENSES.txt`.
+
+# Distribution: tagged releases publish cross-built tarballs to the
+# GitHub Releases page. First-time install is manual (see README).
+# Subsequent updates flow through `mk update`.
+# (No Homebrew tap — keeps the supply chain to one repo.)

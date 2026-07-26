@@ -1,0 +1,54 @@
+# gitleaks configuration for meerkat
+#
+# Extends the upstream default ruleset and layers an allowlist for
+# patterns we know are safe (test fixtures, doc placeholders, CI
+# variable names referenced as strings only). When in doubt prefer
+# a narrow allowlist entry over loosening the rules globally.
+#
+# Run locally:    make gitleaks
+# Run in CI:      'security' stage, gitleaks job
+#
+# Reference: https://github.com/gitleaks/gitleaks
+
+[extend]
+# Use the upstream default ruleset (covers GitHub PATs, GitLab PATs,
+# AWS keys, generic API keys, private keys, JWTs, etc.).
+useDefault = true
+
+[[rules]]
+id = "meerkat-bearer-token"
+description = "Bearer token leaked in code or docs (looks like an OAuth access token)"
+# 32+ hex chars after a Bearer header, an access_token JSON field, or a
+# YAML 'token:' key (including a '!!null'-tagged form, as some host CLIs'
+# cached-credential files use for OAuth2 tokens) — widened past plain
+# JSON/header shapes so a leaked YAML-shaped OAuth token still trips it.
+regex = '''(?i)(?:authorization:\s*bearer\s+|"access_token"\s*:\s*"|token:\s*(?:!!null\s+)?)[a-f0-9]{32,}'''
+tags = ["meerkat", "oauth"]
+
+[allowlist]
+description = "Documentation placeholders + test fixtures that look like secrets but are not."
+
+# File-level allowlist: contents of these paths are ignored entirely.
+paths = [
+  '''.gitleaks\.toml''',
+  # Synced wiki content; it's read-only embedded markdown.
+  '''internal/kb/content/.*''',
+  '''internal/sources/etc/.*''',
+]
+
+# Line / commit / regex allowlist: applies across all paths unless
+# narrowed via the file glob.
+regexes = [
+  # Documentation placeholder GitLab PATs. Real PATs have 20+ random
+  # characters after 'glpat-'; doc examples always end in 'xxx...'
+  # or similar instructional filler.
+  '''glpat-(x{3,}|X{3,}|deadbeef[a-z0-9]*)''',
+  # Generic placeholders we use in install/update/integration docs.
+  '''(your[-_]?token[-_]?here|REPLACE[-_]?ME|PLACEHOLDER|TODO[-_]?TOKEN|test-key|test-secret-1234)''',
+  # CI variable names referenced by string in the workflow / docs
+  # but never printing actual values.
+  '''GITLAB_TOKEN|MEERKAT_API_KEY''',
+  # The internal-app deep link 'mk' is short enough to false-trigger
+  # generic short-string rules.
+  '''^mk$''',
+]

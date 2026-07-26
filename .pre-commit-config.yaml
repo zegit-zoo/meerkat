@@ -1,0 +1,42 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.27.2
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.12.2
+    hooks:
+      - id: golangci-lint
+        args: [--timeout, 5m]
+
+  # docs-check, tests and govulncheck are meerkat-specific Makefile gates.
+  - repo: local
+    hooks:
+      - id: golangci-lint-config-verify
+        name: golangci-lint Config Verify
+        entry: golangci-lint config verify
+        language: system
+        files: ^\.golangci\.yml$
+        pass_filenames: false
+
+      - id: docs-check
+        name: CLI docs in sync (make docs-check)
+        entry: make docs-check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: go-test
+        name: Go tests (race)
+        entry: bash -c 'CGO_ENABLED=1 make test'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: govulncheck
+        name: govulncheck
+        entry: make vuln
+        language: system
+        pass_filenames: false
+        always_run: true

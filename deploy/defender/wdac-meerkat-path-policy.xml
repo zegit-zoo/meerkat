@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WDAC (Windows Defender Application Control) path-based allow policy
+  for the meerkat / mk binary.
+
+  WHY PATH-BASED: meerkat.exe is not Authenticode-signed, so a
+  publisher (Signer) rule is not possible. These FilePathRules allow
+  the binary at the standard meerkat install locations. See
+  deploy/defender/README.md for the full rationale and the
+  Authenticode upgrade path.
+
+  IMPORTANT — path rule prerequisites:
+  WDAC honours FilePathRule only when the directory is NOT
+  user-writable, OR when the policy option
+  "Disabled:Runtime FilePath Rule Protection" is set. The standard
+  meerkat install dirs (%LOCALAPPDATA%\Programs\meerkat,
+  %USERPROFILE%\bin) ARE user-writable, so this template enables that
+  option (see <Rules>). If your security posture forbids that option,
+  switch to the hash-based rules emitted by generate-hash-rules.ps1
+  instead.
+
+  DEPLOY AS SUPPLEMENTAL if you already run a base WDAC policy:
+  set PolicyType="Supplemental Policy" and BasePolicyID to your base
+  policy's PolicyID. As a standalone test policy, leave as below.
+
+  AUDIT FIRST: this template ships in ENABLED:AUDIT MODE (option 3
+  present). Validate in Event Viewer ->
+  Microsoft-Windows-CodeIntegrity/Operational, then remove the
+  "Enabled:Audit Mode" rule to enforce.
+
+  Replace {POLICY-GUID} values with freshly generated GUIDs
+  (New-Guid) before deployment.
+-->
+<SiPolicy xmlns="urn:schemas-microsoft-com:sipolicy" PolicyType="Base Policy">
+  <VersionEx>1.0.0.0</VersionEx>
+  <PolicyID>{REPLACE-WITH-NEW-GUID}</PolicyID>
+  <BasePolicyID>{REPLACE-WITH-NEW-GUID}</BasePolicyID>
+  <PlatformID>{2E07F7E4-194C-4D20-B7C9-6F44A6C5A234}</PlatformID>
+
+  <Rules>
+    <!-- Audit mode: log would-be blocks instead of enforcing.
+         REMOVE this rule to switch to enforcement. -->
+    <Rule><Option>Enabled:Audit Mode</Option></Rule>
+    <!-- Required for FilePathRule to apply in user-writable dirs.
+         Remove only if you move meerkat to a non-user-writable path
+         and prefer strict path protection. -->
+    <Rule><Option>Disabled:Runtime FilePath Rule Protection</Option></Rule>
+    <Rule><Option>Enabled:Unsigned System Integrity Policy</Option></Rule>
+    <Rule><Option>Enabled:Advanced Boot Options Menu</Option></Rule>
+  </Rules>
+
+  <EKUs />
+
+  <!-- FileRules: one FilePathRule per documented install location.
+       The trailing \* lets mk update's transient meerkat.exe.new /
+       meerkat.exe.old siblings resolve, and covers both meerkat.exe
+       and mk.exe in the same directory. -->
+  <FileRules>
+    <Allow ID="ID_ALLOW_MEERKAT_LOCALAPPDATA"
+           FriendlyName="meerkat - %LOCALAPPDATA%\Programs\meerkat"
+           FilePath="%OSDRIVE%\Users\*\AppData\Local\Programs\meerkat\*" />
+    <Allow ID="ID_ALLOW_MEERKAT_USERPROFILE_BIN"
+           FriendlyName="meerkat - %USERPROFILE%\bin"
+           FilePath="%OSDRIVE%\Users\*\bin\*" />
+    <Allow ID="ID_ALLOW_MEERKAT_PROGRAMFILES"
+           FriendlyName="meerkat - %ProgramFiles%\meerkat"
+           FilePath="%PROGRAMFILES%\meerkat\*" />
+  </FileRules>
+
+  <!-- SigningScenario 12 = user mode code -->
+  <SigningScenarios>
+    <SigningScenario Value="12" ID="ID_SIGNINGSCENARIO_USERMODE"
+                     FriendlyName="User Mode — meerkat path allowlist">
+      <ProductSigners>
+        <FileRulesRef>
+          <FileRuleRef RuleID="ID_ALLOW_MEERKAT_LOCALAPPDATA" />
+          <FileRuleRef RuleID="ID_ALLOW_MEERKAT_USERPROFILE_BIN" />
+          <FileRuleRef RuleID="ID_ALLOW_MEERKAT_PROGRAMFILES" />
+        </FileRulesRef>
+      </ProductSigners>
+    </SigningScenario>
+  </SigningScenarios>
+
+  <UpdatePolicySigners />
+  <CiSigners />
+  <HvciOptions>0</HvciOptions>
+  <Settings>
+    <Setting Provider="PolicyInfo" Key="Information" ValueName="Name">
+      <Value><String>meerkat path allowlist</String></Value>
+    </Setting>
+    <Setting Provider="PolicyInfo" Key="Information" ValueName="Id">
+      <Value><String>meerkat-path-allowlist-v1</String></Value>
+    </Setting>
+  </Settings>
+</SiPolicy>
