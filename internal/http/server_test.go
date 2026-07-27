@@ -97,18 +97,63 @@ func TestOpenAPI(t *testing.T) {
 	}
 }
 
-// TestAuth_Missing: data endpoints reject when no Authorization header.
-func TestAuth_Missing(t *testing.T) {
+// TestAuth_DenyByDefault is the regression test for the finding that
+// auth was applied per-handler (each of /search, /show, /list
+// individually wrapped in requireAuth) with nothing structural
+// preventing a new route from forgetting the wrapper — and that the
+// previous version of this test (a hardcoded []string{"/search",
+// "/show", "/list"}) wouldn't have caught that, since a forgotten route
+// simply wouldn't appear in the list.
+//
+// It enumerates srv.routeTable() instead — the exact same table
+// routes() uses to register every pattern on the mux — so a new
+// pattern automatically gets a test case here with no edit to this
+// function: one that defaults to "must require auth" (public is false
+// unless the table says otherwise), and one that (for the three
+// documented public exceptions) confirms the allowlist isn't
+// accidentally denying a route meant to be public.
+func TestAuth_DenyByDefault(t *testing.T) {
 	srv := newTestServer(t)
-	for _, p := range []string{"/search", "/show", "/list"} {
-		t.Run(p, func(t *testing.T) {
-			req := httptest.NewRequest(nethttp.MethodPost, p, strings.NewReader(`{}`))
+	for _, rt := range srv.routeTable() {
+		t.Run(rt.pattern, func(t *testing.T) {
+			method, path, ok := strings.Cut(rt.pattern, " ")
+			if !ok {
+				t.Fatalf("route pattern %q missing a %q-separated method prefix", rt.pattern, " ")
+			}
+			var body io.Reader
+			if method != nethttp.MethodGet {
+				body = strings.NewReader(`{}`)
+			}
+			req := httptest.NewRequest(method, path, body)
 			rec := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(rec, req)
+
+			if rt.public {
+				if rec.Code == nethttp.StatusUnauthorized {
+					t.Errorf("public route unexpectedly requires auth (status 401): %s", rt.pattern)
+				}
+				return
+			}
 			if rec.Code != nethttp.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", rec.Code)
+				t.Errorf("status = %d, want 401 for non-public route %s", rec.Code, rt.pattern)
 			}
 		})
+	}
+}
+
+// TestAuth_UnknownRouteDeniedByDefault extends TestAuth_DenyByDefault
+// past routeTable's known patterns: a request matching no registered
+// pattern at all resolves to pattern == "" (see http.ServeMux.Handler's
+// doc comment), which authGate also treats as non-public — so it's
+// auth-gated too, rather than falling through to an unauthenticated 404
+// that would confirm to a prober which paths don't exist.
+func TestAuth_UnknownRouteDeniedByDefault(t *testing.T) {
+	srv := newTestServer(t)
+	req := httptest.NewRequest(nethttp.MethodPost, "/no-such-route", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != nethttp.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 for an unregistered route", rec.Code)
 	}
 }
 

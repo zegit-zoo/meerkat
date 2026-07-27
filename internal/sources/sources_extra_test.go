@@ -2,7 +2,9 @@ package sources
 
 import (
 	"io/fs"
+	"sync"
 	"testing"
+	"testing/fstest"
 
 	"gopkg.in/yaml.v3"
 )
@@ -101,4 +103,63 @@ func TestSource_ParsesAllFields(t *testing.T) {
 	if root.Sources[1].SeedList != "seeds/concepts.txt" {
 		t.Errorf("seed_list = %q", root.Sources[1].SeedList)
 	}
+}
+
+// TestUseFS_ConcurrentReadersAndWriter is the sources-package twin of
+// internal/kb's test of the same name: it guards the fix that moved
+// currentFS behind atomic.Pointer[fs.FS]. Before the fix, UseFS wrote a
+// plain `var currentFS fs.FS` package var — an interface value, i.e. a
+// type+data word pair — while All/Prompt/Template/FS read it with no
+// synchronization: a data race on those words that the race detector
+// reproduces even though today's only real caller (cobra's
+// PersistentPreRunE) writes once before any reader starts. Run with
+// `go test -race` to prove it no longer does; there's deliberately no
+// assertion on *which* FS a given read lands on (UseFS gives no
+// ordering guarantee against concurrent readers), only that no read
+// ever observes a torn/invalid fs.FS value.
+func TestUseFS_ConcurrentReadersAndWriter(t *testing.T) {
+	fsA := fstest.MapFS{
+		"etc/sources.yaml":   {Data: []byte("sources: []\n")},
+		"etc/prompts/a.md":   {Data: []byte("# Instructions A\n")},
+		"etc/templates/a.md": {Data: []byte("---\n---\nA\n")},
+	}
+	fsB := fstest.MapFS{
+		"etc/sources.yaml":   {Data: []byte("sources: []\n")},
+		"etc/prompts/b.md":   {Data: []byte("# Instructions B\n")},
+		"etc/templates/b.md": {Data: []byte("---\n---\nB\n")},
+	}
+	t.Cleanup(func() { UseFS(nil) })
+
+	const iterations = 500
+	var wg sync.WaitGroup
+
+	// Writer: flips the active FS back and forth while readers are live.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if i%2 == 0 {
+				UseFS(fsA)
+			} else {
+				UseFS(fsB)
+			}
+		}
+	}()
+
+	// Readers: hammer every currentFS-reading entry point concurrently
+	// with the writer above.
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, _ = All()
+				_, _ = Prompt("a.md")
+				_, _ = Template("b.md")
+				_ = FS()
+			}
+		}()
+	}
+
+	wg.Wait()
 }

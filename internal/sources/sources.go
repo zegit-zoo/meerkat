@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"path"
 	"strings"
+	"sync/atomic"
 
 	"gopkg.in/yaml.v3"
 )
@@ -28,17 +29,37 @@ var etcFS embed.FS
 // currentFS is the filesystem All/Prompt/Template/FS actually read
 // from. It defaults to the build-time embedded registry and can be
 // redirected to a directory on disk via UseFS. See kb.UseFS's doc
-// comment — the same global-state caveats apply here.
-var currentFS fs.FS = etcFS
+// comment — the same global-state caveats, and the same reason this is
+// an atomic.Pointer rather than a bare fs.FS var, apply here: fs.FS is
+// a 2-word interface value, so an unsynchronized write racing a read is
+// a torn read on those words, independent of how disciplined today's
+// single call-order (cobra's PersistentPreRunE, before any reader
+// starts) happens to be.
+var currentFS atomic.Pointer[fs.FS]
+
+func init() {
+	setFS(etcFS)
+}
+
+// setFS atomically stores fsys as the active filesystem.
+func setFS(fsys fs.FS) {
+	currentFS.Store(&fsys)
+}
+
+// loadFS atomically loads the active filesystem. Every internal read
+// path (All, Prompt, Template) goes through this rather than touching
+// currentFS directly, so a concurrent UseFS call can never produce a
+// torn read of the interface value.
+func loadFS() fs.FS { return *currentFS.Load() }
 
 // UseFS redirects All/Prompt/Template/FS to read from fsys instead of
 // the embedded registry. Passing nil restores the embedded default.
 func UseFS(fsys fs.FS) {
 	if fsys == nil {
-		currentFS = etcFS
+		setFS(etcFS)
 		return
 	}
-	currentFS = fsys
+	setFS(fsys)
 }
 
 // Source is one entry in sources.yaml — see the comment block at the
@@ -86,7 +107,7 @@ var ErrNotFound = errors.New("source not found")
 // declaration order. Sources commented out in the YAML are not
 // returned.
 func All() ([]Source, error) {
-	body, err := fs.ReadFile(currentFS, "etc/sources.yaml")
+	body, err := fs.ReadFile(loadFS(), "etc/sources.yaml")
 	if errors.Is(err, fs.ErrNotExist) {
 		// No source registry embedded (e.g. a build with no configured
 		// content source). Treat as an empty registry rather than an error.
@@ -166,7 +187,7 @@ func Get(id string) (Source, error) {
 func Prompt(promptPath string) (string, error) {
 	// Tolerate either "prompts/policy.md" or just "policy.md".
 	rel := strings.TrimPrefix(promptPath, "prompts/")
-	body, err := fs.ReadFile(currentFS, path.Join("etc", "prompts", rel))
+	body, err := fs.ReadFile(loadFS(), path.Join("etc", "prompts", rel))
 	if err != nil {
 		return "", fmt.Errorf("read prompt %q: %w", promptPath, err)
 	}
@@ -176,7 +197,7 @@ func Prompt(promptPath string) (string, error) {
 // Template returns the contents of an embedded page template.
 // templateName is the value of Source.Template, e.g. "policy.md".
 func Template(templateName string) (string, error) {
-	body, err := fs.ReadFile(currentFS, path.Join("etc", "templates", templateName))
+	body, err := fs.ReadFile(loadFS(), path.Join("etc", "templates", templateName))
 	if err != nil {
 		return "", fmt.Errorf("read template %q: %w", templateName, err)
 	}
@@ -185,4 +206,4 @@ func Template(templateName string) (string, error) {
 
 // FS returns the filesystem All/Prompt/Template currently read from —
 // the embedded registry by default, or a disk directory after UseFS.
-func FS() fs.FS { return currentFS }
+func FS() fs.FS { return loadFS() }

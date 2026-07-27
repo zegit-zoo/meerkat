@@ -23,11 +23,13 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"gopkg.in/yaml.v3"
 )
@@ -42,21 +44,45 @@ var wikiFS embed.FS
 // package expects, and wires it up from the --kb-dir flag /
 // MEERKAT_KB_DIR env var at CLI startup.
 //
-// This is deliberately simple global state, set once before any
-// concurrent readers start (mirrors how -ldflags variables work).
-// Tests that want isolation without touching it should build kb.Page
-// values directly instead (see internal/search/inject_test.go's
-// NewFromPages pattern) rather than pointing UseFS at a fixture.
-var currentFS fs.FS = wikiFS
+// It is deliberately simple global state — set once before any
+// concurrent readers start today (mirrors how -ldflags variables work) —
+// but held behind an atomic.Pointer rather than a bare fs.FS var. fs.FS
+// is an interface (a 2-word type+data pair); a plain `var currentFS
+// fs.FS` assigned by one goroutine while another reads it is a data
+// race on those words (a torn read can observe a type from one value
+// and data from another), even though every write today happens-before
+// any server starts via cobra's PersistentPreRunE. atomic.Pointer makes
+// every read/write of the *whole* interface value atomic, so the
+// package stays race-detector-clean even if a hot-reload/reconfigure
+// path ever calls UseFS after readers are already running. Tests that
+// want isolation without touching this should build kb.Page values
+// directly instead (see internal/search/inject_test.go's NewFromPages
+// pattern) rather than pointing UseFS at a fixture.
+var currentFS atomic.Pointer[fs.FS]
+
+func init() {
+	setFS(wikiFS)
+}
+
+// setFS atomically stores fsys as the active filesystem.
+func setFS(fsys fs.FS) {
+	currentFS.Store(&fsys)
+}
+
+// loadFS atomically loads the active filesystem. Every internal read
+// path (List, loadByPath) goes through this rather than touching
+// currentFS directly, so a concurrent UseFS call can never produce a
+// torn read of the interface value.
+func loadFS() fs.FS { return *currentFS.Load() }
 
 // UseFS redirects List/Load/FS to read from fsys instead of the
 // embedded content. Passing nil restores the embedded default.
 func UseFS(fsys fs.FS) {
 	if fsys == nil {
-		currentFS = wikiFS
+		setFS(wikiFS)
 		return
 	}
-	currentFS = fsys
+	setFS(fsys)
 }
 
 var excludedFiles = []string{
@@ -116,9 +142,35 @@ type Page struct {
 // ErrNotFound is returned by Load when a page does not exist.
 var ErrNotFound = errors.New("page not found")
 
+// ErrPageTooLarge is returned by Load (and causes List to skip the page
+// with a stderr warning — see the loadByPath call in List) when a
+// page's file size exceeds maxPageSize.
+var ErrPageTooLarge = errors.New("page exceeds maximum size")
+
+// maxPageSize bounds how large a single page's file may be before
+// loadByPath refuses to read it whole into memory. fs.ReadFile (the
+// previous implementation) has no size limit of its own: with a
+// runtime --kb-dir, the content root is a live, operator-writable
+// filesystem, and every List() call — plus the search index build that
+// both `http serve` and `mcp serve` run once at startup — reads every
+// page's full body. A single 1 GiB markdown file (e.g. an accidentally
+// committed data dump, or a binary misplaced under wiki/ with a .md
+// extension) was measured driving `mk list` to ~2 GB RSS and the index
+// build to ~5 GB RSS / 66s, both scaling linearly with however large a
+// file someone manages to place in the tree.
+//
+// No real wiki page approaches this: even a generous hand-authored page
+// with embedded tables or ASCII diagrams runs to a few hundred KB.
+// 8 MiB leaves more than an order of magnitude of headroom above that
+// while still keeping worst-case per-page memory small enough for a
+// laptop-scale deployment to absorb without noticing — including
+// transiently to search.New(), where every page in the KB is held at
+// once while the bleve index is built.
+const maxPageSize = 8 << 20 // 8 MiB
+
 // FS returns the filesystem List/Load currently read from — the
 // embedded content by default, or a disk directory after UseFS.
-func FS() fs.FS { return currentFS }
+func FS() fs.FS { return loadFS() }
 
 // List returns all wiki pages, sorted by ID for deterministic output.
 //
@@ -129,7 +181,7 @@ func FS() fs.FS { return currentFS }
 // what it has, not hard-fail.
 func List() ([]Page, error) {
 	var pages []Page
-	err := fs.WalkDir(currentFS, "content", func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(loadFS(), "content", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -236,7 +288,7 @@ func ByPrefix(prefix string) FilterFunc {
 }
 
 func loadByPath(p string) (Page, error) {
-	body, err := fs.ReadFile(currentFS, p)
+	body, err := readCapped(loadFS(), p)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return Page{}, ErrNotFound
@@ -259,6 +311,38 @@ func loadByPath(p string) (Page, error) {
 		Body:  bodyOnly,
 		Front: front,
 	}, nil
+}
+
+// readCapped reads p from fsys, refusing (ErrPageTooLarge) rather than
+// buffering the whole thing if it exceeds maxPageSize.
+//
+// It stats first: cheap, and gives an exact size for the error message
+// on any fs.FS that reports one accurately. The read itself is still
+// capped via io.LimitReader (reading one byte past the cap, so a file
+// that's exactly at the cap succeeds and anything larger is caught
+// deterministically) regardless of whether Stat succeeded — the
+// authoritative enforcement doesn't depend on the filesystem
+// implementing an accurate (or any) Stat, only on fs.File.Stat, which
+// every fs.File must implement.
+func readCapped(fsys fs.FS, p string) ([]byte, error) {
+	f, err := fsys.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	if info, statErr := f.Stat(); statErr == nil && info.Size() > maxPageSize {
+		return nil, fmt.Errorf("%w: %s is %d bytes (cap %d)", ErrPageTooLarge, p, info.Size(), maxPageSize)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(f, maxPageSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxPageSize {
+		return nil, fmt.Errorf("%w: %s exceeds %d bytes", ErrPageTooLarge, p, maxPageSize)
+	}
+	return body, nil
 }
 
 // coreKeys is the set of YAML top-level keys that are part of the typed

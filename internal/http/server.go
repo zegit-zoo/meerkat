@@ -64,10 +64,11 @@ type Config struct {
 // Server bundles the HTTP server and its in-memory search index so
 // callers can manage lifecycles together.
 type Server struct {
-	cfg Config
-	mux *http.ServeMux
-	srv *http.Server
-	idx *search.Index
+	cfg     Config
+	mux     *http.ServeMux
+	handler http.Handler // authGate(mux) — see routes/Handler
+	srv     *http.Server
+	idx     *search.Index
 }
 
 // New builds a Server with the search index already populated.
@@ -102,15 +103,17 @@ func New(cfg Config) (*Server, error) {
 	s.routes()
 	s.srv = &http.Server{
 		Addr:         cfg.Addr,
-		Handler:      s.mux,
+		Handler:      s.handler,
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 	}
 	return s, nil
 }
 
-// Handler exposes the underlying mux for tests.
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler exposes the auth-gated mux for tests (and ListenAndServe,
+// via s.srv.Handler set in New) — see routes/authGate for how the gate
+// composes with route registration.
+func (s *Server) Handler() http.Handler { return s.handler }
 
 // Addr returns the configured listen address (post-default).
 func (s *Server) Addr() string { return s.cfg.Addr }
@@ -149,20 +152,69 @@ func (s *Server) Close() error {
 	return err
 }
 
-func (s *Server) routes() {
-	s.mux.Handle("POST /search", s.requireAuth(http.HandlerFunc(s.handleSearch)))
-	s.mux.Handle("POST /show", s.requireAuth(http.HandlerFunc(s.handleShow)))
-	s.mux.Handle("POST /list", s.requireAuth(http.HandlerFunc(s.handleList)))
-
-	// Public endpoints — needed by OpenWebUI / health probes.
-	s.mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)
-	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
-	s.mux.HandleFunc("GET /", s.handleRoot)
+// route pairs a URL pattern (Go 1.22+ ServeMux syntax, e.g. "POST
+// /search") with its handler and whether it's reachable without
+// authentication. It's the single source of truth for both route
+// registration (routes, below) and authGate's public allowlist, so a
+// route can only skip authentication by explicitly saying so here —
+// there's no separate per-handler wrapper for a new route to forget.
+// routeTable in server_test.go's TestAuth_DenyByDefault walks this same
+// table, so a new route that leaves public unset (the zero value) is
+// automatically asserted to require auth, and a route wrongly marked
+// public is caught if it doesn't match the three documented exceptions.
+type route struct {
+	pattern string
+	public  bool
+	handler http.HandlerFunc
 }
 
-// requireAuth enforces a constant-time bearer-token comparison.
-func (s *Server) requireAuth(next http.Handler) http.Handler {
+// routeTable is every pattern this server registers. Add new routes
+// here, not via a direct s.mux.Handle/HandleFunc call, so they pick up
+// routes' and authGate's behaviour (and TestAuth_DenyByDefault's
+// coverage) automatically.
+func (s *Server) routeTable() []route {
+	return []route{
+		{pattern: "POST /search", handler: s.handleSearch},
+		{pattern: "POST /show", handler: s.handleShow},
+		{pattern: "POST /list", handler: s.handleList},
+		// Public endpoints — needed by OpenWebUI / health probes.
+		{pattern: "GET /openapi.json", public: true, handler: s.handleOpenAPI},
+		{pattern: "GET /healthz", public: true, handler: s.handleHealthz},
+		{pattern: "GET /", public: true, handler: s.handleRoot},
+	}
+}
+
+func (s *Server) routes() {
+	public := make(map[string]bool)
+	for _, rt := range s.routeTable() {
+		s.mux.HandleFunc(rt.pattern, rt.handler)
+		if rt.public {
+			public[rt.pattern] = true
+		}
+	}
+	s.handler = s.authGate(public)
+}
+
+// authGate wraps s.mux so every request is authenticated by default;
+// public is the explicit allowlist of patterns exempted (built from
+// routeTable's `public: true` entries). This is deny-by-default:
+// nothing about how a pattern got registered on s.mux exempts it from
+// auth except appearing in public, so a route added without updating
+// routeTable — or added to routeTable without an explicit `public:
+// true` — is auth-gated automatically rather than relying on every
+// call site remembering to wrap itself.
+//
+// A request matching no registered pattern at all resolves to pattern
+// == "" (see http.ServeMux.Handler's doc comment), which is also not
+// in public, so an unauthenticated caller gets 401 rather than a 404
+// that would otherwise confirm which paths don't exist.
+func (s *Server) authGate(public map[string]bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, pattern := s.mux.Handler(r)
+		if public[pattern] {
+			s.mux.ServeHTTP(w, r)
+			return
+		}
 		header := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		if !strings.HasPrefix(header, prefix) {
@@ -178,7 +230,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, "invalid API key")
 			return
 		}
-		next.ServeHTTP(w, r)
+		s.mux.ServeHTTP(w, r)
 	})
 }
 

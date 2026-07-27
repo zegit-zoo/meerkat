@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"testing/fstest"
@@ -162,4 +163,167 @@ func TestList_UnreadableEntryDoesNotAbortWholeKB(t *testing.T) {
 	if len(pages) != 1 || pages[0].ID != "good" {
 		t.Fatalf("List = %+v, want exactly the 'good' page", pages)
 	}
+}
+
+// TestLoad_OversizedPageIsRejected guards the fix that caps how large a
+// single page's file may be before loadByPath reads it whole into
+// memory. Without a cap, a --kb-dir (a live, operator-writable
+// filesystem) containing one very large file was measured driving `mk
+// list` to ~2 GB RSS and the search index build (which both `http
+// serve` and `mcp serve` run at startup) to ~5 GB RSS / 66s, against a
+// single real 1 GiB page.
+func TestLoad_OversizedPageIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "content", "huge.md"), strings.Repeat("a", maxPageSize+1))
+	withFS(t, os.DirFS(dir))
+
+	_, err := Load("huge")
+	if !errors.Is(err, ErrPageTooLarge) {
+		t.Fatalf("Load(huge) err = %v, want ErrPageTooLarge", err)
+	}
+}
+
+// TestLoad_PageAtExactCapStillLoads proves the cap is exclusive: a page
+// of exactly maxPageSize bytes must still load; only strictly-larger
+// pages are rejected. Guards against an off-by-one that would reject
+// legitimate pages sitting right at the boundary.
+func TestLoad_PageAtExactCapStillLoads(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "content", "exact.md"), strings.Repeat("a", maxPageSize))
+	withFS(t, os.DirFS(dir))
+
+	page, err := Load("exact")
+	if err != nil {
+		t.Fatalf("Load(exact): %v, want a page of exactly maxPageSize bytes to load", err)
+	}
+	if len(page.Body) != maxPageSize {
+		t.Errorf("Body length = %d, want %d", len(page.Body), maxPageSize)
+	}
+}
+
+// TestLoad_OversizedPageRejectedEvenIfStatUnderreports proves the
+// io.LimitReader in readCapped is the authoritative enforcement, not
+// merely a fast path alongside the Stat-based check: even an fs.FS
+// whose Stat lies about a small size must still be rejected once actual
+// bytes read cross maxPageSize.
+func TestLoad_OversizedPageRejectedEvenIfStatUnderreports(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "content", "huge.md"), strings.Repeat("a", maxPageSize+1))
+	withFS(t, lyingStatFS{FS: os.DirFS(dir), reportedSize: 1})
+
+	_, err := Load("huge")
+	if !errors.Is(err, ErrPageTooLarge) {
+		t.Fatalf("Load(huge) err = %v, want ErrPageTooLarge even though Stat under-reports size", err)
+	}
+}
+
+// lyingStatFS wraps an fs.FS so every file it opens reports
+// reportedSize from Stat regardless of its actual content length —
+// used to prove readCapped doesn't trust Stat blindly.
+type lyingStatFS struct {
+	fs.FS
+	reportedSize int64
+}
+
+func (f lyingStatFS) Open(name string) (fs.File, error) {
+	file, err := f.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return lyingStatFile{File: file, reportedSize: f.reportedSize}, nil
+}
+
+type lyingStatFile struct {
+	fs.File
+	reportedSize int64
+}
+
+func (f lyingStatFile) Stat() (fs.FileInfo, error) {
+	info, err := f.File.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return lyingFileInfo{FileInfo: info, size: f.reportedSize}, nil
+}
+
+type lyingFileInfo struct {
+	fs.FileInfo
+	size int64
+}
+
+func (i lyingFileInfo) Size() int64 { return i.size }
+
+// TestList_OversizedPageIsSkippedWithWarning mirrors
+// TestList_UnreadableEntryDoesNotAbortWholeKB: List must skip (not
+// abort on) an oversized page — the same "log to stderr and continue"
+// path any other loadByPath error already takes — and keep serving
+// every other page.
+func TestList_OversizedPageIsSkippedWithWarning(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "content", "good.md"), "---\nid: good\ntitle: Good\n---\n# Good\n\nbody\n")
+	write(t, filepath.Join(dir, "content", "huge.md"), strings.Repeat("a", maxPageSize+1))
+	withFS(t, os.DirFS(dir))
+
+	pages, err := List()
+	if err != nil {
+		t.Fatalf("List: %v, want nil — an oversized entry must not abort the whole KB", err)
+	}
+	if len(pages) != 1 || pages[0].ID != "good" {
+		t.Fatalf("List = %+v, want exactly the 'good' page", pages)
+	}
+}
+
+// TestUseFS_ConcurrentReadersAndWriter guards the fix that moved
+// currentFS behind atomic.Pointer[fs.FS]. Before the fix, UseFS wrote a
+// plain `var currentFS fs.FS` package var — an interface value, i.e. a
+// type+data word pair — while List/Load/FS read it with no
+// synchronization: a data race on those words that the race detector
+// reproduces even though today's only real caller (cobra's
+// PersistentPreRunE) writes once before any reader starts. Run with
+// `go test -race` to prove it no longer does; there's deliberately no
+// assertion on *which* FS a given read lands on (UseFS gives no
+// ordering guarantee against concurrent readers), only that no read
+// ever observes a torn/invalid fs.FS value. Expect (benign, expected)
+// "meerkat: skipping ...: page not found" chatter on stderr: List's
+// WalkDir can enumerate a.md from fsA in the same instant the writer
+// flips to fsB, so the subsequent loadByPath legitimately misses it —
+// that race is inherent to calling UseFS while readers are live and is
+// not what this test is guarding against.
+func TestUseFS_ConcurrentReadersAndWriter(t *testing.T) {
+	fsA := fstest.MapFS{"content/a.md": {Data: []byte("---\nid: a\ntitle: A\n---\nbody a\n")}}
+	fsB := fstest.MapFS{"content/b.md": {Data: []byte("---\nid: b\ntitle: B\n---\nbody b\n")}}
+	t.Cleanup(func() { UseFS(nil) })
+
+	const iterations = 500
+	var wg sync.WaitGroup
+
+	// Writer: flips the active FS back and forth while readers are live.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if i%2 == 0 {
+				UseFS(fsA)
+			} else {
+				UseFS(fsB)
+			}
+		}
+	}()
+
+	// Readers: hammer every currentFS-reading entry point concurrently
+	// with the writer above.
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, _ = List()
+				_, _ = Load("a")
+				_, _ = Load("b")
+				_ = FS()
+			}
+		}()
+	}
+
+	wg.Wait()
 }

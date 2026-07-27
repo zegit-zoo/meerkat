@@ -49,7 +49,14 @@ func ServeStdio(ctx context.Context) error {
 }
 
 func registerSearch(s *mcpserver.MCPServer, idx *search.Index) {
-	tool := mcp.NewTool("mk_search",
+	s.AddTool(searchTool(), searchHandler(idx))
+}
+
+// searchTool builds the mk_search tool definition. Split out from
+// registerSearch so its annotations (see the inline comment below) are
+// directly unit-testable without standing up a server or driving stdio.
+func searchTool() mcp.Tool {
+	return mcp.NewTool("mk_search",
 		mcp.WithDescription(
 			"Full-text search across the knowledge base "+
 				"(meerkat). Title and ID matches are boosted so "+
@@ -63,9 +70,20 @@ func registerSearch(s *mcpserver.MCPServer, idx *search.Index) {
 		mcp.WithNumber("limit",
 			mcp.Description("Maximum number of results (default 10)."),
 		),
+		// mcp.NewTool defaults every tool's annotations to the MCP spec's
+		// safe-but-wrong-for-us shape (readOnlyHint:false,
+		// destructiveHint:true, idempotentHint:false, openWorldHint:true)
+		// unless overridden here. mk_search only ever reads the in-memory
+		// bleve index built at startup: it can't modify anything, repeated
+		// calls with the same query are indistinguishable from one call,
+		// and it never reaches outside this process. Leaving the defaults
+		// in place is what a hardening scanner flags, and it makes
+		// harnesses that gate on destructiveHint refuse a plain KB lookup.
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
 	)
-
-	s.AddTool(tool, searchHandler(idx))
 }
 
 // searchHandler returns the mk_search tool handler bound to idx. Split out
@@ -134,7 +152,14 @@ func searchResultsJSON(results []search.Result) (string, error) {
 }
 
 func registerShow(s *mcpserver.MCPServer) {
-	tool := mcp.NewTool("mk_show",
+	s.AddTool(showTool(), showHandler())
+}
+
+// showTool builds the mk_show tool definition. Split out from
+// registerShow for the same reason as searchTool: direct annotation
+// unit-testing.
+func showTool() mcp.Tool {
+	return mcp.NewTool("mk_show",
 		mcp.WithDescription(
 			"Retrieve a single knowledge-base page by ID. Page IDs are "+
 				"slash-separated paths from the wiki root without "+
@@ -147,9 +172,20 @@ func registerShow(s *mcpserver.MCPServer) {
 			mcp.Required(),
 			mcp.Description("Page ID, e.g. 'concepts/Some-Concept'"),
 		),
+		// See registerSearch's comment: mk_show only reads a page out of
+		// the KB filesystem, so it gets the same read-only/non-destructive/
+		// idempotent/closed-world annotations instead of NewTool's defaults.
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
 	)
+}
 
-	s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// showHandler returns the mk_show tool handler. Split out to mirror
+// searchHandler's shape.
+func showHandler() mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, err := req.RequireString("id")
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -168,11 +204,18 @@ func registerShow(s *mcpserver.MCPServer) {
 			return nil, err
 		}
 		return mcp.NewToolResultText(string(body)), nil
-	})
+	}
 }
 
 func registerList(s *mcpserver.MCPServer) {
-	tool := mcp.NewTool("mk_list",
+	s.AddTool(listTool(), listHandler())
+}
+
+// listTool builds the mk_list tool definition. Split out from
+// registerList for the same reason as searchTool: direct annotation
+// unit-testing.
+func listTool() mcp.Tool {
+	return mcp.NewTool("mk_list",
 		mcp.WithDescription(
 			"List knowledge-base pages, optionally filtered. Filters "+
 				"compose (AND): prefix (page ID prefix), category "+
@@ -192,9 +235,21 @@ func registerList(s *mcpserver.MCPServer) {
 		mcp.WithString("owner",
 			mcp.Description("Frontmatter owner filter."),
 		),
+		// See registerSearch's comment: mk_list only enumerates pages
+		// already loaded from the KB filesystem, so it gets the same
+		// read-only/non-destructive/idempotent/closed-world annotations
+		// instead of NewTool's defaults.
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
 	)
+}
 
-	s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// listHandler returns the mk_list tool handler. Split out to mirror
+// searchHandler's shape.
+func listHandler() mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		pages, err := kb.List()
 		if err != nil {
 			return nil, err
@@ -210,7 +265,7 @@ func registerList(s *mcpserver.MCPServer) {
 			return nil, err
 		}
 		return mcp.NewToolResultText(body), nil
-	})
+	}
 }
 
 // filterPages applies the composable (AND) mk_list filters. Empty filters

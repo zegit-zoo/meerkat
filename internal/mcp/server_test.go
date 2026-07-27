@@ -3,6 +3,7 @@ package mcp
 import (
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/zegit-zoo/meerkat/internal/search"
@@ -37,6 +38,44 @@ func TestRegisterTools_BuildsCleanly(t *testing.T) {
 	if s == nil {
 		t.Fatal("MCPServer is nil")
 	}
+}
+
+// TestToolAnnotations_ReadOnlyNonDestructive is a regression test for the
+// finding that mcp.NewTool's un-overridden defaults
+// (readOnlyHint:false, destructiveHint:true, idempotentHint:false,
+// openWorldHint:true — verified live in a tools/list response) were
+// shipping on all three tools. mk_search/mk_show/mk_list are pure KB
+// reads with no side effects and no interaction with anything outside
+// this process, so every tool must advertise the opposite of that
+// default shape: read-only, non-destructive, idempotent, closed-world.
+func TestToolAnnotations_ReadOnlyNonDestructive(t *testing.T) {
+	for _, tool := range []mcp.Tool{searchTool(), showTool(), listTool()} {
+		t.Run(tool.Name, func(t *testing.T) {
+			a := tool.Annotations
+			if a.ReadOnlyHint == nil || !*a.ReadOnlyHint {
+				t.Errorf("ReadOnlyHint = %v, want true", boolPtrStr(a.ReadOnlyHint))
+			}
+			if a.DestructiveHint == nil || *a.DestructiveHint {
+				t.Errorf("DestructiveHint = %v, want false", boolPtrStr(a.DestructiveHint))
+			}
+			if a.IdempotentHint == nil || !*a.IdempotentHint {
+				t.Errorf("IdempotentHint = %v, want true", boolPtrStr(a.IdempotentHint))
+			}
+			if a.OpenWorldHint == nil || *a.OpenWorldHint {
+				t.Errorf("OpenWorldHint = %v, want false", boolPtrStr(a.OpenWorldHint))
+			}
+		})
+	}
+}
+
+func boolPtrStr(b *bool) string {
+	if b == nil {
+		return "<nil>"
+	}
+	if *b {
+		return "true"
+	}
+	return "false"
 }
 
 // TestOneLine collapses internal whitespace runs.

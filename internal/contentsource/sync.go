@@ -115,7 +115,16 @@ func resolve(repoRoot string, src Source, out io.Writer) (root, commit string, e
 		return root, localCommit(filepath.Join(root, src.Layout.Wiki)), nil
 
 	case TypeSubmodule:
-		if err := runGit(out, repoRoot, "submodule", "update", "--init", src.Submodule); err != nil {
+		// SECURITY: "--" before src.Submodule (content-source.yaml-derived)
+		// so it's parsed purely as a positional path, never as a flag —
+		// verified against real git: without "--", a value of "--force"
+		// is silently consumed as submodule update's own --force flag
+		// (widening the operation to every registered submodule, not just
+		// the named one) instead of being rejected as an unknown path.
+		// "--end-of-options" (used for checkout below) is not an option
+		// here: unlike checkout, `git submodule update` doesn't recognise
+		// it at all and errors out on any input.
+		if err := runGit(out, repoRoot, "submodule", "update", "--init", "--", src.Submodule); err != nil {
 			return "", "", fmt.Errorf("submodule update %q: %w", src.Submodule, err)
 		}
 		root = filepath.Join(repoRoot, src.Submodule)
@@ -174,7 +183,15 @@ func resolveGit(src Source, out io.Writer) (root, commit string, err error) {
 		}
 	}
 
-	if err := runGit(out, root, "checkout", "--quiet", "--force", "--detach", src.Ref); err != nil {
+	// SECURITY: "--end-of-options" before src.Ref (content-source.yaml-
+	// derived) so it can never be parsed as a flag, no matter what
+	// checkout options git gains in the future. Not "--": for checkout
+	// (unlike submodule update below) "--" means "everything after this
+	// is a pathspec", which conflicts with --detach's revision argument —
+	// verified against real git that "--detach -- <tag>" fails outright
+	// ("--detach does not take a path argument"), while "--end-of-options
+	// <tag>" resolves the tag exactly as before.
+	if err := runGit(out, root, "checkout", "--quiet", "--force", "--detach", "--end-of-options", src.Ref); err != nil {
 		return "", "", fmt.Errorf("checkout %q (fetch may be needed): %w", src.Ref, err)
 	}
 	sha, _ := gitOut(root, "rev-parse", "--short", "HEAD")
@@ -202,7 +219,29 @@ func cloneURL(src Source) string {
 // read back from the environment rather than substituted into the
 // script text, it never appears in this string, in the resulting argv,
 // or anywhere `ps auxww` (or a similar process listing) could see it.
-const credentialHelperScript = `!f() { test "$1" = get && printf 'password=%s\n' "$MEERKAT_GIT_TOKEN"; }; f` //nolint:gosec // G101: false positive — this is a script *template*; the secret itself is read from $MEERKAT_GIT_TOKEN at runtime, never embedded here.
+//
+// SECURITY: git feeds a `get` request as key=value lines on stdin
+// (protocol=, host=, username=, ... terminated by a blank line or EOF)
+// and this script reads them: it only answers for host=github.com over
+// protocol=https, matching exactly what authClone ever constructs. This
+// is not reachable today — the only call site hardcodes host=github.com
+// and the explicit-URL branch bypasses the helper entirely — but a
+// version of this script that ignored stdin and answered any `get`
+// unconditionally would hand the token to *any* host a future call site
+// (or a bug in this one) asked it for. Verified against real git with
+// `git -c credential.helper='<script>' credential fill`: a matching
+// request gets `password=...` back; a mismatched host or protocol gets
+// nothing, and git fails closed (no other credential source configured)
+// rather than leaking the token.
+// Kept as a single line (';'-joined rather than newline-joined) so the
+// //nolint below can trail the statement: gosec attributes G101 to the
+// declaration's opening line, and a multi-line raw string literal has
+// no way to put a Go comment there without it becoming shell-script
+// content instead. Verified byte-for-byte equivalent to the multi-line
+// form it was authored and tested as (see the SECURITY comment above)
+// via `sh -n` and the same credential-fill checks this package's tests
+// run.
+const credentialHelperScript = `!f() { test "$1" = get || exit 0; while IFS='=' read -r key value; do test -z "$key" && break; case "$key" in host) host=$value ;; protocol) protocol=$value ;; esac; done; test "$host" = github.com && test "$protocol" = https && printf 'password=%s\n' "$MEERKAT_GIT_TOKEN"; }; f` //nolint:gosec // G101: false positive — this is a script *template*; the secret itself is read from $MEERKAT_GIT_TOKEN at runtime, never embedded here.
 
 // resolveGitHubToken returns a cached gh CLI OAuth token, if any. It's a
 // package-level var (rather than a direct auth.NewDefault() call) purely
@@ -427,8 +466,25 @@ func gitOut(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(b)), err
 }
 
+// gitAllowedProtocols is the transport allowlist every git subprocess
+// this package spawns is restricted to, via GIT_ALLOW_PROTOCOL — see
+// cleanGitEnv. https and ssh cover everything this package's own
+// cloneURL ever produces (a generated https://<host>/<repo>.git, or a
+// user-supplied git@ SSH spec passed through verbatim); file covers a
+// user-supplied file:// Repo (and, verified against real git, a bare
+// local path too — git treats an unadorned path as the "file"
+// transport for GIT_ALLOW_PROTOCOL purposes, not as an unchecked
+// special case). Deliberately excluded: the historically dangerous
+// "ext" (arbitrary command execution via "ext::sh -c ...") and "fd"
+// transports, and plain "http" (would let a misconfigured http:// Repo
+// carry the borrowed GitHub token in cleartext — see credentialHelperScript's
+// own protocol=https check for the same reasoning applied to the
+// credential side of this).
+const gitAllowedProtocols = "https:ssh:file"
+
 // cleanGitEnv returns the process environment with ambient GIT_*
-// variables stripped. Every git subprocess this package spawns is
+// variables stripped, then GIT_ALLOW_PROTOCOL set explicitly to
+// gitAllowedProtocols. Every git subprocess this package spawns is
 // scoped to an explicit directory (cmd.Dir); GIT_DIR, GIT_WORK_TREE,
 // GIT_INDEX_FILE and friends, if inherited from an enclosing git
 // process (for example, this binary running as `go test` inside a
@@ -437,16 +493,27 @@ func gitOut(dir string, args ...string) (string, error) {
 // repository. Stripping them first, then layering any explicit
 // extraEnv on top, keeps every git invocation anchored to the
 // directory the caller asked for.
+//
+// SECURITY: git itself already excludes the "ext"/"fd" transports by
+// default (the fix for CVE-2017-1000117 and later hardening), but that
+// default only holds as long as nothing sets GIT_ALLOW_PROTOCOL to
+// something wider first — and an ambient value (CI config, a parent
+// process, a developer's shell) is exactly the kind of GIT_* variable
+// this function already has to strip for the reasons above. Setting it
+// here explicitly, after stripping, means our allowlist always wins
+// over whatever the ambient environment tried to set, rather than
+// merely inheriting whatever git's compiled-in default happens to be
+// today.
 func cleanGitEnv() []string {
 	env := os.Environ()
-	clean := make([]string, 0, len(env))
+	clean := make([]string, 0, len(env)+1)
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "GIT_") {
 			continue
 		}
 		clean = append(clean, kv)
 	}
-	return clean
+	return append(clean, "GIT_ALLOW_PROTOCOL="+gitAllowedProtocols)
 }
 
 func fileExists(p string) bool { fi, err := os.Stat(p); return err == nil && !fi.IsDir() }
