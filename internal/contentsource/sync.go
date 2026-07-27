@@ -404,14 +404,17 @@ func runGit(out io.Writer, dir string, args ...string) error {
 
 // runGitEnv runs git with extraEnv appended to the current environment —
 // used to hand the credential helper its token via env instead of argv.
+//
+// The environment is always sanitised of ambient GIT_* variables (see
+// cleanGitEnv) before extraEnv is layered on, so this invocation is
+// always scoped to dir rather than to whatever repository an inherited
+// GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE might point at.
 func runGitEnv(out io.Writer, dir string, extraEnv []string, args ...string) error {
 	cmd := exec.Command("git", args...) //nolint:gosec // G204: fixed "git" with config-derived args; no shell.
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
+	cmd.Env = append(cleanGitEnv(), extraEnv...)
 	cmd.Stdout, cmd.Stderr = io.Discard, out
 	return cmd.Run()
 }
@@ -419,8 +422,31 @@ func runGitEnv(out io.Writer, dir string, extraEnv []string, args ...string) err
 func gitOut(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...) //nolint:gosec // G204: fixed "git" with literal args; no shell.
 	cmd.Dir = dir
+	cmd.Env = cleanGitEnv()
 	b, err := cmd.Output()
 	return strings.TrimSpace(string(b)), err
+}
+
+// cleanGitEnv returns the process environment with ambient GIT_*
+// variables stripped. Every git subprocess this package spawns is
+// scoped to an explicit directory (cmd.Dir); GIT_DIR, GIT_WORK_TREE,
+// GIT_INDEX_FILE and friends, if inherited from an enclosing git
+// process (for example, this binary running as `go test` inside a
+// git hook, or meerkat itself being invoked from one), take priority
+// over cmd.Dir and can silently redirect the operation at the wrong
+// repository. Stripping them first, then layering any explicit
+// extraEnv on top, keeps every git invocation anchored to the
+// directory the caller asked for.
+func cleanGitEnv() []string {
+	env := os.Environ()
+	clean := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_") {
+			continue
+		}
+		clean = append(clean, kv)
+	}
+	return clean
 }
 
 func fileExists(p string) bool { fi, err := os.Stat(p); return err == nil && !fi.IsDir() }
