@@ -5,22 +5,26 @@ on:
     tags:
       - "v*.*.*"
 
+# Restrictive top-level default: neither job inherits write access or
+# the OIDC token unless it declares its own `permissions:` below.
 permissions:
-  contents: write   # create the GitHub Release
-  id-token: write   # cosign keyless OIDC (Fulcio)
+  contents: read
 
 jobs:
   verify:
     name: Full gate
     runs-on: ubuntu-latest
+    # Lint/test/scan only — never pushes, tags, or signs. No id-token needed.
+    permissions:
+      contents: read
     env:
       CGO_ENABLED: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -30,8 +34,7 @@ jobs:
 
       - name: Install golangci-lint
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Lint
@@ -53,24 +56,29 @@ jobs:
     name: GoReleaser
     needs: verify
     runs-on: ubuntu-latest
+    # Only this job creates the GitHub Release and mints the cosign
+    # OIDC token — both are scoped here, not at the workflow level.
+    permissions:
+      contents: write   # create the GitHub Release
+      id-token: write   # cosign keyless OIDC (Fulcio)
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@v0
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
         with:
           version: "~> v2"
           args: release --clean
