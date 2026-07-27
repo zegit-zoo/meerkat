@@ -151,17 +151,26 @@ func resolveGit(src Source, out io.Writer) (root, commit string, err error) {
 	if err != nil {
 		cacheRoot = filepath.Join(os.TempDir(), "meerkat-cache")
 	}
-	root = filepath.Join(cacheRoot, "meerkat", "content", sanitize(src.Repo))
+	// cacheDir is deliberately a plain local, NOT the named return `root`.
+	// Every error path below does `return "", "", err`, which zeroes the
+	// named return *before* deferred functions run — so a defer closing
+	// over `root` would call runGit with an empty dir, leaving cmd.Dir
+	// unset and executing against whatever repository the process happens
+	// to be standing in. That is not theoretical: it silently repointed
+	// this repo's own origin at a test fixture twice before being found.
+	// Anyone running `make sync` from inside a git repo would have had
+	// their origin rewritten by a failed sync.
+	cacheDir := filepath.Join(cacheRoot, "meerkat", "content", sanitize(src.Repo))
 	cleanURL := cloneURL(src) // always tokenless — safe to persist and to log
 	authURL, gitArgs, gitEnv := authClone(src)
 
-	exists := dirExists(filepath.Join(root, ".git"))
+	exists := dirExists(filepath.Join(cacheDir, ".git"))
 	if !exists {
-		if err := os.MkdirAll(filepath.Dir(root), 0o750); err != nil {
+		if err := os.MkdirAll(filepath.Dir(cacheDir), 0o750); err != nil {
 			return "", "", err
 		}
 	} else {
-		_ = runGit(out, root, "remote", "set-url", "origin", authURL)
+		_ = runGit(out, cacheDir, "remote", "set-url", "origin", authURL)
 	}
 	// Always drop the (at most username-bearing, never token-bearing —
 	// see authClone) remote URL back to the plain form before we return,
@@ -169,16 +178,22 @@ func resolveGit(src Source, out io.Writer) (root, commit string, err error) {
 	// than a single call after the if/else) matters: without it, an error
 	// return from the fetch branch below used to skip this scrub entirely,
 	// leaving a live credential path in the user's cache dir indefinitely.
-	defer func() { _ = runGit(out, root, "remote", "set-url", "origin", cleanURL) }()
+	// Guarded on the directory actually being a repo, so a failed clone
+	// can't send the scrub looking for one elsewhere.
+	defer func() {
+		if dirExists(filepath.Join(cacheDir, ".git")) {
+			_ = runGit(out, cacheDir, "remote", "set-url", "origin", cleanURL)
+		}
+	}()
 
 	if !exists {
-		cloneArgs := append(append([]string{}, gitArgs...), "clone", "--quiet", authURL, root)
+		cloneArgs := append(append([]string{}, gitArgs...), "clone", "--quiet", authURL, cacheDir)
 		if err := runGitEnv(out, "", gitEnv, cloneArgs...); err != nil {
 			return "", "", fmt.Errorf("clone %s: %w", redact(authURL), err)
 		}
 	} else {
 		fetchArgs := append(append([]string{}, gitArgs...), "fetch", "--quiet", "--tags", "--force", "origin")
-		if err := runGitEnv(out, root, gitEnv, fetchArgs...); err != nil {
+		if err := runGitEnv(out, cacheDir, gitEnv, fetchArgs...); err != nil {
 			return "", "", fmt.Errorf("fetch: %w", err)
 		}
 	}
@@ -191,11 +206,11 @@ func resolveGit(src Source, out io.Writer) (root, commit string, err error) {
 	// verified against real git that "--detach -- <tag>" fails outright
 	// ("--detach does not take a path argument"), while "--end-of-options
 	// <tag>" resolves the tag exactly as before.
-	if err := runGit(out, root, "checkout", "--quiet", "--force", "--detach", "--end-of-options", src.Ref); err != nil {
+	if err := runGit(out, cacheDir, "checkout", "--quiet", "--force", "--detach", "--end-of-options", src.Ref); err != nil {
 		return "", "", fmt.Errorf("checkout %q (fetch may be needed): %w", src.Ref, err)
 	}
-	sha, _ := gitOut(root, "rev-parse", "--short", "HEAD")
-	return root, fallback(sha, "git"), nil
+	sha, _ := gitOut(cacheDir, "rev-parse", "--short", "HEAD")
+	return cacheDir, fallback(sha, "git"), nil
 }
 
 // cloneURL builds the plain (always tokenless, no embedded username either)
