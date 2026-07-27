@@ -6,26 +6,101 @@ integration, exposed over HTTP/JSON instead of MCP/stdio.
 
 ## Run the server
 
+Default bind is loopback-only (`127.0.0.1`) — safe when OpenWebUI
+runs on the same host as meerkat:
+
+```bash
+export MEERKAT_API_KEY=$(openssl rand -hex 32)
+mk http serve --port 4004
+```
+
+Required:
+- `--api-key <key>` flag **or** `MEERKAT_API_KEY` env (env wins if
+  both are set, with a startup warning). Prefer the env var — a
+  value passed via `--api-key` is visible to other local users via
+  `ps`.
+- The server refuses to start with no key configured. There is no
+  anonymous mode.
+
+Optional:
+- `--host` defaults to `127.0.0.1`.
+- `--port` defaults to `4004`.
+
+If OpenWebUI runs elsewhere, read the next section before reaching
+for `--host 0.0.0.0`.
+
+## OpenWebUI on another host
+
+meerkat has no TLS of its own (`ListenAndServe`, never
+`ListenAndServeTLS`), so reaching it from another host needs TLS
+from somewhere else in the path.
+
+### Reverse proxy (recommended)
+
+Keep meerkat bound to loopback; terminate TLS at a proxy in front of
+it.
+
+`nginx` example:
+
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name meerkat.internal.example.com;
+  ssl_certificate     /etc/letsencrypt/live/meerkat.internal.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/meerkat.internal.example.com/privkey.pem;
+
+  # OpenWebUI sends a long-running search; loosen the read timeout.
+  proxy_read_timeout 60s;
+
+  location / {
+    proxy_pass http://127.0.0.1:4004;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+```
+
+`systemd` unit:
+
+```ini
+[Unit]
+Description=meerkat http server
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/meerkat/env        # contains MEERKAT_API_KEY=...
+ExecStart=/usr/local/bin/meerkat http serve --host 127.0.0.1 --port 4004
+Restart=on-failure
+RestartSec=5
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Direct exposure (`--host 0.0.0.0`)
+
+Only for networks you'd actually trust with an unencrypted bearer
+token — that's rare enough that the reverse proxy above should be
+the default choice. Without TLS somewhere in the path, the
+`Authorization: Bearer` header and every response body cross the
+network in plaintext to anyone positioned to observe it:
+
 ```bash
 export MEERKAT_API_KEY=$(openssl rand -hex 32)
 mk http serve --host 0.0.0.0 --port 4004
 ```
 
-Required:
-- `--api-key <key>` flag **or** `MEERKAT_API_KEY` env (env wins if
-  both are set, with a startup warning)
-- The server refuses to start with no key configured. There is no
-  anonymous mode.
-
-Optional:
-- `--host` defaults to `127.0.0.1`. Use `0.0.0.0` to listen on all
-  interfaces (necessary if OpenWebUI runs on another host).
-- `--port` defaults to `4004`.
-
 ## Register with OpenWebUI
 
 1. Open OpenWebUI → Admin Settings → Tools → "Add Tool Server"
-2. URL: `http://<meerkat-host>:4004/openapi.json`
+2. URL: `http://<meerkat-host>:4004/openapi.json` — or, behind a
+   reverse proxy, the proxy's own `https://` URL
 3. Auth: Bearer Token, paste your `MEERKAT_API_KEY`
 4. Save.
 
@@ -72,54 +147,6 @@ curl -sS -X POST $HOST/show \
   -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
   -d '{"id":"systems/backend/rate-limiter"}' | jq -r .body | head -30
-```
-
-## Behind a reverse proxy
-
-Recommended for anything beyond local-dev. Terminate TLS at the
-proxy; let meerkat speak plain HTTP on `127.0.0.1`.
-
-`nginx` example:
-
-```nginx
-server {
-  listen 443 ssl http2;
-  server_name meerkat.internal.example.com;
-  ssl_certificate     /etc/letsencrypt/live/meerkat.internal.example.com/fullchain.pem;
-  ssl_certificate_key /etc/letsencrypt/live/meerkat.internal.example.com/privkey.pem;
-
-  # OpenWebUI sends a long-running search; loosen the read timeout.
-  proxy_read_timeout 60s;
-
-  location / {
-    proxy_pass http://127.0.0.1:4004;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-  }
-}
-```
-
-`systemd` unit:
-
-```ini
-[Unit]
-Description=meerkat http server
-After=network-online.target
-
-[Service]
-Type=simple
-EnvironmentFile=/etc/meerkat/env        # contains MEERKAT_API_KEY=...
-ExecStart=/usr/local/bin/meerkat http serve --host 127.0.0.1 --port 4004
-Restart=on-failure
-RestartSec=5
-DynamicUser=yes
-ProtectSystem=strict
-ProtectHome=yes
-NoNewPrivileges=yes
-
-[Install]
-WantedBy=multi-user.target
 ```
 
 ## Auth model

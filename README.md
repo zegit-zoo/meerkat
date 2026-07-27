@@ -107,7 +107,7 @@ mk list --owner team-payments --json
 
 # Servers
 mk mcp serve                                          # stdio for OpenCode
-mk http serve --port 4004 --api-key $MEERKAT_API_KEY  # for OpenWebUI
+mk http serve --port 4004                             # for OpenWebUI
 
 # Ingestion (drives OpenCode sub-agents to populate placeholders)
 mk ingest                                             # plan all stale tasks (JSONL)
@@ -150,16 +150,23 @@ Restart OpenCode. Three tools become available to the agent:
 
 ## OpenWebUI integration
 
-Run the HTTP server with a bearer token:
+Run the HTTP server with a bearer token. Default bind is
+loopback-only:
 
 ```bash
 export MEERKAT_API_KEY=$(openssl rand -hex 32)
-mk http serve --host 0.0.0.0 --port 4004
+mk http serve --port 4004
 ```
 
-Register `http://<host>:4004/openapi.json` as a Tool Server in OpenWebUI.
+Register `http://127.0.0.1:4004/openapi.json` as a Tool Server in OpenWebUI.
 The same three tools are available as `POST /search`, `POST /show`,
 `POST /list`. `/healthz` and `/openapi.json` are exempt from auth.
+
+If OpenWebUI runs on another host, don't just add `--host 0.0.0.0` —
+meerkat has no TLS of its own, so that puts the bearer token on the
+wire in plaintext. See
+[docs/INTEGRATION-OPENWEBUI.md](docs/INTEGRATION-OPENWEBUI.md#openwebui-on-another-host)
+for the reverse-proxy pattern (recommended over direct exposure).
 
 ## Ingestion pipeline
 
