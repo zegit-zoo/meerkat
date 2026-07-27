@@ -17,7 +17,20 @@ var ErrCosignMissing = errors.New("cosign binary not found on PATH")
 // GitHub Actions. The regexp anchors on the canonical workflow path
 // so that a compromise of a different repository (sharing the same
 // GitHub Actions OIDC issuer) cannot forge a signature that we'd accept.
-const CertIdentityRegexp = `^https://github\.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v`
+//
+// Anchored at both ends: release tags in this repo are strictly
+// `vX.Y.Z` (see docs/RELEASE.md and the release.yml tag trigger;
+// there is no prerelease-suffix convention in use), so the ref
+// component after "v" is exactly three dot-separated numbers with
+// nothing following. Not anchoring the end is not exploitable today
+// — release.yml only triggers on an actual `push: tags:`, so no
+// other ref can mint a matching OIDC identity — but leaving it open
+// means any suffix after a valid version would also match, which is
+// needless slack for a value whose entire job is exact-matching a
+// trust boundary. Update this (and its mirror in .goreleaser.yaml's
+// verification comment, and docs/RELEASE.md) together if the project
+// ever adopts prerelease tags.
+const CertIdentityRegexp = `^https://github\.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$`
 
 // CertOIDCIssuer is the OIDC issuer for GitHub Actions workload
 // identity tokens. Both this and CertIdentityRegexp must match for

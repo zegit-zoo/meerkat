@@ -298,6 +298,18 @@ func copyMarkdownDir(src, dst string) (int, error) {
 		if d.IsDir() || !strings.HasSuffix(p, ".md") {
 			return nil
 		}
+		// SECURITY: skip symlinks rather than copying what they point at.
+		// git stores symlinks verbatim (mode 120000), so anyone who can
+		// land a commit in the content repo could add `wiki/page.md ->
+		// /home/runner/.ssh/id_rsa`. copyFile opens by path and would
+		// dereference it, materialising the target's bytes as an ordinary
+		// file in the embed dir — which then ships inside the signed
+		// binary. WalkDir does not follow symlinked directories, so
+		// checking the entry type here covers the whole tree.
+		if !d.Type().IsRegular() {
+			fmt.Fprintf(os.Stderr, "contentsource: skipping non-regular file %s\n", p)
+			return nil
+		}
 		rel, err := filepath.Rel(src, p)
 		if err != nil {
 			return err

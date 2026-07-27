@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -57,6 +58,97 @@ func TestSearchHandler_ReturnsHits(t *testing.T) {
 		if _, ok := hits[0][k]; !ok {
 			t.Errorf("hit missing field %q", k)
 		}
+	}
+}
+
+// TestSearchHandler_QueryTooLongIsToolError proves an oversized query
+// comes back as a normal tool-level error (IsError, err == nil), not a
+// transport-level Go error, matching TestSearchHandler_MissingQueryIsToolError's
+// existing contract for the missing-query case.
+func TestSearchHandler_QueryTooLongIsToolError(t *testing.T) {
+	idx, _ := search.NewFromPages(nil)
+	t.Cleanup(func() { _ = idx.Close() })
+
+	huge := strings.Repeat("x", 5000)
+	res, err := searchHandler(idx)(context.Background(), callTool(map[string]any{"query": huge}))
+	if err != nil {
+		t.Fatalf("handler returned transport error: %v", err)
+	}
+	if res == nil || !res.IsError {
+		t.Errorf("expected a tool-level error result for an oversized query")
+	}
+}
+
+// TestSearchHandler_PathologicalNestingIsToolError mirrors the
+// confirmed attack shape (a long run of nested parens) at a size that's
+// cheap to run in a test.
+func TestSearchHandler_PathologicalNestingIsToolError(t *testing.T) {
+	idx, _ := search.NewFromPages(nil)
+	t.Cleanup(func() { _ = idx.Close() })
+
+	nested := strings.Repeat("(", 100)
+	res, err := searchHandler(idx)(context.Background(), callTool(map[string]any{"query": nested}))
+	if err != nil {
+		t.Fatalf("handler returned transport error: %v", err)
+	}
+	if res == nil || !res.IsError {
+		t.Errorf("expected a tool-level error result for a pathologically nested query")
+	}
+}
+
+// TestSearchHandler_ContextCancelledIsToolError proves the handler
+// threads its ctx into the search and surfaces cancellation as a clean
+// tool error rather than hanging or returning a transport error.
+func TestSearchHandler_ContextCancelledIsToolError(t *testing.T) {
+	idx, err := search.NewFromPages([]kb.Page{
+		testPage("concepts/quorum", "Quorum", "A write needs a quorum of replicas.", "concepts", "reviewed", "team-a"),
+	})
+	if err != nil {
+		t.Fatalf("NewFromPages: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	res, err := searchHandler(idx)(ctx, callTool(map[string]any{"query": "quorum"}))
+	if err != nil {
+		t.Fatalf("handler returned transport error: %v", err)
+	}
+	if res == nil || !res.IsError {
+		t.Errorf("expected a tool-level error result for a cancelled context")
+	}
+}
+
+// TestSearchHandler_LimitClampedToMax proves the mk_search tool applies
+// the same MaxLimit cap as the HTTP /search endpoint: a client-supplied
+// limit far above MaxLimit must still come back capped, not passed
+// straight through to bleve.
+func TestSearchHandler_LimitClampedToMax(t *testing.T) {
+	pages := make([]kb.Page, search.MaxLimit+50)
+	for i := range pages {
+		pages[i] = testPage(
+			fmt.Sprintf("fixture/%d", i), fmt.Sprintf("Widget %d", i),
+			"widget widget shared searchable term", "concepts", "reviewed", "team-a",
+		)
+	}
+	idx, err := search.NewFromPages(pages)
+	if err != nil {
+		t.Fatalf("NewFromPages: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+
+	res, err := searchHandler(idx)(context.Background(), callTool(map[string]any{"query": "widget", "limit": float64(100000)}))
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	var hits []map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res)), &hits); err != nil {
+		t.Fatalf("result not valid JSON: %v", err)
+	}
+	if len(hits) != search.MaxLimit {
+		t.Errorf("got %d hits for limit=100000 against %d matching pages, want exactly MaxLimit=%d",
+			len(hits), len(pages), search.MaxLimit)
 	}
 }
 

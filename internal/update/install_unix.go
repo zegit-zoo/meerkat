@@ -17,16 +17,34 @@ import (
 // equivalent. There the caller falls back to telling the user to
 // re-run from an elevated PowerShell.
 func installStagedWithSudo(stagedPath, currentExe string) error {
-	stagingPath := currentExe + ".new"
+	// Same rationale as installStaged's copyFileToNewTemp in
+	// install.go: the staging path must not be a fixed, guessable
+	// name, because a pre-planted symlink there would make `sudo cp`
+	// write through it as root — this is the local-privilege-
+	// escalation variant of the copyFile symlink-follow bug. We can't
+	// call os.CreateTemp here (this process may not have write access
+	// to currentExe's directory at all, which is exactly why sudo is
+	// needed), so instead we pick an unguessable name ourselves and
+	// have the privileged `cp` create it fresh. The backup path keeps
+	// its fixed name: it's only ever written via `mv`/rename, which
+	// replaces the directory entry itself rather than following it,
+	// so a pre-planted symlink there can't be written through.
+	suffix, err := randomHexSuffix()
+	if err != nil {
+		return fmt.Errorf("generate staging suffix: %w", err)
+	}
+	stagingPath := currentExe + ".new-" + suffix
 	backupPath := currentExe + ".old"
 
 	if err := runCommand("sudo", "cp", stagedPath, stagingPath); err != nil {
 		return fmt.Errorf("sudo cp staged binary: %w", err)
 	}
 	if err := runCommand("sudo", "chmod", "0755", stagingPath); err != nil {
+		_ = runCommand("sudo", "rm", "-f", stagingPath)
 		return fmt.Errorf("sudo chmod staged binary: %w", err)
 	}
 	if err := runCommand("sudo", "mv", currentExe, backupPath); err != nil {
+		_ = runCommand("sudo", "rm", "-f", stagingPath)
 		return fmt.Errorf("sudo backup current binary: %w", err)
 	}
 	if err := runCommand("sudo", "mv", stagingPath, currentExe); err != nil {

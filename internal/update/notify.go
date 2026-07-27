@@ -188,16 +188,42 @@ func writeNotifyCache(c notifyCache) error {
 	if p == "" {
 		return fmt.Errorf("no cache path")
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	body, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+	// Write to an unpredictable temp name (os.CreateTemp, which also
+	// gives O_EXCL) rather than the fixed "<p>.tmp", then rename into
+	// place. Same bug class as copyFile in install.go: a fixed name
+	// under a directory this process can write to can be pre-planted
+	// as a symlink to an arbitrary file, which a plain os.WriteFile
+	// (open + O_TRUNC, following symlinks) would then clobber.
+	tmp, err := os.CreateTemp(dir, ".update-check-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, p); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }

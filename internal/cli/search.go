@@ -21,14 +21,14 @@ func newSearchCmd() *cobra.Command {
 		Short: "Full-text search across the embedded wiki",
 		Long: `Run a BM25 full-text search over every embedded wiki page.
 
-Title and ID matches are boosted so page-name lookups (e.g. "FAM-Guide",
-"PowerGrid") rank above incidental body mentions.
+Title and ID matches are boosted so page-name lookups (e.g. "onboarding",
+"rate-limiting") rank above incidental body mentions.
 
 Examples:
-  btkb search "crispy agent"
-  btkb search "PGS PLC password"
-  btkb search title:eviction        # field-targeted query
-  btkb search "30 minute" --limit 20`,
+  mk search "rate limiting"
+  mk search "retention policy"
+  mk search title:eviction        # field-targeted query
+  mk search "30 minute" --limit 20`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := strings.Join(args, " ")
@@ -70,7 +70,7 @@ Examples:
 			return nil
 		},
 	}
-	cmd.Flags().IntVar(&limit, "limit", 10, "Maximum number of results")
+	cmd.Flags().IntVar(&limit, "limit", search.DefaultLimit, "Maximum number of results")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output results as JSON")
 	cmd.Flags().BoolVar(&showBody, "body", false, "Print the full body of every hit")
 	return cmd

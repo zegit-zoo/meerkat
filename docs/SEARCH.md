@@ -82,7 +82,7 @@ req.Highlight = bleve.NewHighlight()
 req.Highlight.AddField("body")
 ```
 
-The boost ratio (5 / 3 / 1) was tuned empirically against btkb's
+The boost ratio (5 / 3 / 1) was tuned empirically against mk's
 ~200-page corpus and carried over here. Page-name queries now
 reliably surface the actual page (not an incidental mention) as
 the top hit; see `internal/search/index_test.go::TestQuery_RankByTitle`.

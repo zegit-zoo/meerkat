@@ -376,14 +376,14 @@ Full-text search across the embedded wiki
 
 Run a BM25 full-text search over every embedded wiki page.
 
-Title and ID matches are boosted so page-name lookups (e.g. "FAM-Guide",
-"PowerGrid") rank above incidental body mentions.
+Title and ID matches are boosted so page-name lookups (e.g. "onboarding",
+"rate-limiting") rank above incidental body mentions.
 
 Examples:
-  btkb search "crispy agent"
-  btkb search "PGS PLC password"
-  btkb search title:eviction        # field-targeted query
-  btkb search "30 minute" --limit 20
+  mk search "rate limiting"
+  mk search "retention policy"
+  mk search title:eviction        # field-targeted query
+  mk search "30 minute" --limit 20
 
 **Usage**
 
@@ -415,9 +415,9 @@ Print the raw markdown for a single wiki page.
 
 Page IDs are slash-separated paths from the wiki root, without the .md
 suffix. Examples:
-  btkb show index
-  btkb show concepts/PowerGrid
-  btkb show systems/BAF/access
+  mk show index
+  mk show concepts/rate-limiting
+  mk show systems/backend/access
 
 **Usage**
 

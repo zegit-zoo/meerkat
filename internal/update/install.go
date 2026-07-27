@@ -1,6 +1,8 @@
 package update
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -87,8 +89,19 @@ func stageInTemp(newPath string) (string, func(), error) {
 }
 
 func installStaged(stagedPath, currentExe string) error {
-	stagingPath := currentExe + ".new"
-	if err := copyFile(stagedPath, stagingPath, 0o755); err != nil {
+	// The staging file lives next to currentExe (so the final rename
+	// stays on one filesystem), but it must NOT have a fixed,
+	// guessable name: the install directory can be writable by other
+	// local users (e.g. macOS ships /usr/local/bin as root:admin 775),
+	// and a fixed name like "<exe>.new" can be pre-planted as a
+	// symlink to an arbitrary victim file before this ever runs.
+	// os.CreateTemp gives both an unpredictable name and O_EXCL
+	// semantics, so there is nothing at the path we actually pick for
+	// a pre-planted symlink to have targeted.
+	dir := filepath.Dir(currentExe)
+	pattern := "." + filepath.Base(currentExe) + ".new-*"
+	stagingPath, err := copyFileToNewTemp(stagedPath, dir, pattern, 0o755)
+	if err != nil {
 		return wrapPermissionError(currentExe, "stage", err)
 	}
 	defer os.Remove(stagingPath) // no-op if already renamed away
@@ -311,13 +324,21 @@ func preferredUserBin() string {
 	return filepath.Join(home, ".local", "bin")
 }
 
+// copyFile copies src to a NEW file at dst (mode-bits mode). dst must
+// not already exist: O_EXCL guarantees that if dst is a pre-existing
+// file OR a symlink (dangling or not), the open fails instead of
+// following it. Every current caller writes into a directory that is
+// itself freshly created and private to this process (stageInTemp's
+// per-run os.MkdirTemp dir), so the fixed basename ("meerkat") is
+// safe here. Don't reuse this for a fixed name inside a long-lived,
+// possibly multi-writer directory — use copyFileToNewTemp there.
 func copyFile(src, dst string, mode os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
 	}
@@ -326,4 +347,64 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	return out.Chmod(mode)
+}
+
+// copyFileToNewTemp copies src into a newly created file inside dir
+// whose name is unpredictable ahead of time, then chmods it to mode.
+// Returns the new file's path.
+//
+// Use this instead of copyFile whenever dir is a long-lived directory
+// that other local users/processes might also be able to write into
+// (e.g. the final install directory). copyFile's O_EXCL protects
+// against a pre-planted symlink at the exact name it's given, but if
+// that name is fixed and guessable (like "<exe>.new"), a symlink
+// planted there ahead of time still permanently blocks every future
+// install attempt (a self-inflicted denial of service) — worse, if a
+// change ever reintroduces O_TRUNC on that fixed name, it silently
+// becomes a write-through-symlink bug again. Handing os.CreateTemp an
+// unguessable name sidesteps both failure modes: there is nothing at
+// the path we actually pick for anything to have pre-planted.
+func copyFileToNewTemp(src, dir, pattern string, mode os.FileMode) (string, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+
+	out, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", err
+	}
+	path := out.Name()
+
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(path)
+		return "", err
+	}
+	if err := out.Chmod(mode); err != nil {
+		out.Close()
+		os.Remove(path)
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+// randomHexSuffix returns a short, unpredictable hex string. Used to
+// build unguessable intermediate file names for install steps that
+// can't call os.CreateTemp directly because the write happens in a
+// separate `sudo` subprocess rather than in this process (see
+// installStagedWithSudo in install_unix.go) — same rationale as
+// copyFileToNewTemp, applied where we can only pick the name, not
+// open the file ourselves.
+func randomHexSuffix() (string, error) {
+	var b [12]byte // 96 bits: not brute-forceable within an update run
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }

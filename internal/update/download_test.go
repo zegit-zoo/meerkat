@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeAsset constructs a tarball containing just a 'meerkat' binary
@@ -188,6 +190,135 @@ func (zeroReader) Read(p []byte) (int, error) {
 		p[i] = 0
 	}
 	return len(p), nil
+}
+
+// TestExtractMeerkat_CumulativeOversizeRejected is the regression test
+// for the decompression-bomb finding: a *decoy* entry (not named
+// "meerkat", so it never goes through the per-file
+// maxExtractedBinarySize check at all) that declares a size larger
+// than the cumulative archive budget must still be rejected.
+// archive/tar's Reader.Next() silently reads and discards whatever is
+// left of an entry we don't fully consume when advancing past it, so
+// without a cumulative cap this decoy alone would force us to
+// decompress and discard an unbounded, attacker-chosen number of
+// bytes — the exact "3 GiB decoy in a ~3 MB tarball" reproduction from
+// the audit, scaled down here to keep the test fast.
+func TestExtractMeerkat_CumulativeOversizeRejected(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	size := maxExtractedArchiveBytes + 4096
+	if err := tw.WriteHeader(&tar.Header{Name: "decoy-not-meerkat", Mode: 0o644, Size: size}); err != nil {
+		t.Fatal(err)
+	}
+	// Write the declared size's worth of zero bytes without holding
+	// it all in memory; gzip compresses this to a tiny stream.
+	if _, err := io.CopyN(tw, zeroReader{}, size); err != nil {
+		t.Fatal(err)
+	}
+	tw.Close()
+	gz.Close()
+
+	tmp := filepath.Join(t.TempDir(), "bomb.tar.gz")
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	_, err := ExtractMeerkat(tmp)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected an error for a cumulative-oversize archive")
+	}
+	if !strings.Contains(err.Error(), "cumulative") {
+		t.Errorf("expected a cumulative-cap error, got: %v", err)
+	}
+	// Guard against the fix regressing to "decompress everything, then
+	// check": this should fail fast once the budget is exhausted, not
+	// after reading the full (fake, zero-filled) decoy payload.
+	if elapsed > 5*time.Second {
+		t.Errorf("ExtractMeerkat took %s — the cumulative cap should short-circuit quickly", elapsed)
+	}
+}
+
+// TestExtractMeerkat_CumulativeCapCatchesMultipleSmallEntries confirms
+// the cap is genuinely cumulative — several entries, each individually
+// small, that together exceed the budget must still be rejected. This
+// rules out an implementation that (incorrectly) only re-checks the
+// budget once per entry using that entry's own declared size rather
+// than tracking bytes actually consumed across the whole archive.
+//
+// Runs against a temporarily shrunk maxExtractedArchiveBytes so this
+// stays fast and deterministic — TestExtractMeerkat_CumulativeOversizeRejected
+// already covers the real production-scale cap end to end.
+func TestExtractMeerkat_CumulativeCapCatchesMultipleSmallEntries(t *testing.T) {
+	origCap := maxExtractedArchiveBytes
+	maxExtractedArchiveBytes = 10 * 1024 // 10 KiB
+	t.Cleanup(func() { maxExtractedArchiveBytes = origCap })
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+
+	const perEntry = 1024 // 1 KiB — individually well under the 10 KiB cap
+	entries := int(maxExtractedArchiveBytes/perEntry) + 2
+	for i := 0; i < entries; i++ {
+		// Duplicate names across entries are fine here: none of them
+		// is "meerkat", and tar doesn't require unique names.
+		if err := tw.WriteHeader(&tar.Header{Name: "decoy", Mode: 0o644, Size: perEntry}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.CopyN(tw, zeroReader{}, perEntry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tw.Close()
+	gz.Close()
+
+	tmp := filepath.Join(t.TempDir(), "many-small.tar.gz")
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ExtractMeerkat(tmp)
+	if err == nil {
+		t.Fatal("expected an error once cumulative entries exceed the cap")
+	}
+	if !strings.Contains(err.Error(), "cumulative") {
+		t.Errorf("expected a cumulative-cap error, got: %v", err)
+	}
+}
+
+// TestCumulativeLimitReader is a fast, direct unit test of the reader
+// itself (no tar/gzip involved): it must allow exactly the configured
+// budget, then fail with errCumulativeLimitExceeded and flip
+// exceeded=true on the very next read attempt.
+func TestCumulativeLimitReader(t *testing.T) {
+	data := strings.Repeat("a", 100)
+	cr := &cumulativeLimitReader{r: strings.NewReader(data), remaining: 40}
+
+	buf := make([]byte, 4096)
+	n, err := cr.Read(buf)
+	if err != nil {
+		t.Fatalf("first read: unexpected error %v", err)
+	}
+	if n != 40 {
+		t.Fatalf("first read returned %d bytes, want 40 (the whole budget in one call)", n)
+	}
+	if cr.exceeded {
+		t.Fatal("exceeded should still be false after consuming exactly the budget")
+	}
+
+	n, err = cr.Read(buf)
+	if n != 0 {
+		t.Errorf("read past budget returned %d bytes, want 0", n)
+	}
+	if !errors.Is(err, errCumulativeLimitExceeded) {
+		t.Fatalf("err = %v, want errCumulativeLimitExceeded", err)
+	}
+	if !cr.exceeded {
+		t.Fatal("expected exceeded=true once the budget is exhausted")
+	}
 }
 
 // TestExtractMeerkat_NoBinary errors when the tarball doesn't

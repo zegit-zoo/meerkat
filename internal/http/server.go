@@ -47,6 +47,15 @@ type Config struct {
 	// WriteTimeout limits how long the server has to write a
 	// response. Defaults to 30s.
 	WriteTimeout time.Duration
+	// QueryTimeout bounds how long a single /search query may run
+	// server-side, regardless of how long the client is willing to
+	// wait. It is applied as a deadline on the context derived from
+	// the request context, so it composes with an early client
+	// disconnect — either one stops the underlying bleve search (see
+	// search.Index.QueryContext). Defaults to search.DefaultQueryTimeout.
+	// Keep it comfortably below WriteTimeout so a query that's allowed
+	// to finish still has time to write its response.
+	QueryTimeout time.Duration
 	// Version is the meerkat version surfaced in /openapi.json and
 	// the root banner. Empty falls back to "dev".
 	Version string
@@ -76,6 +85,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.WriteTimeout == 0 {
 		cfg.WriteTimeout = 30 * time.Second
+	}
+	if cfg.QueryTimeout == 0 {
+		cfg.QueryTimeout = search.DefaultQueryTimeout
 	}
 	if cfg.Version == "" {
 		cfg.Version = "dev"
@@ -222,13 +234,28 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "query is required")
 		return
 	}
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 10
-	}
-	results, err := s.idx.Query(req.Query, limit)
+
+	// QueryTimeout bounds this query's execution server-side even if
+	// the client is happy to wait forever; an early client disconnect
+	// cancels r.Context() itself, which stops the search sooner still.
+	// Either way the deadline/cancellation reaches bleve's collector via
+	// Index.QueryContext -> bleve.SearchInContext (see its doc comment).
+	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.QueryTimeout)
+	defer cancel()
+
+	results, err := s.idx.QueryContext(ctx, req.Query, req.Limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("search: %v", err))
+		switch {
+		case errors.Is(err, search.ErrInvalidQuery):
+			// A rejected input (oversized / pathologically nested query),
+			// not an internal failure — see search.validateQuery.
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, context.DeadlineExceeded):
+			writeError(w, http.StatusGatewayTimeout,
+				"search: query exceeded the server's maximum query duration")
+		default:
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("search: %v", err))
+		}
 		return
 	}
 	out := make([]searchHit, len(results))

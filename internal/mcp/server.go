@@ -77,13 +77,32 @@ func searchHandler(idx *search.Index) mcpserver.ToolHandlerFunc {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		limit := 10
+		limit := 0
 		if v := req.GetFloat("limit", 0); v > 0 {
 			limit = int(v)
 		}
-		results, err := idx.Query(query, limit)
+
+		// Bound this query's execution server-side (see
+		// search.DefaultQueryTimeout) even if the MCP client is happy to
+		// wait forever; ctx itself already carries any cancellation the
+		// client/transport imposes. Either reaches bleve's collector via
+		// Index.QueryContext -> bleve.SearchInContext.
+		ctx, cancel := context.WithTimeout(ctx, search.DefaultQueryTimeout)
+		defer cancel()
+
+		results, err := idx.QueryContext(ctx, query, limit)
 		if err != nil {
-			return nil, fmt.Errorf("search: %w", err)
+			switch {
+			case errors.Is(err, search.ErrInvalidQuery):
+				// A rejected input (oversized / pathologically nested
+				// query), not an internal failure — surface it as a
+				// normal tool error, not a transport-level error.
+				return mcp.NewToolResultError(err.Error()), nil
+			case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+				return mcp.NewToolResultError("search: query did not complete within the maximum query duration"), nil
+			default:
+				return nil, fmt.Errorf("search: %w", err)
+			}
 		}
 		body, err := searchResultsJSON(results)
 		if err != nil {

@@ -261,7 +261,10 @@ func TestResolve_EmptyWhenNeitherSet(t *testing.T) {
 
 func TestFS_MapsEmbedStylePathsOntoContentRepoLayout(t *testing.T) {
 	root := newContentRepo(t)
-	fsys := FS(root)
+	fsys, err := FS(root)
+	if err != nil {
+		t.Fatalf("FS(%q): %v", root, err)
+	}
 
 	body, err := fs.ReadFile(fsys, "content/index.md")
 	if err != nil {

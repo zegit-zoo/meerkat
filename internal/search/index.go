@@ -11,6 +11,7 @@
 package search
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -117,10 +118,35 @@ func NewFromPages(pages []kb.Page, opts ...Option) (*Index, error) {
 	return result, nil
 }
 
-// Query runs a free-text query and returns up to limit results,
-// sorted by score (highest first). Bleve handles tokenisation,
-// stemming, and BM25 ranking. Empty queries return no results
-// without erroring.
+// Query runs a free-text query and returns up to limit results, sorted
+// by score (highest first). It is equivalent to
+// QueryContext(context.Background(), q, limit) — kept as a thin wrapper
+// for callers (the CLI, and existing tests) with no request-scoped
+// context to thread through. Prefer QueryContext for anything reachable
+// by a remote caller: see its doc comment for why the context matters.
+func (i *Index) Query(q string, limit int) ([]Result, error) {
+	return i.QueryContext(context.Background(), q, limit)
+}
+
+// QueryContext is Query with an explicit context. ctx is threaded into
+// bleve's SearchInContext, so a client disconnect or a caller-imposed
+// deadline (e.g. internal/http.Config.QueryTimeout, or the timeout
+// internal/mcp's search handler applies) actually stops the underlying
+// search: bleve's collector checks ctx.Done() every
+// collector.CheckDoneEvery (1024) documents and returns ctx.Err()
+// immediately when it fires, instead of running to completion after
+// the caller has stopped waiting.
+//
+// That only bounds the search/collection phase, though. The raw query
+// string q is validated BEFORE any of that — see validateQuery — since
+// bleve's query-string parser can burn substantial CPU on pathological
+// input synchronously, with no context check anywhere in that code
+// path (see limits.go's doc comment for the mechanism). limit is
+// clamped via clampLimit: non-positive becomes DefaultLimit, and
+// anything above MaxLimit is capped there.
+//
+// Bleve handles tokenisation, stemming, and BM25 ranking. Empty queries
+// return no results without erroring.
 //
 // Field boosts (multiplied with BM25 score):
 //
@@ -136,13 +162,14 @@ func NewFromPages(pages []kb.Page, opts ...Option) (*Index, error) {
 //	while still allowing non-boosted pages to surface via the
 //	title/id/body clauses. If no category boosts are configured (the
 //	default), the query is a plain title/id/body disjunction.
-func (i *Index) Query(q string, limit int) ([]Result, error) {
+func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result, error) {
 	if q == "" {
 		return nil, nil
 	}
-	if limit <= 0 {
-		limit = 10
+	if err := validateQuery(q); err != nil {
+		return nil, err
 	}
+	limit = clampLimit(limit)
 
 	// Build a disjunction across (boosted title) OR (boosted id) OR
 	// (body) OR (per-category boost clauses). The body fallback lets us
@@ -183,7 +210,7 @@ func (i *Index) Query(q string, limit int) ([]Result, error) {
 	req.Highlight = bleve.NewHighlight()
 	req.Highlight.AddField("body")
 
-	res, err := i.bleve.Search(req)
+	res, err := i.bleve.SearchInContext(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("search %q: %w", q, err)
 	}

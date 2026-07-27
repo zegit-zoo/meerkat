@@ -84,7 +84,10 @@ func Configure(dir string) (source string, err error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("--kb-dir %q is not a directory", dir)
 	}
-	fsys := adapt(dir)
+	fsys, err := adapt(dir)
+	if err != nil {
+		return "", err
+	}
 	kb.UseFS(fsys)
 	sources.UseFS(fsys)
 	return "disk:" + dir, nil
@@ -93,19 +96,37 @@ func Configure(dir string) (source string, err error) {
 // FS adapts dir (in content-repo layout) onto the embed-style paths
 // kb/sources expect. Exported mainly for tests that want the adapter
 // without going through Configure's global-state side effects.
-func FS(dir string) fs.FS { return adapt(dir) }
+func FS(dir string) (fs.FS, error) { return adapt(dir) }
 
-func adapt(dir string) fs.FS {
-	// dir is an operator-supplied path (--kb-dir / MEERKAT_KB_DIR),
-	// analogous to internal/contentsource.Load reading content-source.yaml
-	// from the repo root: a deliberate, user-specified location, not
-	// attacker-controlled input smuggled through another path.
-	return adapter{root: os.DirFS(dir)} //nolint:gosec // G304: dir is operator-supplied config, not external input.
+func adapt(dir string) (fs.FS, error) {
+	// SECURITY: os.OpenRoot, not os.DirFS. os.DirFS only rejects ".." in
+	// the *path argument* — it does not stop a symlink stored *inside*
+	// the tree from pointing outside it, which the os.DirFS doc comment
+	// calls out explicitly and recommends Root.FS for. That distinction
+	// is load-bearing here: the kb-dir is routinely a checked-out content
+	// repo (git stores symlinks verbatim) or an extracted archive, and
+	// its contents are served to MCP clients and over HTTP. Without
+	// os.Root, a single `wiki/leak.md -> /etc/passwd` becomes arbitrary
+	// file read via `mk show`, and remote arbitrary file read on an
+	// exposed server. os.Root resolves each path component and refuses
+	// to traverse out of the tree.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("--kb-dir %q: %w", dir, err)
+	}
+	// root is deliberately retained (never closed) for the process
+	// lifetime: it holds the directory handle that backs every later
+	// read, and os.Root has a finalizer that would close it if the only
+	// reference were the fs.FS derived from it.
+	return adapter{root: root.FS(), keepalive: root}, nil
 }
 
 // adapter maps embed-style paths ("content/...", "etc/...") onto the
 // content-repo layout within root.
-type adapter struct{ root fs.FS }
+type adapter struct {
+	root      fs.FS
+	keepalive *os.Root
+}
 
 func (a adapter) Open(name string) (fs.File, error) {
 	mapped, ok := mapPath(name)

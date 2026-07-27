@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,48 @@ func TestCosignAssetNames(t *testing.T) {
 	}
 	if cert != "meerkat_0.4.2_checksums.txt.pem" {
 		t.Errorf("cert name = %q", cert)
+	}
+}
+
+// TestCertIdentityRegexp_AnchoredAtEnd is the regression test for the
+// unanchored-regexp finding: CertIdentityRegexp used to have no `$`
+// (or other end-of-string anchor), so anything appended after a
+// legitimate "refs/tags/vX.Y.Z" identity would still match. Confirm
+// real release identities still match, and that appending anything —
+// a forged suffix, a path traversal, garbage after the version, or a
+// non-numeric "version" — is now rejected.
+func TestCertIdentityRegexp_AnchoredAtEnd(t *testing.T) {
+	re := regexp.MustCompile(CertIdentityRegexp)
+
+	valid := []string{
+		"https://github.com/zegit-zoo/meerkat/.github/workflows/release.yml@refs/tags/v1.2.3",
+		"https://github.com/zegit-zoo/meerkat/.github/workflows/release.yml@refs/tags/v0.0.1",
+		"https://github.com/zegit-zoo/meerkat/.github/workflows/release.yml@refs/tags/v10.20.30",
+	}
+	for _, id := range valid {
+		if !re.MatchString(id) {
+			t.Errorf("expected legitimate release identity to match: %q", id)
+		}
+	}
+
+	invalid := []string{
+		// The core regression: anything trailing a valid version must
+		// NOT match now that the pattern is anchored at the end.
+		"https://github.com/zegit-zoo/meerkat/.github/workflows/release.yml@refs/tags/v1.2.3-evil",
+		"https://github.com/zegit-zoo/meerkat/.github/workflows/release.yml@refs/tags/v1.2.3zzz",
+		"https://github.com/zegit-zoo/meerkat/.github/workflows/release.yml@refs/tags/v1.2.3/../../etc",
+		"https://github.com/zegit-zoo/meerkat/.github/workflows/release.yml@refs/tags/v1.2.3\nextra",
+		// Non-numeric / malformed version component.
+		"https://github.com/zegit-zoo/meerkat/.github/workflows/release.yml@refs/tags/vNOTAVERSION",
+		"https://github.com/zegit-zoo/meerkat/.github/workflows/release.yml@refs/tags/v1.2",
+		// Wrong repo path — should already fail on the (unchanged)
+		// anchored prefix, kept here as a belt-and-suspenders check.
+		"https://github.com/some-other-org/meerkat/.github/workflows/release.yml@refs/tags/v1.2.3",
+	}
+	for _, id := range invalid {
+		if re.MatchString(id) {
+			t.Errorf("expected forged/malformed identity to be rejected: %q", id)
+		}
 	}
 }
 

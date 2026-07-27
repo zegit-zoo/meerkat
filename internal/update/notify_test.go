@@ -166,6 +166,68 @@ func TestNotifyCacheRoundTrip(t *testing.T) {
 	}
 }
 
+// TestWriteNotifyCache_DoesNotFollowPreplantedSymlinkAtFixedTmpName is
+// the regression test for the notify-cache half of the symlink-follow
+// finding: writeNotifyCache used to write its body via
+// os.WriteFile(p+".tmp", ...), a fixed, guessable name. A symlink
+// planted at that exact path ahead of time — same trick as the
+// install.go finding — would get written through and left with the
+// cache's permissions. Confirm the pre-planted symlink at that legacy
+// path is left untouched and the real cache write still succeeds via
+// an unguessable temp name.
+func TestWriteNotifyCache_DoesNotFollowPreplantedSymlinkAtFixedTmpName(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", tmp)
+
+	cacheDir := filepath.Join(tmp, "meerkat")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(victim, []byte("victim-content"), 0o600); err != nil {
+		t.Fatalf("seed victim: %v", err)
+	}
+
+	// Pre-plant a symlink at the OLD fixed name ("<cache path>.tmp").
+	legacyTmpPath := filepath.Join(cacheDir, "update-check.json.tmp")
+	if err := os.Symlink(victim, legacyTmpPath); err != nil {
+		t.Fatalf("plant symlink: %v", err)
+	}
+
+	if err := writeNotifyCache(notifyCache{CheckedAt: time.Now(), LatestTag: "v9.9.9"}); err != nil {
+		t.Fatalf("writeNotifyCache: %v", err)
+	}
+
+	// Victim untouched.
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatalf("read victim: %v", err)
+	}
+	if string(got) != "victim-content" {
+		t.Fatalf("victim clobbered via pre-planted symlink: %q", got)
+	}
+
+	// The pre-planted symlink itself must be untouched too.
+	fi, err := os.Lstat(legacyTmpPath)
+	if err != nil {
+		t.Fatalf("lstat pre-planted symlink: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("pre-planted symlink at %q was replaced with a regular file", legacyTmpPath)
+	}
+
+	// The real cache write must have gone through via a different,
+	// unguessable temp name and be readable back.
+	c, err := readNotifyCache()
+	if err != nil {
+		t.Fatalf("readNotifyCache: %v", err)
+	}
+	if c.LatestTag != "v9.9.9" {
+		t.Fatalf("cache LatestTag = %q, want v9.9.9", c.LatestTag)
+	}
+}
+
 func mustWriteCache(t *testing.T, root string, c notifyCache) {
 	t.Helper()
 	dir := filepath.Join(root, "meerkat")

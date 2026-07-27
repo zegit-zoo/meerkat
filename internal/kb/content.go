@@ -22,7 +22,9 @@ import (
 	"bufio"
 	"embed"
 	"errors"
+	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -134,6 +136,15 @@ func List() ([]Page, error) {
 		if d.IsDir() {
 			return nil
 		}
+		// Skip anything that isn't a regular file. With a runtime
+		// --kb-dir this walks a live filesystem, so the tree can contain
+		// FIFOs, sockets and device nodes. Opening a FIFO blocks until a
+		// writer appears, which never happens — one stray pipe under
+		// wiki/ would otherwise hang `mk list` and stop `http serve` and
+		// `mcp serve` from ever binding, with no diagnostic.
+		if !d.Type().IsRegular() {
+			return nil
+		}
 		if !strings.HasSuffix(p, ".md") {
 			return nil
 		}
@@ -142,7 +153,14 @@ func List() ([]Page, error) {
 		}
 		pg, err := loadByPath(p)
 		if err != nil {
-			return err
+			// One unreadable entry must not take out the whole KB.
+			// A broken symlink, a permission error or a symlink loop
+			// aborts fs.WalkDir otherwise, so a single bad file denies
+			// every page and prevents the servers from starting.
+			if !errors.Is(err, fs.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "meerkat: skipping %s: %v\n", p, err)
+			}
+			return nil
 		}
 		pages = append(pages, pg)
 		return nil
@@ -163,6 +181,14 @@ func List() ([]Page, error) {
 func Load(id string) (Page, error) {
 	id = normaliseID(id)
 	p := path.Join("content", id+".md")
+	// path.Join cleans "..", so an id of "../etc/prompts/x" collapses to
+	// "etc/prompts/x" — exactly cancelling the "content" segment and
+	// escaping the wiki subtree into the ingestion prompts and templates
+	// the sources package serves. Re-assert the prefix after the join
+	// rather than trusting a well-formed id to keep it.
+	if p != "content" && !strings.HasPrefix(p, "content/") {
+		return Page{}, ErrNotFound
+	}
 	if isExcluded(p) {
 		return Page{}, ErrNotFound
 	}

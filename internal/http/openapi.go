@@ -1,5 +1,7 @@
 package http
 
+import "github.com/zegit-zoo/meerkat/internal/search"
+
 // openAPISchema returns an OpenAPI 3.1 description of the meerkat
 // tool endpoints. We hand-roll this rather than auto-generating
 // because the surface is tiny and OpenWebUI is sensitive to small
@@ -35,9 +37,9 @@ func openAPISchema(version string) map[string]any {
 									"limit": map[string]any{
 										"type":        "integer",
 										"description": "Maximum number of hits (default 10).",
-										"default":     10,
+										"default":     search.DefaultLimit,
 										"minimum":     1,
-										"maximum":     100,
+										"maximum":     search.MaxLimit,
 									},
 								},
 							},

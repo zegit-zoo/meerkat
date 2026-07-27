@@ -19,16 +19,16 @@ func newShowCmd() *cobra.Command {
 
 Page IDs are slash-separated paths from the wiki root, without the .md
 suffix. Examples:
-  btkb show index
-  btkb show concepts/PowerGrid
-  btkb show systems/BAF/access`,
+  mk show index
+  mk show concepts/rate-limiting
+  mk show systems/backend/access`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completePageIDs(false),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			page, err := kb.Load(args[0])
 			if err != nil {
 				if errors.Is(err, kb.ErrNotFound) {
-					return fmt.Errorf("page %q not found - try `btkb list`", args[0])
+					return fmt.Errorf("page %q not found - try `mk list`", args[0])
 				}
 				return err
 			}
