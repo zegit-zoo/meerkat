@@ -155,22 +155,17 @@ func TestRelease_FindAsset(t *testing.T) {
 	}
 }
 
-// TestRelease_FindAsset_ChecksumsAndCosign: all three cosign-related assets
-// are found by exact name.
+// TestRelease_FindAsset_ChecksumsAndCosign: the cosign Sigstore bundle
+// asset is found by exact name.
 func TestRelease_FindAsset_ChecksumsAndCosign(t *testing.T) {
-	sigURL := "https://api.github.com/repos/zegit-zoo/meerkat/releases/assets/20001"
-	certURL := "https://api.github.com/repos/zegit-zoo/meerkat/releases/assets/20002"
+	bundleURL := "https://api.github.com/repos/zegit-zoo/meerkat/releases/assets/20001"
 	rel := &Release{
 		TagName: "v0.4.2",
 		Assets: []Asset{
-			{Name: "meerkat_0.4.2_checksums.txt.sig", URL: sigURL},
-			{Name: "meerkat_0.4.2_checksums.txt.pem", URL: certURL},
+			{Name: "meerkat_0.4.2_checksums.txt.sigstore.json", URL: bundleURL},
 		},
 	}
-	if u, ok := rel.FindAsset("meerkat_0.4.2_checksums.txt.sig"); !ok || u != sigURL {
-		t.Errorf("sig: ok=%v url=%q", ok, u)
-	}
-	if u, ok := rel.FindAsset("meerkat_0.4.2_checksums.txt.pem"); !ok || u != certURL {
-		t.Errorf("cert: ok=%v url=%q", ok, u)
+	if u, ok := rel.FindAsset("meerkat_0.4.2_checksums.txt.sigstore.json"); !ok || u != bundleURL {
+		t.Errorf("bundle: ok=%v url=%q", ok, u)
 	}
 }

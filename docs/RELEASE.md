@@ -30,7 +30,7 @@ flat CI run — it's part of the tag-triggered release gate below.
 The released artifacts are:
 - `meerkat_<v>_<os>_<arch>.tar.gz` / `.zip` (Windows)
 - `meerkat_<v>_checksums.txt` (SHA-256)
-- `meerkat_<v>_checksums.txt.sig` + `.pem` (cosign signature + certificate)
+- `meerkat_<v>_checksums.txt.sigstore.json` (cosign Sigstore bundle: signature + certificate + Rekor inclusion proof)
 - `*.sbom.json` (SPDX SBOM per archive)
 
 > **Note:** the repository is public. Downloading release assets is
@@ -39,17 +39,18 @@ The released artifacts are:
 
 ## Verifying a release (consumer side)
 
-Download the checksums file, its signature, and its certificate, then run:
+Download the checksums file and its cosign Sigstore bundle, then run:
 
 ```sh
 cosign verify-blob \
-  --certificate-identity-regexp '^https://github.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-identity-regexp '^https://github.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  --signature meerkat_<v>_checksums.txt.sig \
-  --certificate meerkat_<v>_checksums.txt.pem \
+  --bundle meerkat_<v>_checksums.txt.sigstore.json \
   meerkat_<v>_checksums.txt
 ```
 
 A successful verification confirms the checksums file was produced by the
 `release.yml` workflow in this repository at the exact tagged ref, and that
-the signature was logged in the public Rekor transparency log.
+the signature is included in the public Rekor transparency log — the
+inclusion proof is embedded in the bundle, so this check happens offline
+rather than by querying Rekor live.

@@ -37,10 +37,6 @@ const CertIdentityRegexp = `^https://github\.com/zegit-zoo/meerkat/\.github/work
 // cosign to accept the signature.
 const CertOIDCIssuer = "https://token.actions.githubusercontent.com"
 
-// RekorURL is the transparency log endpoint cosign must use when
-// verifying signatures.
-const RekorURL = "https://rekor.sigstore.dev"
-
 // VerifyChecksumSignature runs `cosign verify-blob` to assert that
 // checksumsPath was signed by the meerkat release workflow. It returns
 // nil on success, ErrCosignMissing if cosign isn't installed, or
@@ -51,11 +47,23 @@ const RekorURL = "https://rekor.sigstore.dev"
 // (token.actions.githubusercontent.com) and (b) the certificate
 // identity regexp pinning the release.yml workflow path.
 //
+// bundlePath is the Sigstore bundle goreleaser publishes alongside
+// the checksums file (see CosignAssetName). The bundle carries the
+// signature, the Fulcio certificate, and the Rekor inclusion proof
+// (a Merkle proof against a signed checkpoint) in one file, so
+// --insecure-ignore-tlog=false is enforced by verifying that
+// embedded proof rather than by cosign making a live call to a
+// Rekor URL — the same cryptographic guarantee (the signature is
+// durably logged in the public transparency log), but checked
+// offline and without trusting a specific endpoint at verify time.
+// Cosign v3 dropped --signature/--certificate/--rekor-url from
+// sign-blob/verify-blob in favor of this bundle; see docs/RELEASE.md.
+//
 // We deliberately invoke the external binary rather than vendor
 // cosign as a library: the dependency footprint of sigstore-go is
 // enormous (TUF, in-toto, OCI) and most update flows already
 // require cosign to be installed for first-time install.
-func VerifyChecksumSignature(ctx context.Context, checksumsPath, sigPath, certPath string) error {
+func VerifyChecksumSignature(ctx context.Context, checksumsPath, bundlePath string) error {
 	cosign, err := exec.LookPath("cosign")
 	if err != nil {
 		return ErrCosignMissing
@@ -69,10 +77,8 @@ func VerifyChecksumSignature(ctx context.Context, checksumsPath, sigPath, certPa
 		"verify-blob",
 		"--certificate-identity-regexp", CertIdentityRegexp,
 		"--certificate-oidc-issuer", CertOIDCIssuer,
-		"--rekor-url", RekorURL,
 		"--insecure-ignore-tlog=false",
-		"--signature", sigPath,
-		"--certificate", certPath,
+		"--bundle", bundlePath,
 		checksumsPath,
 	)
 	cmd.Stdout = os.Stderr
@@ -83,8 +89,8 @@ func VerifyChecksumSignature(ctx context.Context, checksumsPath, sigPath, certPa
 	return nil
 }
 
-// CosignAssetNames returns the signature and certificate file names
-// that goreleaser publishes alongside the checksums file.
-func CosignAssetNames(checksumName string) (sig, cert string) {
-	return checksumName + ".sig", checksumName + ".pem"
+// CosignAssetName returns the Sigstore bundle file name that
+// goreleaser publishes alongside the checksums file.
+func CosignAssetName(checksumName string) string {
+	return checksumName + ".sigstore.json"
 }

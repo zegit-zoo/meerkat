@@ -131,22 +131,19 @@ Examples:
 			if skipCosign {
 				fmt.Fprintln(cmd.OutOrStdout(), "cosign:  SKIPPED (--skip-cosign) — falling back to sha256-only")
 			} else {
-				sigName, certName := update.CosignAssetNames(checksumName)
-				sigURL, _ := rel.FindAsset(sigName)
-				certURL, _ := rel.FindAsset(certName)
-				sigPath, err := update.DownloadToTemp(ctx, sigURL, token, "meerkat-checksums-*.sig")
-				if err != nil {
-					return fmt.Errorf("fetch signature: %w", err)
+				bundleName := update.CosignAssetName(checksumName)
+				bundleURL, ok := rel.FindAsset(bundleName)
+				if !ok {
+					return fmt.Errorf("release %s has no cosign bundle %s", rel.TagName, bundleName)
 				}
-				defer os.Remove(sigPath)
-				certPath, err := update.DownloadToTemp(ctx, certURL, token, "meerkat-checksums-*.pem")
+				bundlePath, err := update.DownloadToTemp(ctx, bundleURL, token, "meerkat-checksums-*.sigstore.json")
 				if err != nil {
-					return fmt.Errorf("fetch certificate: %w", err)
+					return fmt.Errorf("fetch cosign bundle: %w", err)
 				}
-				defer os.Remove(certPath)
+				defer os.Remove(bundlePath)
 
 				fmt.Fprintln(cmd.OutOrStdout(), "cosign:  verifying signature on checksums…")
-				if err := update.VerifyChecksumSignature(ctx, checksumsLocal, sigPath, certPath); err != nil {
+				if err := update.VerifyChecksumSignature(ctx, checksumsLocal, bundlePath); err != nil {
 					if errors.Is(err, update.ErrCosignMissing) {
 						return fmt.Errorf(
 							"cosign binary not found on PATH.\n\n"+

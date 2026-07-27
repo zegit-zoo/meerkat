@@ -12,15 +12,12 @@ import (
 	"testing"
 )
 
-// TestCosignAssetNames checks the suffix convention matches what
-// goreleaser writes: <checksums>.sig, <checksums>.pem.
-func TestCosignAssetNames(t *testing.T) {
-	sig, cert := CosignAssetNames("meerkat_0.4.2_checksums.txt")
-	if sig != "meerkat_0.4.2_checksums.txt.sig" {
-		t.Errorf("sig name = %q", sig)
-	}
-	if cert != "meerkat_0.4.2_checksums.txt.pem" {
-		t.Errorf("cert name = %q", cert)
+// TestCosignAssetName checks the suffix convention matches what
+// goreleaser writes: <checksums>.sigstore.json.
+func TestCosignAssetName(t *testing.T) {
+	got := CosignAssetName("meerkat_0.4.2_checksums.txt")
+	if got != "meerkat_0.4.2_checksums.txt.sigstore.json" {
+		t.Errorf("asset name = %q", got)
 	}
 }
 
@@ -73,7 +70,7 @@ func TestVerifyChecksumSignature_NoCosign(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", dir)
 
-	err := VerifyChecksumSignature(context.Background(), "x", "y", "z")
+	err := VerifyChecksumSignature(context.Background(), "x", "y")
 	if !errors.Is(err, ErrCosignMissing) {
 		t.Errorf("err = %v, want ErrCosignMissing", err)
 	}
@@ -94,7 +91,7 @@ func TestVerifyChecksumSignature_BadSig(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 
-	err := VerifyChecksumSignature(context.Background(), "checksums", "sig", "cert")
+	err := VerifyChecksumSignature(context.Background(), "checksums", "bundle")
 	if err == nil {
 		t.Fatal("expected verification failure")
 	}
@@ -121,7 +118,7 @@ func TestVerifyChecksumSignature_OK(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 
-	if err := VerifyChecksumSignature(context.Background(), "c", "s", "p"); err != nil {
+	if err := VerifyChecksumSignature(context.Background(), "c", "b"); err != nil {
 		t.Errorf("expected success, got %v", err)
 	}
 }

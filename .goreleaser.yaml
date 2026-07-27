@@ -80,24 +80,24 @@ sboms:
 # artifact whose hash is in it) with cosign in keyless mode. The
 # release workflow sets id-token: write so cosign auto-detects the
 # ambient GitHub OIDC token and exchanges it for a Fulcio cert; the
-# signature is logged in Rekor.
+# signature, certificate, and Rekor inclusion proof all land in a
+# single Sigstore bundle (verifiable offline — no live call to Rekor
+# needed at verify time). Cosign v3 requires --bundle for sign-blob;
+# the old --output-signature/--output-certificate flags were dropped.
 #
 # Verification (consumer side):
 #   cosign verify-blob \
-#     --certificate-identity-regexp '^https://github.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v' \
+#     --certificate-identity-regexp '^https://github.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
 #     --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-#     --signature meerkat_<v>_checksums.txt.sig \
-#     --certificate meerkat_<v>_checksums.txt.pem \
+#     --bundle meerkat_<v>_checksums.txt.sigstore.json \
 #     meerkat_<v>_checksums.txt
 signs:
   - cmd: cosign
     artifacts: checksum
-    signature: '${artifact}.sig'
-    certificate: '${artifact}.pem'
+    signature: '${artifact}.sigstore.json'
     args:
       - sign-blob
-      - '--output-signature=${signature}'
-      - '--output-certificate=${certificate}'
+      - '--bundle=${signature}'
       - '${artifact}'
       - '--yes'
 

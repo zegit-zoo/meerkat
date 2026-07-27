@@ -190,26 +190,24 @@ mid-flight), you can recover by manually renaming
 ## Verify the download
 
 Each release publishes a SHA256 checksums file plus a cosign keyless
-signature. To verify before installing (macOS / Linux):
+signature bundle. To verify before installing (macOS / Linux):
 
 ```bash
 TAG=$(gh release list --repo zegit-zoo/meerkat -L 1 --json tagName -q '.[0].tagName')  # latest tag
 VERSION=${TAG#v}
 PLATFORM=darwin_arm64   # adjust for your platform
 
-# 1. fetch the checksums, signature, and certificate via gh CLI
+# 1. fetch the checksums file and its cosign Sigstore bundle via gh CLI
 gh release download "$TAG" \
   --repo zegit-zoo/meerkat \
   -p "meerkat_${VERSION}_checksums.txt" \
-  -p "meerkat_${VERSION}_checksums.txt.sig" \
-  -p "meerkat_${VERSION}_checksums.txt.pem"
+  -p "meerkat_${VERSION}_checksums.txt.sigstore.json"
 
 # 2. verify the cosign signature
 cosign verify-blob \
-  --certificate-identity-regexp '^https://github\.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-identity-regexp '^https://github\.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  --signature "meerkat_${VERSION}_checksums.txt.sig" \
-  --certificate "meerkat_${VERSION}_checksums.txt.pem" \
+  --bundle "meerkat_${VERSION}_checksums.txt.sigstore.json" \
   "meerkat_${VERSION}_checksums.txt"
 
 # 3. verify the tarball matches its line in checksums.txt
@@ -224,19 +222,17 @@ $TAG      = (gh release list --repo zegit-zoo/meerkat -L 1 --json tagName -q '.[
 $VERSION  = $TAG.TrimStart('v')
 $PLATFORM = 'windows_amd64'
 
-# 1. fetch checksums + signature + certificate
+# 1. fetch checksums file + cosign Sigstore bundle
 gh release download $TAG `
   --repo zegit-zoo/meerkat `
   -p "meerkat_${VERSION}_checksums.txt" `
-  -p "meerkat_${VERSION}_checksums.txt.sig" `
-  -p "meerkat_${VERSION}_checksums.txt.pem"
+  -p "meerkat_${VERSION}_checksums.txt.sigstore.json"
 
 # 2. verify signature
 cosign verify-blob `
-  --certificate-identity-regexp '^https://github\.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v' `
+  --certificate-identity-regexp '^https://github\.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' `
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
-  --signature "meerkat_${VERSION}_checksums.txt.sig" `
-  --certificate "meerkat_${VERSION}_checksums.txt.pem" `
+  --bundle "meerkat_${VERSION}_checksums.txt.sigstore.json" `
   "meerkat_${VERSION}_checksums.txt"
 
 # 3. verify the zip hash matches its line in checksums.txt
@@ -248,10 +244,13 @@ $actual = (Get-FileHash -Algorithm SHA256 $Zip).Hash.ToLower()
 if ($expected -ne $actual) { throw "SHA256 mismatch for $Zip" } else { 'OK' }
 ```
 
-`cosign verify-blob` exits 0 only when the signature is present in
-the Rekor transparency log AND the OIDC certificate identity matches
-the `release.yml` workflow in this repository. Skip step 2 if you
-don't need supply-chain attestation (but we recommend keeping it).
+`cosign verify-blob` exits 0 only when the bundle's embedded Rekor
+transparency-log inclusion proof is valid AND the OIDC certificate
+identity matches the `release.yml` workflow in this repository. The
+transparency-log check is verified offline against the proof
+embedded in the bundle — no live call to Rekor is required at verify
+time. Skip step 2 if you don't need supply-chain attestation (but we
+recommend keeping it).
 
 ## From source
 
