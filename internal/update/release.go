@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
 	"runtime"
 	"strings"
 	"time"
@@ -15,6 +16,19 @@ import (
 
 // Project is the GitHub repository meerkat releases ship from.
 const Project = "zegit-zoo/meerkat"
+
+// projectOwner and projectRepo split Project into its two path segments.
+// Anything after the first "/" is the repo, so a malformed constant can
+// never expand into extra path elements.
+func projectOwner() string {
+	owner, _, _ := strings.Cut(Project, "/")
+	return owner
+}
+
+func projectRepo() string {
+	_, repo, _ := strings.Cut(Project, "/")
+	return repo
+}
 
 // githubAPIBase is the GitHub API origin; overridable in tests so
 // fetchOne can be pointed at an httptest server.
@@ -74,11 +88,17 @@ func fetchOne(ctx context.Context, tag string) (*Release, error) {
 		tok = ""
 	}
 
+	// Project is "owner/repo", i.e. two path segments. url.PathEscape
+	// escapes "/" to %2F, which GitHub does not resolve — every request
+	// 404s and the CLI reports "no releases yet" no matter what has been
+	// published. Escape each segment and rejoin, so a segment containing
+	// a slash still cannot smuggle in extra path elements.
 	var u string
+	projectPath := path.Join(url.PathEscape(projectOwner()), url.PathEscape(projectRepo()))
 	if tag != "" {
-		u = githubAPIBase + "/repos/" + url.PathEscape(Project) + "/releases/tags/" + url.PathEscape(tag)
+		u = githubAPIBase + "/repos/" + projectPath + "/releases/tags/" + url.PathEscape(tag)
 	} else {
-		u = githubAPIBase + "/repos/" + url.PathEscape(Project) + "/releases/latest"
+		u = githubAPIBase + "/repos/" + projectPath + "/releases/latest"
 	}
 
 	req, err := http.NewRequestWithContext(c, http.MethodGet, u, nil)

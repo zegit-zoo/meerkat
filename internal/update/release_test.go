@@ -169,3 +169,39 @@ func TestRelease_FindAsset_ChecksumsAndCosign(t *testing.T) {
 		t.Errorf("bundle: ok=%v url=%q", ok, u)
 	}
 }
+
+// TestFetchLatest_RequestPathIsNotOverEscaped guards a bug that made
+// `mk update` fail against every release ever published.
+//
+// Project is "owner/repo" — two path segments. url.PathEscape treats the
+// whole thing as one segment and encodes "/" as %2F, so the request went
+// to /repos/zegit-zoo%2Fmeerkat/releases/latest, which GitHub answers
+// with 404. FetchLatest turned that 404 into "no releases yet", so the
+// CLI cheerfully reported no releases existed no matter what had been
+// published. It was only caught by cutting a real tag and watching the
+// client fail against its own release.
+func TestFetchLatest_RequestPathIsNotOverEscaped(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name":"v9.9.9","published_at":"2026-01-01T00:00:00Z","assets":[]}`))
+	}))
+	defer srv.Close()
+
+	oldBase, oldTok := githubAPIBase, resolveGitHubToken
+	githubAPIBase = srv.URL
+	resolveGitHubToken = func() (string, error) { return "", nil }
+	defer func() { githubAPIBase, resolveGitHubToken = oldBase, oldTok }()
+
+	if _, err := FetchLatest(context.Background()); err != nil {
+		t.Fatalf("FetchLatest: %v", err)
+	}
+	want := "/repos/" + Project + "/releases/latest"
+	if gotPath != want {
+		t.Errorf("request path over-escaped:\n  got  %q\n  want %q", gotPath, want)
+	}
+	if strings.Contains(gotPath, "%2F") || strings.Contains(gotPath, "%2f") {
+		t.Errorf("owner/repo separator was percent-encoded: %q", gotPath)
+	}
+}
