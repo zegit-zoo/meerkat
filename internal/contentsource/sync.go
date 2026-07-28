@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -405,13 +406,23 @@ func cleanGlob(dir string, exts ...string) error {
 	if !dirExists(dir) {
 		return os.MkdirAll(dir, 0o750)
 	}
-	return filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+	// SECURITY (gosec G122 / CWE-367): operate through an os.Root rather
+	// than on the path string the walk hands back. A path observed during
+	// a walk can be replaced by a symlink before the operation on it runs;
+	// os.Root re-resolves each component and refuses to leave the tree, so
+	// the delete cannot be redirected outside dir.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
 		for _, e := range exts {
 			if strings.HasSuffix(p, e) {
-				return os.Remove(p) //nolint:gosec // G122: package-local embed dir under the repo root, not attacker-controlled.
+				return root.Remove(p)
 			}
 		}
 		return nil
@@ -424,18 +435,29 @@ func localCommit(wikiDir string) string {
 	if !dirExists(wikiDir) {
 		return "local"
 	}
+	// SECURITY (gosec G122 / CWE-367): this walks the *resolved content
+	// source*, which for a shared content repo is attacker-influenceable.
+	// os.ReadFile on the walked path would follow a symlink and hash the
+	// bytes of whatever it points at, so a planted link would fold an
+	// external file into the provenance tag. Reading through an os.Root
+	// keeps resolution inside wikiDir, and non-regular entries are skipped
+	// outright, matching copyMarkdownDir.
+	root, err := os.OpenRoot(wikiDir)
+	if err != nil {
+		return "local"
+	}
+	defer func() { _ = root.Close() }()
 	var lines []string
-	_ = filepath.WalkDir(wikiDir, func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".md") {
+	_ = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !d.Type().IsRegular() || !strings.HasSuffix(p, ".md") {
 			return nil //nolint:nilerr // skip unreadable entries; provenance is best-effort.
 		}
-		body, rerr := os.ReadFile(p) //nolint:gosec // G304: build-time content path.
+		body, rerr := root.ReadFile(p)
 		if rerr != nil {
 			return nil //nolint:nilerr // best-effort.
 		}
-		rel, _ := filepath.Rel(wikiDir, p)
 		sum := sha256.Sum256(body)
-		lines = append(lines, rel+":"+hex.EncodeToString(sum[:8]))
+		lines = append(lines, p+":"+hex.EncodeToString(sum[:8]))
 		return nil
 	})
 	if len(lines) == 0 {
