@@ -2,7 +2,7 @@ module github.com/zegit-zoo/meerkat
 
 go 1.26
 
-toolchain go1.26.4
+toolchain go1.26.5
 
 require (
 	github.com/blevesearch/bleve/v2 v2.6.0
