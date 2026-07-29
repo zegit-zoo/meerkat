@@ -15,12 +15,18 @@ type versionInfo struct {
 	Date     string `json:"date"`
 	KBCommit string `json:"kb_commit"`
 	// KBSource is the provenance of the content actually being served:
-	// "embedded" (the build-time embed) or "disk:<path>" (a --kb-dir /
-	// MEERKAT_KB_DIR directory). Distinct from KBCommit, which always
-	// names the build-time embedded content's pinned commit regardless
-	// of KBSource — a disk-served KB has no such pin, and reporting one
-	// here would wrongly imply the cosign-signed release covers content
-	// it never saw.
+	// "embedded" (the build-time embed), "disk:<path>" (--kb-dir /
+	// MEERKAT_KB_DIR, or a type: local content-source.yaml — an
+	// arbitrary, unverified directory), or "url:<url>@<digest>" (a
+	// type: url content-source.yaml). Distinct from KBCommit, which
+	// always names the build-time embedded content's pinned commit
+	// regardless of KBSource — a disk-served KB has no such pin, and
+	// reporting one here would wrongly imply the cosign-signed release
+	// covers content it never saw. A url: source sits in between: unlike
+	// disk:, it IS content-verified (FetchURL checks the sha256 before
+	// ever extracting or serving it) — but it's still not the build's own
+	// pinned commit, so it gets its own prefix rather than being folded
+	// into either of the other two.
 	KBSource  string `json:"kb_source"`
 	GoVersion string `json:"go_version"`
 	OS        string `json:"os"`

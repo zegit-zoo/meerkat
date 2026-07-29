@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/update"
 )
@@ -38,11 +39,13 @@ var (
 )
 
 // kbSourceProvenance is the kb_source value `mk version` reports:
-// "embedded" or "disk:<path>". Set once per invocation by the root
-// command's PersistentPreRunE (see kbDirFlag below), before any
+// "embedded", "disk:<path>" (--kb-dir/MEERKAT_KB_DIR, or a type: local
+// content-source.yaml), or "url:<url>@<digest>" (a type: url
+// content-source.yaml — see contentsource.URLProvenance). Set once per
+// invocation by the root command's PersistentPreRunE, before any
 // subcommand's RunE runs. Defaults to embedded so direct callers of
 // newVersionCmd() in tests (which bypass the root command) still get
-// a sane, correct answer: no --kb-dir means embedded.
+// a sane, correct answer: no content configured means embedded.
 var kbSourceProvenance = kbdir.SourceEmbedded
 
 // Cobra command groups so `meerkat --help` clusters subcommands by
@@ -57,6 +60,7 @@ const (
 // constructor so tests can spin up isolated trees.
 func NewRootCmd() *cobra.Command {
 	var kbDirFlag string
+	var contentSourceFlag string
 
 	root := &cobra.Command{
 		Use:   "meerkat",
@@ -67,10 +71,23 @@ HTTP/OpenAPI server (for OpenWebUI).
 
 All wiki content is bundled into the binary at build time and served
 from there by default. No network access is required for search,
-show, or list. Point --kb-dir (or MEERKAT_KB_DIR) at a content-repo
-directory (the layout content-source.yaml describes and 'mk ingest'
-writes into) to serve updated content without rebuilding the binary —
-the embed remains the fallback when neither is set.
+show, or list. What gets served instead is resolved in priority order:
+
+  1. --kb-dir (or MEERKAT_KB_DIR) — an explicit content-repo directory
+     (the layout content-source.yaml describes and 'mk ingest' writes
+     into). Wins outright over everything below.
+  2. --content-source (or MEERKAT_CONTENT_SOURCE) — an explicit path to
+     a content-source.yaml.
+  3. <user config dir>/meerkat/content-source.yaml
+  4. ./content-source.yaml in the working directory
+  5. the embedded build (the fallback when none of the above apply)
+
+content-source.yaml's "content.type" may be none, local, or url at
+runtime (git/submodule are build-time only — 'make sync' — since they
+need git and a working tree; using one here fails with an error rather
+than silently serving nothing). type: url fetches an HTTPS .tar.gz,
+verifies it against a required sha256, and caches the extracted result
+locally, keyed by that digest — see content-source.example.yaml.
 
 Page IDs are slash-paths from the wiki root without ".md" — e.g.
 "concepts/Some-Concept", "systems/backend/some-service".
@@ -84,19 +101,44 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 
   # Serve content from disk instead of the embedded build
   meerkat --kb-dir ./meerkat-kb search "some term"
-  MEERKAT_KB_DIR=./meerkat-kb meerkat list`,
+  MEERKAT_KB_DIR=./meerkat-kb meerkat list
+
+  # Serve content resolved from a content-source.yaml (type: none|local|url)
+  meerkat --content-source ./content-source.yaml list`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		// PersistentPreRunE resolves --kb-dir/MEERKAT_KB_DIR once per
+		// PersistentPreRunE resolves the content to serve once per
 		// invocation, before any subcommand's RunE, and points
 		// internal/kb + internal/sources at the result (disk directory
 		// or embedded fallback). It runs for every subcommand since none
 		// of them define their own PersistentPreRun.
+		//
+		// --kb-dir/MEERKAT_KB_DIR is resolved first and, if set, wins
+		// outright — this branch is unchanged from before content-source
+		// resolution existed. Only when it's unset does content-source.yaml
+		// discovery (internal/contentsource.ResolveRuntime) run.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			dir := kbdir.Resolve(kbDirFlag)
-			source, err := kbdir.Configure(dir)
+			if dir := kbdir.Resolve(kbDirFlag); dir != "" {
+				source, err := kbdir.Configure(dir)
+				if err != nil {
+					return err
+				}
+				kbSourceProvenance = source
+				return nil
+			}
+			rc, err := contentsource.ResolveRuntime(contentSourceFlag)
 			if err != nil {
 				return err
+			}
+			source, err := kbdir.ConfigureLayout(rc.Dir, rc.Source.Layout)
+			if err != nil {
+				return err
+			}
+			if rc.Source.Type == contentsource.TypeURL {
+				// url: content is verified (sha256-checked); disk:<path>
+				// (ConfigureLayout's default label above) would just name
+				// an opaque cache directory — see URLProvenance.
+				source = contentsource.URLProvenance(rc.Source)
 			}
 			kbSourceProvenance = source
 			return nil
@@ -121,7 +163,14 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 		"Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, "+
 			"ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. "+
 			"The directory must exist; a missing wiki/ingestion/templates subdirectory inside it "+
-			"degrades to empty rather than erroring.")
+			"degrades to empty rather than erroring. Wins over --content-source / content-source.yaml "+
+			"discovery below.")
+	root.PersistentFlags().StringVar(&contentSourceFlag, "content-source", "",
+		"Path to a content-source.yaml describing where to serve KB content from "+
+			"(content.type: none|local|url — git/submodule are build-time-only, 'make sync'). "+
+			"Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this "+
+			"nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, "+
+			"then ./content-source.yaml, then the embedded build.")
 
 	root.AddGroup(
 		&cobra.Group{ID: groupKB, Title: "Knowledge base (always available, offline):"},

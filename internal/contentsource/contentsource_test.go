@@ -37,13 +37,23 @@ func TestLoad_AppliesLayoutDefaults(t *testing.T) {
 }
 
 func TestValidate_Errors(t *testing.T) {
+	validSha := strings.Repeat("a", 64)
 	cases := map[string]Source{
-		"bad type":       {Type: "ftp", Layout: defaultLayout()},
-		"local no path":  {Type: TypeLocal, Layout: defaultLayout()},
-		"git no repo":    {Type: TypeGit, Ref: "v1", Layout: defaultLayout()},
-		"git no ref":     {Type: TypeGit, Repo: "o/r", Layout: defaultLayout()},
-		"git bad host":   {Type: TypeGit, Repo: "o/r", Ref: "v1", Host: "bitbucket", Layout: defaultLayout()},
-		"submodule none": {Type: TypeSubmodule, Layout: defaultLayout()},
+		"bad type":         {Type: "ftp", Layout: defaultLayout()},
+		"local no path":    {Type: TypeLocal, Layout: defaultLayout()},
+		"git no repo":      {Type: TypeGit, Ref: "v1", Layout: defaultLayout()},
+		"git no ref":       {Type: TypeGit, Repo: "o/r", Layout: defaultLayout()},
+		"git bad host":     {Type: TypeGit, Repo: "o/r", Ref: "v1", Host: "bitbucket", Layout: defaultLayout()},
+		"submodule none":   {Type: TypeSubmodule, Layout: defaultLayout()},
+		"url no url":       {Type: TypeURL, SHA256: validSha, Layout: defaultLayout()},
+		"url http scheme":  {Type: TypeURL, URL: "http://example.com/kb.tar.gz", SHA256: validSha, Layout: defaultLayout()},
+		"url no scheme":    {Type: TypeURL, URL: "example.com/kb.tar.gz", SHA256: validSha, Layout: defaultLayout()},
+		"url no sha256":    {Type: TypeURL, URL: "https://example.com/kb.tar.gz", Layout: defaultLayout()},
+		"url short sha256": {Type: TypeURL, URL: "https://example.com/kb.tar.gz", SHA256: "abcd", Layout: defaultLayout()},
+		"url non-hex sha256": {
+			Type: TypeURL, URL: "https://example.com/kb.tar.gz",
+			SHA256: strings.Repeat("g", 64), Layout: defaultLayout(),
+		},
 	}
 	for name, s := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -60,10 +70,42 @@ func TestValidate_OK(t *testing.T) {
 		{Type: TypeLocal, Path: "kb", Layout: defaultLayout()},
 		{Type: TypeGit, Repo: "o/r", Ref: "v1", Host: "github", Layout: defaultLayout()},
 		{Type: TypeSubmodule, Submodule: "kb", Layout: defaultLayout()},
+		{Type: TypeURL, URL: "https://example.com/kb.tar.gz", SHA256: strings.Repeat("a", 64), Layout: defaultLayout()},
+		// Scheme comparison is case-insensitive (RFC 3986); mixed-case
+		// sha256 is tolerated too (isHex64 is case-insensitive).
+		{Type: TypeURL, URL: "HTTPS://example.com/kb.tar.gz", SHA256: strings.Repeat("AbCd", 16), Layout: defaultLayout()},
 	} {
 		if err := s.Validate(); err != nil {
 			t.Errorf("type %s: unexpected error %v", s.Type, err)
 		}
+	}
+}
+
+// TestValidate_URL_ErrorMessages checks the specific, actionable wording
+// (not just "an error occurred") for each type: url validation failure —
+// the sha256 requirement in particular is deliberate (see Source.SHA256's
+// doc comment) and its error must say so, not just "field required".
+func TestValidate_URL_ErrorMessages(t *testing.T) {
+	validSha := strings.Repeat("a", 64)
+
+	err := Source{Type: TypeURL, SHA256: validSha, Layout: defaultLayout()}.Validate()
+	if err == nil || !strings.Contains(err.Error(), "content.url") {
+		t.Errorf("missing url: err = %v, want it to mention content.url", err)
+	}
+
+	err = Source{Type: TypeURL, URL: "http://example.com/kb.tar.gz", SHA256: validSha, Layout: defaultLayout()}.Validate()
+	if err == nil || !strings.Contains(err.Error(), "https://") {
+		t.Errorf("http:// url: err = %v, want it to mention https://", err)
+	}
+
+	err = Source{Type: TypeURL, URL: "https://example.com/kb.tar.gz", Layout: defaultLayout()}.Validate()
+	if err == nil || !strings.Contains(err.Error(), "content.sha256") {
+		t.Errorf("missing sha256: err = %v, want it to mention content.sha256", err)
+	}
+
+	err = Source{Type: TypeURL, URL: "https://example.com/kb.tar.gz", SHA256: "deadbeef", Layout: defaultLayout()}.Validate()
+	if err == nil || !strings.Contains(err.Error(), "64 hex") {
+		t.Errorf("short sha256: err = %v, want it to mention the 64-hex-char requirement", err)
 	}
 }
 
