@@ -113,8 +113,8 @@ available to any chat that has the tool enabled.
 | Method | Path | Body | Auth | Returns |
 |--------|------|------|------|---------|
 | POST | `/search` | `{query, limit?}` | Bearer | `[{id, title, score, snippet, category, status}]` |
-| POST | `/show` | `{id}` | Bearer | `{id, title, body, front}` |
-| POST | `/list` | `{prefix?, category?, status?, owner?}` | Bearer | `[{id, title, category, status, owner, source}]` |
+| POST | `/show` | `{id}` | Bearer | `{id, title, body, front, trust_tier, stale}` |
+| POST | `/list` | `{prefix?, category?, status?, owner?, type?}` | Bearer | `[{id, title, category, status, owner, type, source}]` |
 | GET | `/openapi.json` | — | none | OpenAPI 3.1 schema |
 | GET | `/healthz` | — | none | `{"status":"ok"}` |
 | GET | `/` | — | none | plain-text help banner |

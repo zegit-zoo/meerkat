@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
@@ -160,21 +161,40 @@ func (a adapter) Open(name string) (fs.File, error) {
 // counterpart per a.layout (see the package doc comment for the default
 // layout table).
 func (a adapter) mapPath(name string) (string, bool) {
+	// joinLayout uses path.Join rather than string concatenation so a
+	// layout segment of "." cleans away instead of producing "./x".
+	// That matters for OKF bundles, whose concept files sit at the
+	// bundle root: `layout: {wiki: "."}` is the natural way to express
+	// it, and fs.ValidPath rejects a "./" prefix, so concatenation
+	// failed with a bare "invalid argument" from deep in the FS layer.
+	// path.Join also cleans any "..", which fs.ValidPath then rejects
+	// outright — the os.Root backing this adapter would refuse to
+	// traverse out regardless, but failing early gives a better error.
+	joinLayout := func(seg, rest string) (string, bool) {
+		p := path.Join(seg, rest)
+		if p == "" {
+			p = "."
+		}
+		if p != "." && !fs.ValidPath(p) {
+			return "", false
+		}
+		return p, true
+	}
 	switch {
 	case name == "content":
-		return a.layout.Wiki, true
+		return joinLayout(a.layout.Wiki, "")
 	case strings.HasPrefix(name, "content/"):
-		return a.layout.Wiki + "/" + strings.TrimPrefix(name, "content/"), true
+		return joinLayout(a.layout.Wiki, strings.TrimPrefix(name, "content/"))
 	case name == "etc/sources.yaml":
-		return a.layout.Sources, true
+		return joinLayout(a.layout.Sources, "")
 	case name == "etc/prompts":
-		return a.layout.Prompts, true
+		return joinLayout(a.layout.Prompts, "")
 	case strings.HasPrefix(name, "etc/prompts/"):
-		return a.layout.Prompts + "/" + strings.TrimPrefix(name, "etc/prompts/"), true
+		return joinLayout(a.layout.Prompts, strings.TrimPrefix(name, "etc/prompts/"))
 	case name == "etc/templates":
-		return a.layout.Templates, true
+		return joinLayout(a.layout.Templates, "")
 	case strings.HasPrefix(name, "etc/templates/"):
-		return a.layout.Templates + "/" + strings.TrimPrefix(name, "etc/templates/"), true
+		return joinLayout(a.layout.Templates, strings.TrimPrefix(name, "etc/templates/"))
 	default:
 		return "", false
 	}

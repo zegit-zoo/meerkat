@@ -107,12 +107,13 @@ so `title:retry` returns only pages whose title contains "retry".
 
 ## Frontmatter as fields (planned)
 
-Frontmatter (`category`, `owner`, `status`, `tags`, …) is parsed into
-`kb.Page.Front` but **not yet indexed by search**. The CLI/MCP/HTTP
-filters compose post-search via `kb.Filter` helpers. The day we
-need `mk search "owner:team-payments tier-1"` to work in the search
-syntax itself is when we extend `buildMapping()` with a low-boost
-keyword field per Frontmatter key.
+Frontmatter (`category`, `owner`, `status`, `tags`, `type`, …) is parsed
+into `kb.Page.Front` but **not yet indexed by search**. The CLI/MCP/HTTP
+filters (including `type` — OKF's concept-kind field, see
+[OKF.md](OKF.md#type-as-a-filter)) compose post-search via
+`kb.Filter` helpers. The day we need `mk search "owner:team-payments
+tier-1"` to work in the search syntax itself is when we extend
+`buildMapping()` with a low-boost keyword field per Frontmatter key.
 
 ## Cold-start budget
 

@@ -215,6 +215,23 @@ removing the need to trust the operator's own configuration — full
 operator responsibility either way, no meerkat-side verification of that
 choice.
 
+### OKF `trust_tier` is advisory, not verified
+
+Serving a third-party [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+bundle (see [OKF.md](OKF.md)) doesn't change the threat model above —
+it's still runtime KB content, unverified or digest-verified per the
+same `disk:<path>` / `url:<url>@<digest12>` rows depending on how it's
+configured. The one thing worth calling out on its own: `mk show` /
+`mk_show` / `POST /show` surface a `trust_tier`
+(`unverified`/`machine-confirmed`/`human-reviewed`) derived from the
+bundle's own `verified` frontmatter. That value is metadata **asserted
+by whoever produced the bundle**, not something meerkat checks — a
+producer can write `verified: { by: human:anyone, at: ... }` on any
+concept regardless of whether a human actually looked at it. Read
+`trust_tier` the same way as `kb_source`'s `disk:<path>` label: a
+provenance signal to inform a human or agent's judgment, not an
+access-control or integrity guarantee.
+
 ---
 
 ## Reporting a vulnerability

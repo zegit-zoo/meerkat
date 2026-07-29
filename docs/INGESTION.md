@@ -115,6 +115,19 @@ per page:
 JSONL is the contract: anything that consumes `mk ingest` output
 is just iterating over it.
 
+### OKF bundles are never selected
+
+The planner's default `--status` filter is `placeholder` /
+`ingest-failed` — meerkat's own "needs work" vocabulary. A KB that mixes
+in an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+bundle (see [OKF.md](OKF.md)) uses OKF's own `status` values
+(`draft`/`stable`/`deprecated`) on those pages instead, untranslated —
+none of which match the default filter. A plain `mk ingest` or `mk
+ingest --execute` therefore never selects an OKF-authored page, with or
+without `--source`/`--page` narrowing further; the only way to target
+one is an explicit `mk ingest --status draft` (or whichever OKF value)
+naming it directly.
+
 ## Executor (`mk ingest --execute`)
 
 ```bash

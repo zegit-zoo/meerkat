@@ -103,6 +103,7 @@ mk show concepts/Rate-Limiting
 mk list --prefix systems/backend/
 mk list --category policies --status placeholder
 mk list --owner team-payments --json
+mk list --type "BigQuery Table"                       # OKF's concept-kind field — see docs/OKF.md
 
 # Servers
 mk mcp serve                                          # stdio for OpenCode
@@ -144,8 +145,8 @@ Restart OpenCode. Three tools become available to the agent:
 | Tool | Args | Returns |
 |---|---|---|
 | `mk_search` | `query`, `limit?` | `[{id, title, score, snippet, category, status}]` |
-| `mk_show` | `id` | `{id, title, body, front}` (parsed frontmatter) |
-| `mk_list` | `prefix?`, `category?`, `status?`, `owner?` | `[{id, title, category, status, owner, source}]` |
+| `mk_show` | `id` | `{id, title, body, front, trust_tier, stale}` (parsed frontmatter, plus two OKF-derived advisory signals — see [docs/OKF.md](docs/OKF.md#trust-and-lifecycle)) |
+| `mk_list` | `prefix?`, `category?`, `status?`, `owner?`, `type?` | `[{id, title, category, status, owner, type, source}]` |
 
 ## OpenWebUI integration
 
@@ -366,6 +367,32 @@ embedded content's commit, never a runtime directory's or archive's. See
 [docs/SECURITY.md](docs/SECURITY.md) for what that split means for
 provenance.
 
+### OKF bundles
+
+Any of the mechanisms above can point at an unmodified
+[OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+(Open Knowledge Format) knowledge bundle instead of a meerkat-authored
+content repo — `list`/`show`/`search` all work, no conversion step:
+
+```yaml
+content:
+  type: local
+  path: /path/to/parent-of-the-bundle   # the bundle's PARENT directory
+  layout:
+    wiki: name-of-the-bundle-directory  # the bundle itself, unmodified
+```
+
+A bundle's own root directory does not match the `wiki/`-rooted
+content-repo layout meerkat expects, so `layout.wiki` has to name the
+bundle's own directory as shown above — pointing it at `.` (the bundle
+root itself, unrenamed) does not work. meerkat implements the OKF
+**consumer** side only: it is an independent, third-party consumer, not
+affiliated with or endorsed by OKF's authors (Google Cloud Platform).
+See [docs/OKF.md](docs/OKF.md) for the full mapping from OKF frontmatter
+to meerkat's, the trust-tier/staleness signals it surfaces, and what's
+deliberately not implemented (cross-link resolution, the Attested
+Computation family).
+
 ## How search works
 
 Bleve full-text BM25 index, built in-memory at startup from the embedded
@@ -470,6 +497,9 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
   — official meerkat documentation
 - [zegit.dev/documentation/meerkat-cli.html](https://zegit.dev/documentation/meerkat-cli.html)
   — CLI reference and integration guides
+- [docs/OKF.md](docs/OKF.md) — serving an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+  (Open Knowledge Format) bundle unmodified, and what meerkat does with
+  its frontmatter
 - [docs/design/content-sources.md](docs/design/content-sources.md) — how
   `content-source.yaml` maps a content repo onto the embed dirs
 - [docs/design/ingestion-pipeline.md](docs/design/ingestion-pipeline.md) —

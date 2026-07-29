@@ -26,8 +26,8 @@ available to the agent:
 | Tool | Args | Returns |
 |------|------|---------|
 | `mk_search` | `query`, `limit?` (default 10) | `[{id, title, score, snippet, category, status}]` |
-| `mk_show` | `id` | `{id, title, body, front}` (raw markdown body + parsed YAML frontmatter) |
-| `mk_list` | `prefix?`, `category?`, `status?`, `owner?` | `[{id, title, category, status, owner, source}]` |
+| `mk_show` | `id` | `{id, title, body, front, trust_tier, stale}` (raw markdown body + parsed YAML frontmatter, plus two OKF-derived advisory signals — see [OKF.md](OKF.md#trust-and-lifecycle)) |
+| `mk_list` | `prefix?`, `category?`, `status?`, `owner?`, `type?` | `[{id, title, category, status, owner, type, source}]` |
 
 The agent will pick these up automatically — they appear in
 `opencode tools` and are advertised to the model on every prompt.
