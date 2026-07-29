@@ -130,6 +130,17 @@ Additional hardening in place:
   release/download requests.
 - Ingest executor validates that task `page_path` resolves within the
   configured KB workdir before reading/writing page files.
+- `type: url` content archive extraction (`internal/contentsource/archive.go`)
+  treats every entry as hostile: symlink and hardlink entries are skipped
+  outright (never created, never followed — the same escape vector
+  `internal/kbdir`'s read-side adapter is hardened against, reproduced here
+  on the write side); an entry name that's absolute, traverses (`..`), or
+  contains a backslash/colon (Windows drive-absolute confusion) is
+  rejected outright rather than relying on containment alone; every write
+  goes through an `os.Root` rooted at the extraction directory, so
+  containment holds even against a name engineered to defeat a
+  string-only check; and per-file, cumulative, and entry-count caps bound
+  decompression against a zip-bomb-style archive.
 
 ---
 
@@ -142,12 +153,13 @@ is small but worth being explicit about:
 | Asset | Threat | Mitigation |
 |-------|--------|-----------|
 | Embedded wiki content | Tampering between source and binary | Content is embedded at build time; `mk version`'s `kb_commit` records the content commit it was built from. The release binary's SHA256 is published and cosign-signed, so consumers can verify the exact bytes — **this mitigation covers embedded content only** (see the next row). |
-| Runtime KB content (`--kb-dir` flag / `MEERKAT_KB_DIR` env var) | Tampering, or malicious content, in a directory an operator points meerkat at | **Not covered by the cosign signature, the checksums file, or `kb_commit`.** `kb_commit` always names the build-time embedded content's commit regardless of what's actually being served — it says nothing about a `--kb-dir` directory's contents. `mk version`'s `kb_source` field (`embedded` or `disk:<path>`) reports which content is actually in effect, so operators and auditors can tell the two apart, but it is a provenance label, not an integrity guarantee: meerkat performs no signature check, hashing, or sandboxing of runtime KB content. An operator who sets `--kb-dir`/`MEERKAT_KB_DIR` is trusting that directory themselves, at the moment of every invocation — comparable in posture to `--trust-sources` for ingestion (below). |
+| Runtime KB content — unverified (`--kb-dir` flag / `MEERKAT_KB_DIR` env var, or a `type: local` `content-source.yaml` source) | Tampering, or malicious content, in a directory an operator points meerkat at | **Not covered by the cosign signature, the checksums file, or `kb_commit`.** `kb_commit` always names the build-time embedded content's commit regardless of what's actually being served — it says nothing about this directory's contents. `mk version`'s `kb_source` field (`disk:<path>`) reports that this kind of content is in effect, so operators and auditors can tell it apart from `embedded`/`url:...` (below), but it is a provenance label, not an integrity guarantee: meerkat performs no signature check, hashing, or sandboxing here. An operator who configures one of these is trusting that directory themselves, at the moment of every invocation — comparable in posture to `--trust-sources` for ingestion (below). |
+| Runtime KB content — digest-verified (`type: url` `content-source.yaml` source) | Tampering in transit, or at rest wherever the archive is hosted | **Also not covered by the cosign signature, the checksums file, or `kb_commit`** — same as the row above. What *is* different: the archive's sha256 is checked before anything is extracted or cached (`internal/contentsource.FetchURL`), so tampered bytes are rejected outright rather than served, and extraction itself is hardened against a hostile archive (symlink/hardlink entries skipped, absolute/traversing entry names rejected, writes contained by an `os.Root`, per-file/cumulative/entry-count decompression caps — see "Additional hardening in place" above). What the digest does **not** buy: it does not place the archive under the release's cosign signature — that covers the binary's own checksums file, not an arbitrary operator-named URL — and meerkat cannot tell a correct digest for the *wrong* archive from a correct digest for the intended one. The choice of `url`/`sha256` in `content-source.yaml` is still the operator's, unverified by meerkat. `kb_source` reports `url:<url>@<digest12>` so this case is distinguishable from `disk:<path>` at a glance. |
 | User's GitHub token (used by `mk update` and `mk ingest` git auth) | Disclosure via argv, on-disk config, or logging | The token (from the `gh` auth cache) is handed to the clone/fetch subprocess only via a `credential.helper` script that reads it back from an env var (`MEERKAT_GIT_TOKEN`) at request time — it never appears in argv, in the persisted remote URL, or in `.git/config`. The remote URL is scrubbed back to its tokenless form in a `defer` immediately after clone/fetch, including on error paths, so a live credential doesn't linger in the cache dir. |
 | Downloaded release binary (in `mk update` flow) | Supply-chain swap | SHA256 verified against published `checksums.txt`; cosign signature on the checksums file (Rekor-logged); staged in a user-owned temp dir before final copy/move; `.old` backup during swap |
 | `mk http serve` API key, and the traffic it guards | Disclosure — in code/logs, or on the wire | Key comparison is constant-time (`subtle.ConstantTimeCompare`), the key is never echoed, and the server refuses to start without one. **The server has no TLS of its own** (`ListenAndServe`, never `ListenAndServeTLS`) — default bind is loopback (`127.0.0.1`). Exposed beyond one host without a TLS-terminating reverse proxy in front, the bearer token and every response body cross the network in plaintext. See `docs/INTEGRATION-OPENWEBUI.md` for the reverse-proxy pattern. |
 | `mk ingest --execute` spawns an agent CLI (`opencode` or `claude`) | Prompt injection: `Task.Prompt` is rendered from `ingestion/prompts/*.md` in the ingested content source, so a malicious prompt file in any source repo in `sources.yaml` is an arbitrary-action path, running with `cmd.Dir`/`--dir` set to a working copy that holds push credentials, at the operator's full privilege. The generated instruction itself includes a `git push` recipe. | Ingested content is treated as **trusted input** to the agent — meerkat does not sandbox or vet it. The real control is permission prompts: by default the agent CLI runs *with* its normal permission prompts, so an injected instruction still has to get past those before it acts. `--trust-sources` disables the prompts (passes `--dangerously-skip-permissions` to the agent CLI) for unattended/CI runs; it prints a stderr warning before executing. Operators who enable `--trust-sources` must trust every source repo listed in `sources.yaml` — as much as they trust code they'd merge unreviewed. |
-| Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk. **When served from `--kb-dir`/`MEERKAT_KB_DIR` instead, the same gap as the runtime KB content row above applies**: they're read from the operator-supplied directory at runtime, outside the gosec walk and the cosign-signed release. |
+| Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk. **When served from a runtime content source instead** (`--kb-dir`/`MEERKAT_KB_DIR`, or a `content-source.yaml` `type: local`/`type: url` source), the two rows above apply here too: unverified for `disk:<path>`, digest-verified (with the same caveats) for `url:<url>@...` — either way, outside the gosec walk and the cosign-signed release. |
 
 ### `kb_commit` vs. `kb_source`: the provenance split
 
@@ -156,27 +168,52 @@ not be conflated:
 
 - **`kb_commit`** — the commit of the content source `content-source.yaml`
   pointed at when *this binary* was built. Fixed at build time. Unaffected
-  by `--kb-dir`/`MEERKAT_KB_DIR` — it never changes to reflect a runtime
-  directory.
+  by any runtime content resolution — it never changes to reflect a
+  runtime directory or archive.
 - **`kb_source`** — what's actually being served for *this invocation*:
-  `embedded` or `disk:<path>`. Set from `--kb-dir`/`MEERKAT_KB_DIR` before
+  `embedded`, `disk:<path>` (`--kb-dir`/`MEERKAT_KB_DIR`, or a `type: local`
+  `content-source.yaml` source), or `url:<url>@<digest12>` (a `type: url`
+  `content-source.yaml` source — `<digest12>` is the first 12 hex
+  characters of its verified `sha256`). Set once per invocation, before
   any subcommand runs.
 
 When `kb_source` is `embedded`, `kb_commit` describes what's being served,
-and the "Embedded wiki content" mitigation above applies in full. When
-`kb_source` is `disk:<path>`, `kb_commit` is still reporting the build-time
-embedded commit — content that is **not** being served — and no part of
-the release's SHA256/cosign coverage extends to `<path>`. That directory
-could hold anything: content edited by hand after `mk ingest`, a stale
-checkout, or a directory swapped in by anyone with filesystem access.
-Meerkat does not check, hash, or sandbox it.
+and the "Embedded wiki content" mitigation above applies in full. In every
+other case, `kb_commit` is still reporting the build-time embedded
+commit — content that is **not** being served — and no part of the
+release's SHA256/cosign coverage extends to what `kb_source` names.
+
+For `disk:<path>`, that directory could hold anything: content edited by
+hand after `mk ingest`, a stale checkout, or a directory swapped in by
+anyone with filesystem access. Meerkat does not check, hash, or sandbox it.
+
+For `url:<url>@<digest12>`, more is true but not everything. What *is*
+verified: `FetchURL` refuses to extract or cache anything whose sha256
+doesn't match `content.sha256` exactly, so the bytes actually served are
+guaranteed to be the bytes that digest names — tampering in transit, or at
+rest wherever `url` is hosted, is detected rather than silently served.
+What this does **not** buy: the archive is not part of the release's
+cosign-signed checksums — that signature covers the binary's own
+checksums file, not an arbitrary operator-named URL, so a `type: url`
+source sits entirely outside it regardless of its digest — and meerkat has
+no way to know whether the `url`/`sha256` pair in the operator's own
+`content-source.yaml` names the archive the operator actually intended. A
+correct-looking digest for the wrong archive (swapped in at
+config-authoring time, say) verifies exactly as cleanly as the right one.
+That choice remains fully the operator's, unverified by meerkat — same as
+`disk:<path>`, just one step narrower: verified bytes, unverified choice of
+which bytes.
 
 This is deliberate, not an oversight: `kb_source` exists as its own field
 precisely so `mk version`'s output cannot be read as implying an integrity
-guarantee it doesn't have. An operator who sets `--kb-dir`/`MEERKAT_KB_DIR`
-is trusting that directory themselves, the same way `--trust-sources`
-requires trusting every source repo in `sources.yaml` — full operator
-responsibility, no meerkat-side verification.
+guarantee it doesn't have. An operator who configures runtime content —
+`--kb-dir`/`MEERKAT_KB_DIR`, or any `content-source.yaml` source — is
+trusting its origin themselves, the same way `--trust-sources` requires
+trusting every source repo in `sources.yaml`. `type: url`'s digest narrows
+*what* is being trusted (exact, verified bytes, not a mutable path) without
+removing the need to trust the operator's own configuration — full
+operator responsibility either way, no meerkat-side verification of that
+choice.
 
 ---
 

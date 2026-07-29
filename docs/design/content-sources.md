@@ -1,6 +1,6 @@
 # Spec: Content source as configuration
 
-**Status:** Implemented (`internal/contentsource`, `internal/contentsync`; wired into the Makefile and `.goreleaser.yaml`) · **Scope:** build-time content sourcing only
+**Status:** Implemented (`internal/contentsource`, `internal/contentsync`; wired into the Makefile and `.goreleaser.yaml`) · **Scope:** build-time content sourcing only, as originally specced — runtime resolution followed later (2026-07-29); see the README
 
 *(`docs/design/` is a historical design record, not current reference — see [content-source.example.yaml](../../content-source.example.yaml) for the up-to-date schema.)*
 
@@ -23,6 +23,12 @@ disk at run time). One binary still equals one knowledge base.
 
 - **Runtime content loading** (`--content-dir` / `MEERKAT_CONTENT_DIR`).
   Explicitly out of scope; the offline single-binary guarantee stays strict.
+  *(2026-07-29: implemented, under different flag names — `--kb-dir`/
+  `MEERKAT_KB_DIR`, `--content-source`/`MEERKAT_CONTENT_SOURCE`, and a
+  `type: url` content-source.yaml source. See the README's ["Serving
+  content at runtime"](../../README.md#serving-content-at-runtime) section
+  for the current reference; the single-binary offline guarantee is
+  unchanged when none of these are configured.)*
 - **Ingestion pipeline rebuild** (generalizing `mk ingest`'s planner/executor
   and multi-host source fetching). Tracked as a follow-up (see §11).
 - **Multiple/merged content roots.** One content source per build for now.
@@ -213,7 +219,8 @@ copying — usable as a CI lint on `content-source.yaml`.
   executor and multi-host source fetching to match this config. Largest
   remaining generalization piece; spec separately.
 - **Runtime content** (explicitly rejected here): revisit only if a
-  "one binary, many KBs" deployment need appears.
+  "one binary, many KBs" deployment need appears. *(2026-07-29: that need
+  appeared; implemented — see the Non-goals note above and the README.)*
 - **Multiple content roots / overlays:** compose several sources into one KB
   (e.g. a base KB + a team overlay). Out of scope; note if demand appears.
 - **Config file name:** `content-source.yaml` (single-purpose) vs a broader

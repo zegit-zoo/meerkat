@@ -1,11 +1,21 @@
 # content-source.example.yaml
 #
-# Copy to `content-source.yaml` (gitignored or committed per deployment) to
-# tell `make sync` where to pull embeddable knowledge-base content from before
-# the build embeds it. See docs/design/content-sources.md.
+# Copy to `content-source.yaml` (gitignored or committed per deployment).
+# Read for two different purposes, depending on where it lives:
+#   - repo root, by `make sync` / the release build hook, at BUILD time:
+#     resolves the source and embeds it in the binary. type: none | local |
+#     git | submodule.
+#   - <user config dir>/meerkat/, the working directory, or
+#     --content-source/MEERKAT_CONTENT_SOURCE, read by the meerkat/mk
+#     binary itself at RUNTIME (see the README's resolution order): serves
+#     the source directly, no rebuild. type: none | local | url.
+# git/submodule need git and a working tree, so they're build-time only.
+# url needs no build step, so it's runtime-only (`make sync` won't fetch
+# it). See docs/design/content-sources.md.
 #
-# Absent file, or type: none -> build with the committed empty placeholders
-# (the open-source default; the public repo ships no content-source.yaml).
+# Absent file, or type: none -> build (or serve, at runtime) with the
+# committed empty placeholders (the open-source default; the public repo
+# ships no content-source.yaml).
 #
 # Credentials: `local` needs none at all — this is the default for most
 # users, who build from their own knowledge-base directory on disk. A
@@ -13,26 +23,39 @@
 # cached `gh` CLI token if one is present — nothing to configure. GitLab (or
 # any other host) has no credential borrowing built in: give it a full clone
 # URL / SSH spec, or rely on your normal git credential configuration
-# (credential helper, SSH agent, etc.) for private access.
+# (credential helper, SSH agent, etc.) for private access. `url` needs none
+# either — an unauthenticated HTTPS GET, verified by the required sha256
+# instead.
 
 content:
-  # type: none | local | git | submodule
+  # type: none | local | git | submodule | url
   type: local
 
-  # --- type: local ---------------------------------------------------------
-  # The default: build from a local content directory, no credentials of
-  # any kind required. Most users build from source with their own
+  # --- type: local (build time + runtime) ------------------------------------
+  # The default: build (or serve) from a local content directory, no
+  # credentials of any kind required. Most users point this at their own
   # knowledge-base material, so this is the happy path.
-  path: ../meerkat-kb            # content root, relative to repo root or absolute
+  path: ../meerkat-kb            # content root, relative to repo root (build) or this file's directory (runtime), or absolute
 
-  # --- type: git -----------------------------------------------------------
+  # --- type: git (build time only) -------------------------------------------
   # repo: your-org/meerkat-kb        # owner/repo slug (with host below), or a full clone URL
   # host: github                     # github | gitlab — github gets a cached gh token automatically;
   #                                   # gitlab (or any other host) relies on your own git credentials
   # ref: v1.2.0                      # tag or commit SHA (pin for reproducible builds; a branch warns)
 
-  # --- type: submodule -------------------------------------------------------
+  # --- type: submodule (build time only) -------------------------------------
   # submodule: kb                  # path of the content submodule (legacy default)
+
+  # --- type: url (runtime only) -----------------------------------------------
+  # Fetches an HTTPS .tar.gz of the content-repo layout below (same shape
+  # local/git/submodule resolve to). sha256 is REQUIRED, not just
+  # recommended: it's verified before anything is extracted, and it keys
+  # the on-disk cache at <user cache dir>/meerkat/content/url/<sha256>/ —
+  # content is immutable by digest, so a restart that already has this
+  # digest cached does no network I/O at all. `make sync` does not resolve
+  # this type; it's fetched by the meerkat/mk binary itself, at startup.
+  # url: https://example.com/kb/v1.2.3.tar.gz
+  # sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
   # Layout: where each artifact lives WITHIN the resolved source.
   # Defaults shown; override only if your content repo differs.

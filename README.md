@@ -93,8 +93,7 @@ mk update               # download + verified swap
 > spec, or your normal git credential configuration, for private access.
 > `make build` runs `make sync`, which reads this file and populates the
 > embed dirs before compiling. To update content **without** rebuilding, see
-> ["Serving content at runtime (`--kb-dir`)"](#serving-content-at-runtime---kb-dir)
-> below.
+> ["Serving content at runtime"](#serving-content-at-runtime) below.
 
 ```bash
 # Knowledge base (offline, always available)
@@ -211,11 +210,33 @@ The Go binary ships **without LLM credentials**. The actual model calls happen
 inside `opencode run` subprocess sessions, which inherit the user's OpenCode
 config (model providers, MCP server connections, etc).
 
-## Serving content at runtime (`--kb-dir`)
+## Serving content at runtime
 
 By default the wiki is embedded at build time (see ["Use"](#use) above), so
-picking up new content means rebuilding. `--kb-dir <path>` (or
-`MEERKAT_KB_DIR`) points meerkat at a directory on disk instead — `mk
+picking up new content means rebuilding. Four other mechanisms serve content
+without a rebuild; `mk`/`meerkat` resolves one at startup, in this order —
+highest priority first, each step consulted only if the one above is unset
+(steps 1-2) or not found (steps 3-4):
+
+1. `--kb-dir` (or `MEERKAT_KB_DIR`) — an explicit content-repo directory.
+   Wins outright over everything below.
+2. `--content-source` (or `MEERKAT_CONTENT_SOURCE`) — an explicit path to a
+   `content-source.yaml`.
+3. `content-source.yaml` in `<user config dir>/meerkat/` (`~/.config/meerkat/`
+   on Linux, `~/Library/Application Support/meerkat/` on macOS).
+4. `content-source.yaml` in the working directory (wherever `mk`/`meerkat`
+   is invoked from — not a repo root).
+5. The embedded build — the fallback when none of the above apply (the
+   single-self-contained-binary property is unchanged when no directory or
+   config is present).
+
+Once a step is used, its `content.type` decides the outcome on its own —
+including `type: none`, which resolves to the embedded fallback without
+falling through to a lower step.
+
+### `--kb-dir` / `MEERKAT_KB_DIR`
+
+Points meerkat at a directory on disk instead of the embedded build — `mk
 search`/`show`/`list` then serve that content directly, no rebuild required:
 
 ```bash
@@ -223,9 +244,7 @@ mk --kb-dir ./meerkat-kb search "rate limiting"
 MEERKAT_KB_DIR=./meerkat-kb mk list
 ```
 
-Precedence: `--kb-dir` flag, then `MEERKAT_KB_DIR`, then the embedded
-content (the fallback when neither is set — the single-self-contained-binary
-property is unchanged when no directory is configured).
+Precedence: `--kb-dir` flag, then `MEERKAT_KB_DIR` (step 1 above).
 
 The directory uses the **content-repo layout** — the same layout
 `content-source.yaml` describes and `mk ingest` writes into — not the
@@ -253,17 +272,99 @@ A `--kb-dir` that doesn't exist is a hard error (exit 1). A directory that
 exists but is missing `wiki/`, `ingestion/`, or `templates/` degrades to
 empty for the missing piece — same as the public build's zero-content embed.
 
-**Limitation:** custom `layout:` overrides in `content-source.yaml` (see
-[docs/design/content-sources.md](docs/design/content-sources.md)) are not
-honoured at runtime yet — `--kb-dir`/`MEERKAT_KB_DIR` only understand the
-defaults shown above. A content repo with a non-default layout will look
-empty through `--kb-dir`.
+`--kb-dir`/`MEERKAT_KB_DIR` always use the default paths shown above, even
+if a `content-source.yaml` elsewhere declares a custom `layout:` block — a
+bare directory flag has nowhere to carry a layout override. A content repo
+with a non-default layout looks empty through `--kb-dir`; point
+`--content-source` (below) at a `type: local` config with the right
+`layout:` instead.
+
+### `content-source.yaml` at runtime
+
+When `--kb-dir`/`MEERKAT_KB_DIR` is unset, meerkat looks for a
+`content-source.yaml` (steps 2-4 above). An explicit `--content-source`/
+`MEERKAT_CONTENT_SOURCE` path that doesn't exist is a hard error — same
+reasoning as `--kb-dir`: the operator named it, so silently falling through
+would be confusing. Only `content.type: none`, `local`, and `url` are valid
+at runtime:
+
+```bash
+meerkat --content-source ./content-source.yaml list
+MEERKAT_CONTENT_SOURCE=./content-source.yaml meerkat list
+```
+
+- **`none`** (or no file found at all) serves the embedded build.
+- **`local`** resolves a relative `path` against **the config file's own
+  directory** — not the working directory, and not a repo root. (This
+  differs from the build-time resolver, which resolves it against the repo
+  root `make sync` runs from.) An absolute `path` behaves the same either
+  way. A resolved directory that doesn't exist is a hard error, same as
+  `--kb-dir`.
+- **`url`** fetches and caches an HTTPS archive — see below.
+- **`git`** and **`submodule`** are build-time only (they need git and a
+  working tree, which a shipped binary can't assume): naming one here fails
+  with an explicit error rather than silently serving nothing. Run `make
+  sync` to embed it at build time instead, or switch to `type: local`/
+  `type: url` for a runtime-resolved source.
+
+A `layout:` block in this file **is** honoured at runtime for `type: local`
+and `type: url` sources — unlike `--kb-dir`, above.
+
+### `type: url`
+
+Fetches an HTTPS `.tar.gz` of the content-repo layout, verifies it, and
+caches the extracted result:
+
+```yaml
+content:
+  type: url
+  url: https://example.com/kb/v1.2.3.tar.gz
+  sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+```
+
+`sha256` is **required**, not optional — compute it the way you'd verify any
+other download (`shasum -a 256 kb.tar.gz` on macOS, `sha256sum kb.tar.gz` on
+Linux). It's checked before anything is extracted: on a mismatch, nothing is
+extracted and nothing is cached. That requirement is the feature, not an
+inconvenience — it's what makes fetched content verifiable at all, and it
+doubles as the on-disk cache key:
+
+```
+<user cache dir>/meerkat/content/url/<sha256>/
+```
+
+(`~/.cache/meerkat/...` on Linux, `~/Library/Caches/meerkat/...` on macOS —
+`os.UserCacheDir()`, a different directory from the `<user config dir>` used
+for discovery in step 3 above.) Content is immutable by digest: once a
+digest is cached, any restart that resolves to it — the same
+`content-source.yaml`, or a different one naming the same `sha256` — is a
+cache hit and does **no network I/O at all**. To publish new content,
+publish a new archive under a new digest and update `sha256` (and typically
+the version in `url`) to match; nothing re-fetches on its own.
+
+`type: url` is runtime-only: `make sync` does not fetch it, so — unlike
+`local`/`git`/`submodule` — it cannot be embedded at build time.
+
+See [content-source.example.yaml](content-source.example.yaml) for the full
+schema (including `layout:`), and
+[docs/SECURITY.md](docs/SECURITY.md#kb_commit-vs-kb_source-the-provenance-split)
+for exactly what the digest does and does not guarantee.
+
+### Provenance: `mk version`
 
 `mk version` reports which content is actually being served via the
-`kb_source` field (`embedded` or `disk:<path>`). `kb_commit` is unchanged by
-`--kb-dir` — it always names the build-time embedded content's commit, never
-the runtime directory. See [docs/SECURITY.md](docs/SECURITY.md) for what
-that split means for provenance.
+`kb_source` field:
+
+| `kb_source` | Set by |
+|---|---|
+| `embedded` | No runtime content configured — the fallback. |
+| `disk:<path>` | `--kb-dir`/`MEERKAT_KB_DIR`, or a `type: local` `content-source.yaml` source. Unverified — meerkat trusts the directory as-is. |
+| `url:<url>@<digest12>` | A `type: url` `content-source.yaml` source — `<digest12>` is the first 12 hex characters of the verified `sha256` (e.g. `url:https://example.com/kb/v1.2.3.tar.gz@e3b0c44298fc`). |
+
+`kb_commit` is unchanged by any of this — it always names the build-time
+embedded content's commit, never a runtime directory's or archive's. See
+[docs/SECURITY.md](docs/SECURITY.md) for what that split means for
+provenance.
 
 ## How search works
 
@@ -358,8 +459,9 @@ docs/
   CLI.md      auto-generated CLI reference (make docs)
   INSTALL.md  install + verify + troubleshooting
   SECURITY.md threat model + scanner suite + fix workflows
-content-source.yaml   optional, not shipped; tells `make sync` where your
-                      KB content lives (local path / git repo / submodule)
+content-source.yaml   optional, not shipped; tells `make sync` (build) or
+                      meerkat itself (runtime) where KB content lives
+                      (local path / git repo / submodule / url archive)
 ```
 
 ## See also

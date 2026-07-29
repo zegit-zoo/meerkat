@@ -1,9 +1,10 @@
 # How `mk search` works
 
-Meerkat's search is a keyword index over the configured markdown wiki
-— embedded at build time by default, or a `--kb-dir`/`MEERKAT_KB_DIR`
-directory on disk (see the README). It runs entirely in-process — no
-external service, no network, no embedding model.
+Meerkat's search is a keyword index over the configured markdown wiki —
+embedded at build time by default, or a directory resolved at runtime
+(`--kb-dir`/`MEERKAT_KB_DIR`, or a `content-source.yaml`; see the README).
+It runs entirely in-process — no external service, no network, no
+embedding model.
 
 ## TL;DR
 
@@ -34,7 +35,7 @@ external service, no network, no embedding model.
 ```go
 // internal/search/index.go
 func New() (*Index, error) {
-    pages, _ := kb.List()      // walk the configured FS — embedded, or a --kb-dir directory
+    pages, _ := kb.List()      // walk the configured FS — embedded, or a runtime-resolved directory
     bidx, _ := bleve.NewMemOnly(buildMapping()) // in-RAM Bleve
     batch := bidx.NewBatch()
     for _, p := range pages {
