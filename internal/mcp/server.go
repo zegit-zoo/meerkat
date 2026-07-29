@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -165,9 +166,14 @@ func showTool() mcp.Tool {
 				"slash-separated paths from the wiki root without "+
 				"the .md suffix, e.g. 'concepts/Some-Concept', "+
 				"'systems/backend/some-service'. Returns a JSON "+
-				"object {id, title, body, front} where front is the "+
-				"parsed frontmatter (category, owner, status, "+
-				"source, related, tags)."),
+				"object {id, title, body, front, trust_tier, stale} "+
+				"where front is the parsed frontmatter (type, "+
+				"description, category, owner, status, source, "+
+				"related, tags, generated, verified, stale_after, ...) "+
+				"and trust_tier/stale are advisory signals OKF derives "+
+				"from front.verified/front.stale_after: trust_tier is "+
+				"one of unverified | machine-confirmed | human-reviewed; "+
+				"stale is true once today is on/after stale_after."),
 		mcp.WithString("id",
 			mcp.Required(),
 			mcp.Description("Page ID, e.g. 'concepts/Some-Concept'"),
@@ -199,12 +205,39 @@ func showHandler() mcpserver.ToolHandlerFunc {
 			}
 			return nil, err
 		}
-		body, err := json.MarshalIndent(page, "", "  ")
+		body, err := showPageJSON(page)
 		if err != nil {
 			return nil, err
 		}
-		return mcp.NewToolResultText(string(body)), nil
+		return mcp.NewToolResultText(body), nil
 	}
+}
+
+// showPageOutput is the mk_show wire shape: the page's stored fields
+// (embedded, so id/title/body/front are promoted to the top level
+// exactly as before this change) plus two OKF-derived advisory signals
+// that are computed rather than stored — see kb.Frontmatter.TrustTier /
+// IsStale — and so don't already appear on kb.Page's own JSON encoding.
+type showPageOutput struct {
+	kb.Page
+	TrustTier string `json:"trust_tier"`
+	Stale     bool   `json:"stale"`
+}
+
+// showPageJSON renders showPageOutput for page. Split out from
+// showHandler so the shape is directly unit-testable, mirroring
+// searchResultsJSON / listPagesJSON.
+func showPageJSON(page kb.Page) (string, error) {
+	out := showPageOutput{
+		Page:      page,
+		TrustTier: page.Front.TrustTier(),
+		Stale:     page.Front.IsStale(time.Now().UTC()),
+	}
+	body, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 func registerList(s *mcpserver.MCPServer) {
@@ -221,8 +254,9 @@ func listTool() mcp.Tool {
 				"compose (AND): prefix (page ID prefix), category "+
 				"(frontmatter category, e.g. 'policies', 'systems', "+
 				"'adr', 'concepts'), status (e.g. 'placeholder', "+
-				"'reviewed'), owner. Returns "+
-				"[{id, title, category, status, owner, source}]."),
+				"'reviewed'), owner, type (frontmatter 'type', OKF's "+
+				"concept-kind field, e.g. 'BigQuery Table', 'Metric'). "+
+				"Returns [{id, title, category, status, owner, type, source}]."),
 		mcp.WithString("prefix",
 			mcp.Description("ID prefix filter, e.g. 'systems/backend/'."),
 		),
@@ -234,6 +268,9 @@ func listTool() mcp.Tool {
 		),
 		mcp.WithString("owner",
 			mcp.Description("Frontmatter owner filter."),
+		),
+		mcp.WithString("type",
+			mcp.Description("Frontmatter type filter (OKF's concept-kind field), e.g. 'BigQuery Table', 'Metric', 'Playbook'."),
 		),
 		// See registerSearch's comment: mk_list only enumerates pages
 		// already loaded from the KB filesystem, so it gets the same
@@ -259,6 +296,7 @@ func listHandler() mcpserver.ToolHandlerFunc {
 			req.GetString("category", ""),
 			req.GetString("status", ""),
 			req.GetString("owner", ""),
+			req.GetString("type", ""),
 		)
 		body, err := listPagesJSON(pages)
 		if err != nil {
@@ -271,7 +309,7 @@ func listHandler() mcpserver.ToolHandlerFunc {
 // filterPages applies the composable (AND) mk_list filters. Empty filters
 // are no-ops. Split out so the filter composition is unit-testable without
 // the embedded KB.
-func filterPages(pages []kb.Page, prefix, category, status, owner string) []kb.Page {
+func filterPages(pages []kb.Page, prefix, category, status, owner, typ string) []kb.Page {
 	if prefix != "" {
 		pages = kb.Filter(pages, kb.ByPrefix(prefix))
 	}
@@ -284,11 +322,14 @@ func filterPages(pages []kb.Page, prefix, category, status, owner string) []kb.P
 	if owner != "" {
 		pages = kb.Filter(pages, kb.ByOwner(owner))
 	}
+	if typ != "" {
+		pages = kb.Filter(pages, kb.ByType(typ))
+	}
 	return pages
 }
 
 // listPagesJSON renders the mk_list wire shape: a JSON array of
-// {id, title, category, status, owner, source}.
+// {id, title, category, status, owner, type, source}.
 func listPagesJSON(pages []kb.Page) (string, error) {
 	out := make([]map[string]any, 0, len(pages))
 	for _, p := range pages {
@@ -298,6 +339,7 @@ func listPagesJSON(pages []kb.Page) (string, error) {
 			"category": p.Front.Category,
 			"status":   p.Front.Status,
 			"owner":    p.Front.Owner,
+			"type":     p.Front.Type,
 			"source":   p.Front.Source,
 		})
 	}

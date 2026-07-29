@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/zegit-zoo/meerkat/internal/kb"
@@ -45,6 +46,26 @@ func newTestServerWithConfig(t *testing.T, cfg Config, idx *search.Index) *Serve
 func postSearch(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(nethttp.MethodPost, "/search", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func postShow(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(nethttp.MethodPost, "/show", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+func postList(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(nethttp.MethodPost, "/list", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer test-key")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -325,6 +346,73 @@ func TestOpenAPI_LimitMatchesEnforcement(t *testing.T) {
 	}
 }
 
+// TestOpenAPI_ShowDocumentsTrustTierEnumAndStale mirrors
+// TestOpenAPI_LimitMatchesEnforcement's invariant: the documented
+// trust_tier enum must equal the exact set of values
+// kb.Frontmatter.TrustTier can return, always — not just today — and
+// stale must be documented as a boolean.
+func TestOpenAPI_ShowDocumentsTrustTierEnumAndStale(t *testing.T) {
+	srv := newTestServer(t)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(nethttp.MethodGet, "/openapi.json", nil))
+
+	var doc map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	showProps := doc["paths"].(map[string]any)["/show"].(map[string]any)["post"].(map[string]any)["responses"].(map[string]any)["200"].(map[string]any)["content"].(map[string]any)["application/json"].(map[string]any)["schema"].(map[string]any)["properties"].(map[string]any)
+
+	trustTier, ok := showProps["trust_tier"].(map[string]any)
+	if !ok {
+		t.Fatalf("openapi.json /show response schema is missing trust_tier: %v", showProps["trust_tier"])
+	}
+	rawEnum, ok := trustTier["enum"].([]any)
+	if !ok {
+		t.Fatalf("trust_tier enum is not a JSON array: %T", trustTier["enum"])
+	}
+	var got []string
+	for _, v := range rawEnum {
+		got = append(got, fmt.Sprintf("%v", v))
+	}
+	want := []string{kb.TrustUnverified, kb.TrustMachineConfirmed, kb.TrustHumanReviewed}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("openapi.json documents trust_tier enum=%v, want %v (kb.Trust* constants)", got, want)
+	}
+
+	stale, ok := showProps["stale"].(map[string]any)
+	if !ok {
+		t.Fatalf("openapi.json /show response schema is missing stale: %v", showProps["stale"])
+	}
+	if stale["type"] != "boolean" {
+		t.Errorf("openapi.json documents stale type=%v, want boolean", stale["type"])
+	}
+}
+
+// TestOpenAPI_ListDocumentsTypeFilterAndField guards the /list schema
+// additions: a "type" request filter property (mirroring
+// prefix/category/status/owner) and a "type" response item property.
+func TestOpenAPI_ListDocumentsTypeFilterAndField(t *testing.T) {
+	srv := newTestServer(t)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(nethttp.MethodGet, "/openapi.json", nil))
+
+	var doc map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	listPost := doc["paths"].(map[string]any)["/list"].(map[string]any)["post"].(map[string]any)
+
+	reqProps := listPost["requestBody"].(map[string]any)["content"].(map[string]any)["application/json"].(map[string]any)["schema"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := reqProps["type"]; !ok {
+		t.Errorf("openapi.json /list request schema is missing the %q filter property", "type")
+	}
+
+	respProps := listPost["responses"].(map[string]any)["200"].(map[string]any)["content"].(map[string]any)["application/json"].(map[string]any)["schema"].(map[string]any)["items"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := respProps["type"]; !ok {
+		t.Errorf("openapi.json /list response items schema is missing the %q property", "type")
+	}
+}
+
 // TestList_Authed_NoBody: empty body is allowed (lists everything).
 func TestList_Authed_NoBody(t *testing.T) {
 	srv := newTestServer(t)
@@ -347,6 +435,56 @@ func TestList_Authed_NoBody(t *testing.T) {
 	}
 }
 
+// TestList_Authed_IncludesTypeAndFiltersByType drives the full POST
+// /list handler end to end against injected KB content: the response
+// now carries the frontmatter "type" field (previously dropped — see
+// listEntry), and a "type" request filter narrows the result the same
+// way --type (internal/cli/list.go) and mk_list's "type" argument
+// (internal/mcp/server.go) do.
+func TestList_Authed_IncludesTypeAndFiltersByType(t *testing.T) {
+	kb.UseFS(fstest.MapFS{
+		"content/tables/orders.md":    {Data: []byte("---\nid: tables/orders\ntitle: Orders\ntype: BigQuery Table\n---\nbody\n")},
+		"content/playbooks/oncall.md": {Data: []byte("---\nid: playbooks/oncall\ntitle: Oncall\ntype: Playbook\n---\nbody\n")},
+	})
+	t.Cleanup(func() { kb.UseFS(nil) })
+	srv := newTestServer(t)
+
+	// No filter: both entries come back, each carrying its own type.
+	rec := postList(t, srv, `{}`)
+	if rec.Code != nethttp.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var all []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &all); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	gotTypes := map[string]string{}
+	for _, e := range all {
+		gotTypes[fmt.Sprintf("%v", e["id"])] = fmt.Sprintf("%v", e["type"])
+	}
+	if gotTypes["tables/orders"] != "BigQuery Table" {
+		t.Errorf("tables/orders type = %q, want %q", gotTypes["tables/orders"], "BigQuery Table")
+	}
+	if gotTypes["playbooks/oncall"] != "Playbook" {
+		t.Errorf("playbooks/oncall type = %q, want %q", gotTypes["playbooks/oncall"], "Playbook")
+	}
+
+	// Filtered: only the matching type comes back. A body containing
+	// "type" being accepted at all (rather than 400 from
+	// DisallowUnknownFields) is itself part of what this proves.
+	rec = postList(t, srv, `{"type":"BigQuery Table"}`)
+	if rec.Code != nethttp.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var filtered []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &filtered); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0]["id"] != "tables/orders" {
+		t.Errorf(`POST /list {"type":"BigQuery Table"} = %v, want exactly [tables/orders]`, filtered)
+	}
+}
+
 // TestShow_NotFound: 404 surfaces with helpful message.
 func TestShow_NotFound(t *testing.T) {
 	srv := newTestServer(t)
@@ -361,6 +499,129 @@ func TestShow_NotFound(t *testing.T) {
 	body, _ := io.ReadAll(rec.Body)
 	if !strings.Contains(string(body), "not found") {
 		t.Errorf("expected 'not found' in body, got %s", body)
+	}
+}
+
+// TestNewShowResponse_Shape proves the POST /show wire shape carries
+// the page's own fields (id, front.type, front.description, ...)
+// alongside the two OKF-derived advisory signals (trust_tier, stale)
+// that aren't stored fields on kb.Page — mirroring MCP's
+// TestShowPageJSON_Shape (internal/mcp/handlers_test.go).
+func TestNewShowResponse_Shape(t *testing.T) {
+	page := kb.Page{
+		ID:    "tables/orders",
+		Title: "Orders",
+		Body:  "body",
+		Front: kb.Frontmatter{
+			ID:          "tables/orders",
+			Type:        "BigQuery Table",
+			Description: "One row per order.",
+			StaleAfter:  "2020-01-01",
+			Verified:    kb.VerifiedList{{By: "human:ahormati"}},
+		},
+	}
+	raw, err := json.Marshal(newShowResponse(page))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, raw)
+	}
+	if parsed["id"] != "tables/orders" {
+		t.Errorf("id = %v", parsed["id"])
+	}
+	if parsed["trust_tier"] != kb.TrustHumanReviewed {
+		t.Errorf("trust_tier = %v, want %q", parsed["trust_tier"], kb.TrustHumanReviewed)
+	}
+	if parsed["stale"] != true {
+		t.Errorf("stale = %v, want true", parsed["stale"])
+	}
+	front, ok := parsed["front"].(map[string]any)
+	if !ok {
+		t.Fatalf("front is not an object: %v", parsed["front"])
+	}
+	if front["type"] != "BigQuery Table" {
+		t.Errorf("front.type = %v", front["type"])
+	}
+	if front["description"] != "One row per order." {
+		t.Errorf("front.description = %v", front["description"])
+	}
+}
+
+// TestShow_Authed_IncludesTrustTierAndStale drives the full POST /show
+// handler end to end against injected KB content, proving trust_tier
+// and stale reach the wire — the gap this change closes (previously
+// /show serialised kb.Page directly, which picks up type/description
+// automatically but not the wrapper-level trust_tier/stale the CLI and
+// MCP handlers add). Fixture mirrors internal/cli/show_test.go's
+// TestShowCmd_JSONIncludesTrustTierAndStale.
+func TestShow_Authed_IncludesTrustTierAndStale(t *testing.T) {
+	kb.UseFS(fstest.MapFS{
+		"content/tables/orders.md": {Data: []byte(`---
+id: tables/orders
+title: Orders
+type: BigQuery Table
+description: One row per order.
+status: stable
+stale_after: 2020-01-01
+verified:
+  - { by: human:ahormati, at: 2026-06-25T09:00:00Z }
+---
+# Orders
+`)},
+	})
+	t.Cleanup(func() { kb.UseFS(nil) })
+	srv := newTestServer(t)
+
+	rec := postShow(t, srv, `{"id":"tables/orders"}`)
+	if rec.Code != nethttp.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, rec.Body.String())
+	}
+	if result["trust_tier"] != "human-reviewed" {
+		t.Errorf("trust_tier = %v, want human-reviewed", result["trust_tier"])
+	}
+	if result["stale"] != true {
+		t.Errorf("stale = %v, want true (stale_after 2020-01-01 is in the past)", result["stale"])
+	}
+	front, ok := result["front"].(map[string]any)
+	if !ok {
+		t.Fatalf("front is not an object: %v", result["front"])
+	}
+	if front["type"] != "BigQuery Table" {
+		t.Errorf("front.type = %v", front["type"])
+	}
+	if front["description"] != "One row per order." {
+		t.Errorf("front.description = %v", front["description"])
+	}
+}
+
+// TestShow_Authed_UnverifiedAndNotStale covers the opposite corner: no
+// verified key and no stale_after at all.
+func TestShow_Authed_UnverifiedAndNotStale(t *testing.T) {
+	kb.UseFS(fstest.MapFS{
+		"content/tables/customers.md": {Data: []byte("---\nid: tables/customers\ntype: BigQuery Table\n---\n# Customers\n")},
+	})
+	t.Cleanup(func() { kb.UseFS(nil) })
+	srv := newTestServer(t)
+
+	rec := postShow(t, srv, `{"id":"tables/customers"}`)
+	if rec.Code != nethttp.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if result["trust_tier"] != "unverified" {
+		t.Errorf("trust_tier = %v, want unverified", result["trust_tier"])
+	}
+	if result["stale"] != false {
+		t.Errorf("stale = %v, want false", result["stale"])
 	}
 }
 

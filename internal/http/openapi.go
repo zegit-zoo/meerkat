@@ -1,6 +1,9 @@
 package http
 
-import "github.com/zegit-zoo/meerkat/internal/search"
+import (
+	"github.com/zegit-zoo/meerkat/internal/kb"
+	"github.com/zegit-zoo/meerkat/internal/search"
+)
 
 // openAPISchema returns an OpenAPI 3.1 description of the meerkat
 // tool endpoints. We hand-roll this rather than auto-generating
@@ -77,7 +80,7 @@ func openAPISchema(version string) map[string]any {
 			"post": map[string]any{
 				"operationId": "mk_show",
 				"summary":     "Retrieve a single knowledge-base page by ID",
-				"description": "Returns the full markdown body and parsed frontmatter of one page. Page IDs are slash-separated paths from the wiki root without the .md suffix, e.g. 'concepts/Rate-Limiting' or 'systems/backend/auth-service'. Use POST /list first to discover valid IDs.",
+				"description": "Returns the full markdown body and parsed frontmatter of one page, plus two OKF-derived advisory signals: trust_tier (unverified | machine-confirmed | human-reviewed, derived from front.verified — SPEC.md §5.3) and stale (whether today is on/after front.stale_after — SPEC.md §5.5). Page IDs are slash-separated paths from the wiki root without the .md suffix, e.g. 'concepts/Rate-Limiting' or 'systems/backend/auth-service'. Use POST /list first to discover valid IDs.",
 				"security":    bearerSecurity,
 				"requestBody": map[string]any{
 					"required": true,
@@ -108,6 +111,15 @@ func openAPISchema(version string) map[string]any {
 										"title": map[string]any{"type": "string"},
 										"body":  map[string]any{"type": "string"},
 										"front": map[string]any{"type": "object"},
+										"trust_tier": map[string]any{
+											"type":        "string",
+											"description": "OKF advisory trust tier derived from front.verified (SPEC.md §5.3): unverified (no verified entries), machine-confirmed (verified, but no entry's by has the human: prefix), or human-reviewed (at least one verified entry's by has the human: prefix).",
+											"enum":        []string{kb.TrustUnverified, kb.TrustMachineConfirmed, kb.TrustHumanReviewed},
+										},
+										"stale": map[string]any{
+											"type":        "boolean",
+											"description": "True once today is on/after front.stale_after (SPEC.md §5.5). False when stale_after is absent or unparsable — a missing optional field never manufactures a staleness signal.",
+										},
 									},
 								},
 							},
@@ -122,7 +134,7 @@ func openAPISchema(version string) map[string]any {
 			"post": map[string]any{
 				"operationId": "mk_list",
 				"summary":     "List knowledge-base pages, optionally filtered",
-				"description": "Returns every page in the embedded knowledge base. Filters compose (AND): prefix (page ID prefix), category ('systems', 'policies', 'adr', 'concepts', etc.), status ('placeholder', 'reviewed', 'stale'), owner.",
+				"description": "Returns every page in the embedded knowledge base. Filters compose (AND): prefix (page ID prefix), category ('systems', 'policies', 'adr', 'concepts', etc.), status ('placeholder', 'reviewed', 'stale'), owner, type (frontmatter 'type', OKF's concept-kind field, e.g. 'BigQuery Table', 'Metric', 'Playbook').",
 				"security":    bearerSecurity,
 				"requestBody": map[string]any{
 					"required": false,
@@ -135,6 +147,7 @@ func openAPISchema(version string) map[string]any {
 									"category": map[string]any{"type": "string", "description": "Frontmatter category filter."},
 									"status":   map[string]any{"type": "string", "description": "Frontmatter status filter."},
 									"owner":    map[string]any{"type": "string", "description": "Frontmatter owner filter."},
+									"type":     map[string]any{"type": "string", "description": "Frontmatter type filter (OKF's concept-kind field), e.g. 'BigQuery Table', 'Metric', 'Playbook'."},
 								},
 							},
 						},
@@ -155,6 +168,7 @@ func openAPISchema(version string) map[string]any {
 											"category": map[string]any{"type": "string"},
 											"status":   map[string]any{"type": "string"},
 											"owner":    map[string]any{"type": "string"},
+											"type":     map[string]any{"type": "string"},
 											"source":   map[string]any{"type": "object"},
 										},
 									},

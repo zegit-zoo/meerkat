@@ -2,8 +2,10 @@ package kb
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestList exercises the happy path: at least one page is embedded
@@ -132,12 +134,15 @@ func TestExtractTitle(t *testing.T) {
 // TestSplitFrontmatter_Empty: no frontmatter, body returned verbatim.
 func TestSplitFrontmatter_Empty(t *testing.T) {
 	in := "# Hello\n\nplain body\n"
-	fm, body := splitFrontmatter(in)
+	fm, body, present := splitFrontmatter(in)
 	if fm.ID != "" || fm.Status != "" {
 		t.Errorf("expected zero Frontmatter, got %+v", fm)
 	}
 	if body != in {
 		t.Errorf("body diverged from input")
+	}
+	if present {
+		t.Error("present should be false when there is no frontmatter block at all")
 	}
 }
 
@@ -154,7 +159,7 @@ tags: [psd2, tier-1]
 
 # Foo body
 `
-	fm, body := splitFrontmatter(in)
+	fm, body, present := splitFrontmatter(in)
 	if fm.ID != "policies/foo" {
 		t.Errorf("ID = %q", fm.ID)
 	}
@@ -176,6 +181,9 @@ tags: [psd2, tier-1]
 	if !strings.HasPrefix(body, "\n# Foo body") {
 		t.Errorf("body lost frontmatter trim, got: %q", body[:min(40, len(body))])
 	}
+	if !present {
+		t.Error("present should be true for a well-formed frontmatter block")
+	}
 }
 
 // TestSplitFrontmatter_Source verifies nested Source struct decode.
@@ -191,7 +199,7 @@ source:
 ---
 body
 `
-	fm, _ := splitFrontmatter(in)
+	fm, _, _ := splitFrontmatter(in)
 	if fm.Source.Type != "gitlab" {
 		t.Errorf("Source.Type = %q", fm.Source.Type)
 	}
@@ -218,7 +226,7 @@ custom_field: hello
 ---
 body
 `
-	fm, body := splitFrontmatter(in)
+	fm, body, _ := splitFrontmatter(in)
 	// Core fields must be typed correctly.
 	if fm.ID != "policies/bar" {
 		t.Errorf("ID = %q", fm.ID)
@@ -266,7 +274,7 @@ status: reviewed
 ---
 body
 `
-	fm, _ := splitFrontmatter(in)
+	fm, _, _ := splitFrontmatter(in)
 	if fm.Extra != nil {
 		t.Errorf("Extra should be nil when only core keys present, got %v", fm.Extra)
 	}
@@ -276,12 +284,15 @@ body
 // Frontmatter + full body, never errors.
 func TestSplitFrontmatter_Malformed(t *testing.T) {
 	in := "---\n: [unbalanced\n---\n# body\n"
-	fm, body := splitFrontmatter(in)
+	fm, body, present := splitFrontmatter(in)
 	if fm.ID != "" || fm.Status != "" {
 		t.Errorf("malformed YAML should yield zero frontmatter, got %+v", fm)
 	}
 	if body == "" {
 		t.Error("body should not be empty even on bad frontmatter")
+	}
+	if present {
+		t.Error("present should be false when the YAML fails to parse")
 	}
 }
 
@@ -312,6 +323,276 @@ func TestFilterHelpers(t *testing.T) {
 		if !strings.HasPrefix(p.ID, "systems/") {
 			t.Errorf("ByPrefix leak: %s", p.ID)
 		}
+	}
+}
+
+// TestByType exercises the OKF `type` filter facet against synthetic
+// pages, independent of whatever content happens to be embedded.
+func TestByType(t *testing.T) {
+	pages := []Page{
+		{ID: "tables/orders", Front: Frontmatter{Type: "BigQuery Table"}},
+		{ID: "tables/customers", Front: Frontmatter{Type: "BigQuery Table"}},
+		{ID: "playbooks/oncall", Front: Frontmatter{Type: "Playbook"}},
+		{ID: "notype/page", Front: Frontmatter{}},
+	}
+	tables := Filter(pages, ByType("BigQuery Table"))
+	if len(tables) != 2 {
+		t.Fatalf("ByType(BigQuery Table) = %d pages, want 2", len(tables))
+	}
+	for _, p := range tables {
+		if p.Front.Type != "BigQuery Table" {
+			t.Errorf("ByType leak: %s has type %q", p.ID, p.Front.Type)
+		}
+	}
+	if got := Filter(pages, ByType("Nonexistent")); len(got) != 0 {
+		t.Errorf("ByType(Nonexistent) = %d pages, want 0", len(got))
+	}
+}
+
+// --- OKF (Open Knowledge Format) frontmatter fields ------------
+
+// TestSplitFrontmatter_TypeAndDescriptionAreCore proves type/description
+// decode onto the typed core fields and do NOT also appear in Extra —
+// see the coreKeys comment: promoting a field into the struct must
+// remove it from the Extra catch-all in the same change.
+func TestSplitFrontmatter_TypeAndDescriptionAreCore(t *testing.T) {
+	in := `---
+type: BigQuery Table
+description: One row per completed customer order.
+custom_field: still-in-extra
+---
+body
+`
+	fm, _, present := splitFrontmatter(in)
+	if !present {
+		t.Fatal("expected frontmatter to be present")
+	}
+	if fm.Type != "BigQuery Table" {
+		t.Errorf("Type = %q", fm.Type)
+	}
+	if fm.Description != "One row per completed customer order." {
+		t.Errorf("Description = %q", fm.Description)
+	}
+	if _, bad := fm.Extra["type"]; bad {
+		t.Error("type leaked into Extra")
+	}
+	if _, bad := fm.Extra["description"]; bad {
+		t.Error("description leaked into Extra")
+	}
+	if _, ok := fm.Extra["custom_field"]; !ok {
+		t.Error("custom_field (still unpromoted) should be in Extra")
+	}
+}
+
+// TestSplitFrontmatter_ResourceAndSourcesStayInExtra proves the two
+// deliberately-NOT-promoted OKF fields (resource, sources) keep landing
+// in Extra, exactly like any other unknown key.
+func TestSplitFrontmatter_ResourceAndSourcesStayInExtra(t *testing.T) {
+	in := `---
+type: BigQuery Table
+resource: https://bigquery.googleapis.com/v2/projects/acme/datasets/sales/tables/orders
+sources:
+  - id: erp-export
+    resource: https://erp.example.com/schema/orders
+---
+body
+`
+	fm, _, _ := splitFrontmatter(in)
+	if _, ok := fm.Extra["resource"]; !ok {
+		t.Error("resource should survive in Extra")
+	}
+	if _, ok := fm.Extra["sources"]; !ok {
+		t.Error("sources should survive in Extra")
+	}
+}
+
+// TestSplitFrontmatter_VerifiedList covers the canonical (non-bare)
+// list shape (OKF SPEC.md §5.2).
+func TestSplitFrontmatter_VerifiedList(t *testing.T) {
+	in := `---
+type: BigQuery Table
+verified:
+  - { by: human:ahormati, at: 2026-06-25T09:00:00Z }
+  - { by: process:finance-nightly, at: 2026-06-26T02:00:00Z }
+---
+body
+`
+	fm, _, _ := splitFrontmatter(in)
+	if len(fm.Verified) != 2 {
+		t.Fatalf("Verified = %v, want 2 entries", fm.Verified)
+	}
+	if fm.Verified[0].By != "human:ahormati" {
+		t.Errorf("Verified[0].By = %q", fm.Verified[0].By)
+	}
+	if fm.Verified[1].By != "process:finance-nightly" {
+		t.Errorf("Verified[1].By = %q", fm.Verified[1].By)
+	}
+}
+
+// TestSplitFrontmatter_VerifiedBareMapping covers OKF's "a single
+// verifier MAY be written as one { by, at } mapping without the list
+// dash" allowance — consumers MUST treat it as a one-element list
+// (SPEC.md §5.2, §11).
+func TestSplitFrontmatter_VerifiedBareMapping(t *testing.T) {
+	in := `---
+type: BigQuery Table
+verified: { by: human:ahormati, at: 2026-06-25T09:00:00Z }
+---
+body
+`
+	fm, _, _ := splitFrontmatter(in)
+	if len(fm.Verified) != 1 {
+		t.Fatalf("Verified = %v, want exactly one element", fm.Verified)
+	}
+	if fm.Verified[0].By != "human:ahormati" {
+		t.Errorf("Verified[0].By = %q", fm.Verified[0].By)
+	}
+	if fm.Verified[0].At != "2026-06-25T09:00:00Z" {
+		t.Errorf("Verified[0].At = %q", fm.Verified[0].At)
+	}
+}
+
+// TestSplitFrontmatter_VerifiedAbsent proves no verified key at all
+// yields a nil/empty VerifiedList, not an error.
+func TestSplitFrontmatter_VerifiedAbsent(t *testing.T) {
+	in := "---\ntype: BigQuery Table\n---\nbody\n"
+	fm, _, present := splitFrontmatter(in)
+	if !present {
+		t.Fatal("expected frontmatter to be present")
+	}
+	if len(fm.Verified) != 0 {
+		t.Errorf("Verified = %v, want empty", fm.Verified)
+	}
+}
+
+// TestSplitFrontmatter_VerifiedNull proves an explicit null scalar
+// (`verified: ~`) degrades to "no verifiers" rather than an error.
+func TestSplitFrontmatter_VerifiedNull(t *testing.T) {
+	in := "---\ntype: BigQuery Table\nverified: ~\n---\nbody\n"
+	fm, _, present := splitFrontmatter(in)
+	if !present {
+		t.Fatal("expected frontmatter to be present")
+	}
+	if len(fm.Verified) != 0 {
+		t.Errorf("Verified = %v, want empty for a null scalar", fm.Verified)
+	}
+}
+
+// TestSplitFrontmatter_VerifiedMalformedScalar proves a non-null bare
+// scalar (neither a mapping nor a list) fails to parse — and, matching
+// the existing malformed-YAML precedent (TestSplitFrontmatter_Malformed),
+// degrades to "no frontmatter" for the whole page rather than a partial
+// parse, so the page still loads instead of being rejected outright.
+func TestSplitFrontmatter_VerifiedMalformedScalar(t *testing.T) {
+	in := "---\ntype: BigQuery Table\nverified: not-a-mapping\n---\nbody\n"
+	fm, body, present := splitFrontmatter(in)
+	if present {
+		t.Error("present should be false for an unparsable verified shape")
+	}
+	if fm.Type != "" {
+		t.Errorf("expected zero Frontmatter, got %+v", fm)
+	}
+	if body != in {
+		t.Error("body should fall back to the raw input")
+	}
+}
+
+// TestTrustTier covers the three OKF trust tiers (SPEC.md §5.3) plus
+// the actor-prefix edge case that only a "human:"-prefixed By counts
+// as human review.
+func TestTrustTier(t *testing.T) {
+	cases := []struct {
+		name string
+		fm   Frontmatter
+		want string
+	}{
+		{"no verified key", Frontmatter{}, TrustUnverified},
+		{"empty verified list", Frontmatter{Verified: VerifiedList{}}, TrustUnverified},
+		{
+			"machine only", Frontmatter{Verified: VerifiedList{
+				{By: "process:finance-nightly"},
+				{By: "reference_agent/gemini-2.5-pro"},
+			}}, TrustMachineConfirmed,
+		},
+		{
+			"human present among many", Frontmatter{Verified: VerifiedList{
+				{By: "process:finance-nightly"},
+				{By: "human:ahormati"},
+			}}, TrustHumanReviewed,
+		},
+		{
+			"human only", Frontmatter{Verified: VerifiedList{{By: "human:ahormati"}}},
+			TrustHumanReviewed,
+		},
+		{
+			// A prefix match, not a bare equality — "humans:" or a
+			// substring occurrence elsewhere must not false-positive.
+			"lookalike actor is not human", Frontmatter{Verified: VerifiedList{{By: "humans:not-the-prefix"}}},
+			TrustMachineConfirmed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.fm.TrustTier(); got != tc.want {
+				t.Errorf("TrustTier() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsStale covers OKF's "today >= stale_after" rule (SPEC.md §5.5),
+// including the inclusive boundary and the two ways an absent/malformed
+// StaleAfter must never manufacture a staleness signal.
+func TestIsStale(t *testing.T) {
+	now := time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		staleAfter string
+		want       bool
+	}{
+		{"empty is never stale", "", false},
+		{"malformed date is never stale", "not-a-date", false},
+		{"past date is stale", "2020-01-01", true},
+		{"future date is not stale", "2099-01-01", false},
+		{"exact boundary (today) is stale", "2026-07-26", true},
+		{"day after tomorrow is not stale", "2026-07-28", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fm := Frontmatter{StaleAfter: tc.staleAfter}
+			if got := fm.IsStale(now); got != tc.want {
+				t.Errorf("IsStale(%q) at %s = %v, want %v", tc.staleAfter, now, got, tc.want)
+			}
+		})
+	}
+}
+
+// --- reserved OKF filenames -------------------------------------
+
+// TestIsReservedArtifact covers the frontmatter-presence discriminator
+// directly, including nested paths (§3.1: reserved "at any level of
+// the hierarchy") and filenames that must NEVER be treated as reserved
+// regardless of frontmatter.
+func TestIsReservedArtifact(t *testing.T) {
+	cases := []struct {
+		path           string
+		hasFrontmatter bool
+		want           bool
+	}{
+		{"content/index.md", false, true},
+		{"content/log.md", false, true},
+		{"content/tables/index.md", false, true},
+		{"content/a/b/c/log.md", false, true},
+		{"content/index.md", true, false},         // meerkat landing page w/ id:/title:
+		{"content/log.md", true, false},           // frontmatter present -> not reserved
+		{"content/concepts/foo.md", false, false}, // ordinary filename, never reserved
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s/hasFrontmatter=%v", tc.path, tc.hasFrontmatter), func(t *testing.T) {
+			if got := isReservedArtifact(tc.path, tc.hasFrontmatter); got != tc.want {
+				t.Errorf("isReservedArtifact(%q, %v) = %v, want %v", tc.path, tc.hasFrontmatter, got, tc.want)
+			}
+		})
 	}
 }
 

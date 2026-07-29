@@ -72,9 +72,17 @@ func TestLoad_PageIDTraversalIsBlocked(t *testing.T) {
 // content/-prefix re-assertion in Load isn't over-broad: nested paths
 // and ids containing dots (both look superficially "suspicious" but
 // are completely ordinary wiki ids) must keep working.
+//
+// index.md here carries frontmatter (id:/title:) rather than being a
+// bare heading: since the OKF reserved-filename skip (see
+// isReservedArtifact), a frontmatter-less index.md is deliberately no
+// longer an ordinary page. This test's index.md is the OTHER case —
+// meerkat's own frontmatter-bearing landing page — which is exactly
+// what should still load; the frontmatter-less case is covered by
+// okf_test.go instead.
 func TestLoad_LegitimateIDsStillWorkAfterTraversalFix(t *testing.T) {
 	withFS(t, fstest.MapFS{
-		"content/index.md":                 {Data: []byte("# Index\n\nhome\n")},
+		"content/index.md":                 {Data: []byte("---\nid: index\ntitle: Index\n---\n# Index\n\nhome\n")},
 		"content/concepts/widgets.md":      {Data: []byte("# Widgets\n\nround\n")},
 		"content/2024.10-release-notes.md": {Data: []byte("# Notes\n\nshipped\n")},
 	})

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -20,6 +21,15 @@ func testPage(id, title, body, category, status, owner string) kb.Page {
 		Body:  body,
 		Front: kb.Frontmatter{ID: id, Title: title, Category: category, Status: status, Owner: owner},
 	}
+}
+
+// testPageWithType extends testPage with a Type value for the ByType /
+// --type filter tests, without changing testPage's signature (used
+// above by many pre-existing tests).
+func testPageWithType(id, title, body, category, status, owner, typ string) kb.Page {
+	p := testPage(id, title, body, category, status, owner)
+	p.Front.Type = typ
+	return p
 }
 
 func callTool(args map[string]any) mcp.CallToolRequest {
@@ -183,25 +193,28 @@ func TestSearchResultsJSON_Shape(t *testing.T) {
 
 func TestFilterPages_ComposesAND(t *testing.T) {
 	pages := []kb.Page{
-		testPage("systems/backend/api", "API", "", "systems", "reviewed", "team-a"),
-		testPage("systems/backend/db", "DB", "", "systems", "placeholder", "team-a"),
-		testPage("concepts/quorum", "Quorum", "", "concepts", "reviewed", "team-b"),
+		testPageWithType("systems/backend/api", "API", "", "systems", "reviewed", "team-a", "API Endpoint"),
+		testPageWithType("systems/backend/db", "DB", "", "systems", "placeholder", "team-a", ""),
+		testPageWithType("concepts/quorum", "Quorum", "", "concepts", "reviewed", "team-b", ""),
+		testPageWithType("tables/orders", "Orders", "", "tables", "stable", "team-b", "BigQuery Table"),
 	}
 	cases := []struct {
-		name                            string
-		prefix, category, status, owner string
-		wantIDs                         []string
+		name                                 string
+		prefix, category, status, owner, typ string
+		wantIDs                              []string
 	}{
-		{"no filters", "", "", "", "", []string{"systems/backend/api", "systems/backend/db", "concepts/quorum"}},
-		{"prefix", "systems/backend/", "", "", "", []string{"systems/backend/api", "systems/backend/db"}},
-		{"category", "", "concepts", "", "", []string{"concepts/quorum"}},
-		{"status", "", "", "reviewed", "", []string{"systems/backend/api", "concepts/quorum"}},
-		{"owner", "", "", "", "team-b", []string{"concepts/quorum"}},
-		{"prefix+status (AND)", "systems/", "", "reviewed", "", []string{"systems/backend/api"}},
+		{"no filters", "", "", "", "", "", []string{"systems/backend/api", "systems/backend/db", "concepts/quorum", "tables/orders"}},
+		{"prefix", "systems/backend/", "", "", "", "", []string{"systems/backend/api", "systems/backend/db"}},
+		{"category", "", "concepts", "", "", "", []string{"concepts/quorum"}},
+		{"status", "", "", "reviewed", "", "", []string{"systems/backend/api", "concepts/quorum"}},
+		{"owner", "", "", "", "team-b", "", []string{"concepts/quorum", "tables/orders"}},
+		{"type", "", "", "", "", "BigQuery Table", []string{"tables/orders"}},
+		{"prefix+status (AND)", "systems/", "", "reviewed", "", "", []string{"systems/backend/api"}},
+		{"owner+type (AND)", "", "", "", "team-b", "BigQuery Table", []string{"tables/orders"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := filterPages(pages, tc.prefix, tc.category, tc.status, tc.owner)
+			got := filterPages(pages, tc.prefix, tc.category, tc.status, tc.owner, tc.typ)
 			var ids []string
 			for _, p := range got {
 				ids = append(ids, p.ID)
@@ -214,7 +227,7 @@ func TestFilterPages_ComposesAND(t *testing.T) {
 }
 
 func TestListPagesJSON_Shape(t *testing.T) {
-	pages := []kb.Page{testPage("concepts/x", "X", "", "concepts", "reviewed", "owner-1")}
+	pages := []kb.Page{testPageWithType("concepts/x", "X", "", "concepts", "reviewed", "owner-1", "Metric")}
 	out, err := listPagesJSON(pages)
 	if err != nil {
 		t.Fatalf("listPagesJSON: %v", err)
@@ -226,6 +239,32 @@ func TestListPagesJSON_Shape(t *testing.T) {
 	if parsed[0]["id"] != "concepts/x" || parsed[0]["owner"] != "owner-1" {
 		t.Errorf("unexpected list shape: %v", parsed[0])
 	}
+	if parsed[0]["type"] != "Metric" {
+		t.Errorf("type = %v, want Metric", parsed[0]["type"])
+	}
+}
+
+// TestListHandler_TypeFilter drives the full mk_list handler (not just
+// filterPages) to prove the "type" tool argument is wired end to end,
+// against injected KB content rather than testPage fixtures.
+func TestListHandler_TypeFilter(t *testing.T) {
+	kb.UseFS(fstest.MapFS{
+		"content/tables/orders.md":    {Data: []byte("---\nid: tables/orders\ntitle: Orders\ntype: BigQuery Table\n---\nbody\n")},
+		"content/playbooks/oncall.md": {Data: []byte("---\nid: playbooks/oncall\ntitle: Oncall\ntype: Playbook\n---\nbody\n")},
+	})
+	t.Cleanup(func() { kb.UseFS(nil) })
+
+	res, err := listHandler()(context.Background(), callTool(map[string]any{"type": "BigQuery Table"}))
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	var parsed []map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res)), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(parsed) != 1 || parsed[0]["id"] != "tables/orders" {
+		t.Errorf("mk_list type=BigQuery Table = %v, want exactly [tables/orders]", parsed)
+	}
 }
 
 func TestListPagesJSON_EmptyIsArrayNotNull(t *testing.T) {
@@ -235,6 +274,95 @@ func TestListPagesJSON_EmptyIsArrayNotNull(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != "[]" {
 		t.Errorf("empty list should render as [], got %q", out)
+	}
+}
+
+// TestShowPageJSON_Shape proves the mk_show wire shape carries the
+// page's own fields (id, front.type, front.description, ...) alongside
+// the two OKF-derived advisory signals (trust_tier, stale) that aren't
+// stored fields on kb.Page.
+func TestShowPageJSON_Shape(t *testing.T) {
+	page := kb.Page{
+		ID:    "tables/orders",
+		Title: "Orders",
+		Body:  "body",
+		Front: kb.Frontmatter{
+			ID:          "tables/orders",
+			Type:        "BigQuery Table",
+			Description: "One row per order.",
+			StaleAfter:  "2020-01-01",
+			Verified:    kb.VerifiedList{{By: "human:ahormati"}},
+		},
+	}
+	out, err := showPageJSON(page)
+	if err != nil {
+		t.Fatalf("showPageJSON: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if parsed["id"] != "tables/orders" {
+		t.Errorf("id = %v", parsed["id"])
+	}
+	if parsed["trust_tier"] != kb.TrustHumanReviewed {
+		t.Errorf("trust_tier = %v, want %q", parsed["trust_tier"], kb.TrustHumanReviewed)
+	}
+	if parsed["stale"] != true {
+		t.Errorf("stale = %v, want true", parsed["stale"])
+	}
+	front, ok := parsed["front"].(map[string]any)
+	if !ok {
+		t.Fatalf("front is not an object: %v", parsed["front"])
+	}
+	if front["type"] != "BigQuery Table" {
+		t.Errorf("front.type = %v", front["type"])
+	}
+	if front["description"] != "One row per order." {
+		t.Errorf("front.description = %v", front["description"])
+	}
+}
+
+// TestShowHandler_ReturnsHitWithTrustTier drives the full mk_show
+// handler end to end against injected KB content.
+func TestShowHandler_ReturnsHitWithTrustTier(t *testing.T) {
+	kb.UseFS(fstest.MapFS{
+		"content/tables/orders.md": {Data: []byte(`---
+id: tables/orders
+type: BigQuery Table
+verified: { by: process:finance-nightly, at: 2026-06-26T02:00:00Z }
+---
+body
+`)},
+	})
+	t.Cleanup(func() { kb.UseFS(nil) })
+
+	res, err := showHandler()(context.Background(), callTool(map[string]any{"id": "tables/orders"}))
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res)), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if parsed["trust_tier"] != kb.TrustMachineConfirmed {
+		t.Errorf("trust_tier = %v, want %q", parsed["trust_tier"], kb.TrustMachineConfirmed)
+	}
+}
+
+// TestShowHandler_NotFoundIsToolError proves a missing page still comes
+// back as a clean tool-level error, unaffected by the trust_tier/stale
+// augmentation.
+func TestShowHandler_NotFoundIsToolError(t *testing.T) {
+	kb.UseFS(fstest.MapFS{})
+	t.Cleanup(func() { kb.UseFS(nil) })
+
+	res, err := showHandler()(context.Background(), callTool(map[string]any{"id": "does-not-exist"}))
+	if err != nil {
+		t.Fatalf("handler returned transport error: %v", err)
+	}
+	if res == nil || !res.IsError {
+		t.Errorf("expected a tool-level error result for a missing page")
 	}
 }
 

@@ -105,6 +105,15 @@ func completeOwners(_ *cobra.Command, _ []string, toComplete string) ([]string, 
 	})
 }
 
+// completeTypes returns the distinct frontmatter `type` values across
+// the embedded KB — OKF's required concept-kind field (SPEC.md §4.1).
+// Wired by `mk list --type <TAB>`.
+func completeTypes(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return distinctFrontmatterValues(toComplete, func(p kb.Page) string {
+		return p.Front.Type
+	})
+}
+
 // completeStatuses returns the documented status enum.
 func completeStatuses(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	all := []string{"placeholder", "reviewed", "stale", "ingest-failed", "needs-research", "superseded"}

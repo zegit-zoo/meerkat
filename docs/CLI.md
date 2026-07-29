@@ -317,6 +317,8 @@ Filters compose (AND):
   --category  frontmatter 'category' field, e.g. "policies"
   --status    frontmatter 'status' field, e.g. "placeholder", "reviewed"
   --owner     frontmatter 'owner' field, e.g. "team-payments"
+  --type      frontmatter 'type' field, e.g. "BigQuery Table" (OKF's
+              required concept-kind field, SPEC.md §4.1)
 
 Default output is "id  title  status". --json adds frontmatter.
 
@@ -334,6 +336,7 @@ meerkat list [flags]
       --owner string      Only pages with this frontmatter owner
       --prefix string     Only pages whose ID starts with this prefix
       --status string     Only pages with this frontmatter status
+      --type string       Only pages with this frontmatter type (OKF's concept-kind field, e.g. "BigQuery Table")
 ```
 
 **Inherited flags**
@@ -459,6 +462,11 @@ suffix. Examples:
   mk show index
   mk show concepts/rate-limiting
   mk show systems/backend/access
+
+--json adds two OKF-derived advisory signals alongside the page's own
+frontmatter (front): trust_tier (unverified | machine-confirmed |
+human-reviewed, derived from front.verified — SPEC.md §5.3) and stale
+(whether today is on/after front.stale_after — SPEC.md §5.5).
 
 **Usage**
 

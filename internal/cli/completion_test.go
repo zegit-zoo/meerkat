@@ -4,6 +4,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
+
+	"github.com/zegit-zoo/meerkat/internal/kb"
 )
 
 // TestCompleteSourceIDs returns every source id from the embedded
@@ -97,5 +100,37 @@ func TestCompleteCategories(t *testing.T) {
 		if !slices.Contains(all, want) {
 			t.Errorf("expected %q in categories: %v", want, all)
 		}
+	}
+}
+
+// TestCompleteTypes exercises the OKF `type` completion (SPEC.md §4.1)
+// against injected fixture pages, independent of whatever is embedded.
+func TestCompleteTypes(t *testing.T) {
+	kb.UseFS(fstest.MapFS{
+		"content/tables/orders.md":    {Data: []byte("---\ntype: BigQuery Table\n---\n# Orders\n")},
+		"content/tables/customers.md": {Data: []byte("---\ntype: BigQuery Table\n---\n# Customers\n")},
+		"content/playbooks/oncall.md": {Data: []byte("---\ntype: Playbook\n---\n# Oncall\n")},
+		"content/notype.md":           {Data: []byte("# No type\n")},
+	})
+	t.Cleanup(func() { kb.UseFS(nil) })
+
+	all, _ := completeTypes(nil, nil, "")
+	if !slices.Contains(all, "BigQuery Table") || !slices.Contains(all, "Playbook") {
+		t.Errorf("expected BigQuery Table and Playbook in types: %v", all)
+	}
+	// Distinct: "BigQuery Table" appears on two pages but once in the list.
+	count := 0
+	for _, v := range all {
+		if v == "BigQuery Table" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("BigQuery Table should be deduplicated, appeared %d times in %v", count, all)
+	}
+
+	narrowed, _ := completeTypes(nil, nil, "Big")
+	if !slices.Contains(narrowed, "BigQuery Table") || slices.Contains(narrowed, "Playbook") {
+		t.Errorf("prefix 'Big' should narrow to BigQuery Table only, got: %v", narrowed)
 	}
 }

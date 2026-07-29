@@ -17,6 +17,7 @@ func newListCmd() *cobra.Command {
 		category string
 		status   string
 		owner    string
+		typ      string
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -28,6 +29,8 @@ Filters compose (AND):
   --category  frontmatter 'category' field, e.g. "policies"
   --status    frontmatter 'status' field, e.g. "placeholder", "reviewed"
   --owner     frontmatter 'owner' field, e.g. "team-payments"
+  --type      frontmatter 'type' field, e.g. "BigQuery Table" (OKF's
+              required concept-kind field, SPEC.md §4.1)
 
 Default output is "id  title  status". --json adds frontmatter.`,
 		Args: cobra.NoArgs,
@@ -49,6 +52,9 @@ Default output is "id  title  status". --json adds frontmatter.`,
 			if owner != "" {
 				pages = kb.Filter(pages, kb.ByOwner(owner))
 			}
+			if typ != "" {
+				pages = kb.Filter(pages, kb.ByType(typ))
+			}
 			sort.Slice(pages, func(i, j int) bool { return pages[i].ID < pages[j].ID })
 
 			if asJSON {
@@ -60,6 +66,7 @@ Default output is "id  title  status". --json adds frontmatter.`,
 						"category": p.Front.Category,
 						"status":   p.Front.Status,
 						"owner":    p.Front.Owner,
+						"type":     p.Front.Type,
 						"source":   p.Front.Source,
 					}
 					if p.Front.FailureReason != "" {
@@ -89,9 +96,11 @@ Default output is "id  title  status". --json adds frontmatter.`,
 	cmd.Flags().StringVar(&category, "category", "", "Only pages with this frontmatter category")
 	cmd.Flags().StringVar(&status, "status", "", "Only pages with this frontmatter status")
 	cmd.Flags().StringVar(&owner, "owner", "", "Only pages with this frontmatter owner")
+	cmd.Flags().StringVar(&typ, "type", "", "Only pages with this frontmatter type (OKF's concept-kind field, e.g. \"BigQuery Table\")")
 	_ = cmd.RegisterFlagCompletionFunc("prefix", completePrefixes)
 	_ = cmd.RegisterFlagCompletionFunc("category", completeCategories)
 	_ = cmd.RegisterFlagCompletionFunc("status", completeStatuses)
 	_ = cmd.RegisterFlagCompletionFunc("owner", completeOwners)
+	_ = cmd.RegisterFlagCompletionFunc("type", completeTypes)
 	return cmd
 }

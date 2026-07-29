@@ -178,7 +178,13 @@ gosec: sync ## Static security analysis for Go (gosec)
 	$(call install-tool,gosec,github.com/securego/gosec/v2/cmd/gosec,$(GOSEC_VERSION))
 	# Severity / confidence: only HIGH-severity, medium+confidence findings fail.
 	# exclude-dir: skip the in-workspace go module cache (CI sets GOPATH=$$CI_PROJECT_DIR/.gopath
-	#              which would otherwise drag every dep into the scan), plus dist/ and bin/.
+	#              which would otherwise drag every dep into the scan), plus dist/ and bin/,
+	#              plus the two embed dirs, which hold synced markdown and yaml rather than Go.
+	#              NOTE: there was also an `-exclude-dir=kb` here, left over from when the
+	#              content repo was a `kb/` submodule at the repo root. gosec matches that
+	#              pattern against any path component, so it was silently dropping BOTH
+	#              internal/kb and internal/kbdir — the packages holding the os.Root
+	#              containment and frontmatter parsing. Removed; do not reinstate.
 	#
 	# Excluded rules (with rationale):
 	#   G304 — file inclusion via variable. Unavoidable in 'mk show' which
@@ -196,7 +202,6 @@ gosec: sync ## Static security analysis for Go (gosec)
 		-exclude-dir=bin \
 		-exclude-dir=internal/kb/content \
 		-exclude-dir=internal/sources/etc \
-		-exclude-dir=kb \
 		./...
 
 .PHONY: gitleaks

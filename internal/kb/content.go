@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -109,12 +110,41 @@ type Source struct {
 // Frontmatter holds the common engine-core fields present in every
 // meerkat page. Deployment-specific fields are captured in Extra so the
 // engine core stays generic without losing data.
+//
+// Several fields implement OKF (Open Knowledge Format) v0.2 semantics —
+// see https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md
+// ("SPEC.md" in comments below). meerkat's own KBs and OKF bundles share
+// this one struct: an OKF field is promoted into the core here only
+// when it is useful independent of OKF (a filter facet, a trust
+// signal); anything else (resource, sources, okf_version, ...) stays in
+// Extra, which already satisfies OKF's "preserve unknown keys"
+// consumer requirement (SPEC.md §4.1, §11).
 type Frontmatter struct {
-	ID           string   `yaml:"id"             json:"id,omitempty"`
-	Title        string   `yaml:"title"          json:"title,omitempty"`
-	Category     string   `yaml:"category"       json:"category,omitempty"`
-	Subcategory  string   `yaml:"subcategory"    json:"subcategory,omitempty"`
-	Owner        string   `yaml:"owner"          json:"owner,omitempty"`
+	ID    string `yaml:"id"    json:"id,omitempty"`
+	Title string `yaml:"title" json:"title,omitempty"`
+	// Type identifies the concept's kind (e.g. "BigQuery Table",
+	// "Metric", "Playbook"). It is OKF's only REQUIRED frontmatter field
+	// (SPEC.md §4.1: "type is the only always-required key; a concept
+	// carrying just type is fully conformant", §11) and doubles as a
+	// natural search/list facet independent of OKF — see ByType.
+	// Promoted out of Extra (where it previously landed) into the core.
+	Type string `yaml:"type" json:"type,omitempty"`
+	// Description is OKF's recommended one-line summary (SPEC.md §4.1),
+	// used by index generators, search snippets and previews. Promoted
+	// out of Extra for the same reason as Type: broadly useful, not
+	// just an OKF-ism.
+	Description string `yaml:"description"    json:"description,omitempty"`
+	Category    string `yaml:"category"       json:"category,omitempty"`
+	Subcategory string `yaml:"subcategory"    json:"subcategory,omitempty"`
+	Owner       string `yaml:"owner"          json:"owner,omitempty"`
+	// Status is a free string, deliberately not a closed enum. meerkat's
+	// own ingestion pipeline uses placeholder/reviewed/...; OKF (SPEC.md
+	// §5.4) uses draft/stable/deprecated. Both vocabularies coexist
+	// untouched here — see ByStatus and the ingest package, which only
+	// ever test Status against specific string literals, never a
+	// validated/closed set, so an OKF value that isn't one of meerkat's
+	// own literals simply doesn't match those checks instead of being
+	// rejected. No translation layer is applied in either direction.
 	Status       string   `yaml:"status"         json:"status,omitempty"`
 	Tags         []string `yaml:"tags"           json:"tags,omitempty"`
 	Related      []string `yaml:"related"        json:"related,omitempty"`
@@ -124,10 +154,154 @@ type Frontmatter struct {
 	// FailureReason is set by the ingestion pipeline when a page could
 	// not be refreshed, so operators can triage failures.
 	FailureReason string `yaml:"failure_reason" json:"failure_reason,omitempty"`
+
+	// Generated, Verified, and StaleAfter surface OKF's trust and
+	// lifecycle families (SPEC.md §5.2, §5.5). All three are optional;
+	// absence is meaningful (see TrustTier / IsStale below) rather than
+	// an error (§5, §11). Unlike the plain string fields above, these
+	// two use yaml omitempty: Generated is a pointer and Verified a
+	// slice specifically so an absent field is dropped entirely if this
+	// Frontmatter is ever round-tripped through MarshalFrontmatter,
+	// rather than injecting a `generated: null` / `verified: []` line
+	// into the many existing meerkat pages that have neither.
+	Generated *Generated `yaml:"generated,omitempty" json:"generated,omitempty"`
+	// Verified is normally a list, but the spec permits a single
+	// verifier to be written as one bare mapping — see VerifiedList.
+	Verified VerifiedList `yaml:"verified,omitempty" json:"verified,omitempty"`
+	// StaleAfter is an absolute YYYY-MM-DD date (SPEC.md §5.5), not a
+	// relative TTL. See IsStale.
+	StaleAfter string `yaml:"stale_after" json:"stale_after,omitempty"`
+
 	// Extra captures deployment-specific frontmatter fields not in the
-	// common core (e.g. regulator, tier, superseded_by). Values are
-	// preserved as parsed YAML scalars or structures.
+	// common core (e.g. regulator, tier, superseded_by), and any OKF
+	// field deliberately not promoted (resource, sources, okf_version).
+	// Values are preserved as parsed YAML scalars or structures.
 	Extra map[string]any `yaml:"extra,omitempty" json:"extra,omitempty"`
+}
+
+// Generated records how a concept's current content was produced (OKF
+// SPEC.md §5.2). By is REQUIRED within generated per the spec; At is an
+// ISO 8601 datetime marking the content's last meaningful change.
+// meerkat does not validate either sub-field's shape (the actor
+// convention of §7, or ISO 8601 for At) — an unparsed or unconventional
+// value is preserved verbatim and simply won't match TrustTier's
+// "human:" prefix check; it is never rejected (§11).
+type Generated struct {
+	By string `yaml:"by"           json:"by,omitempty"`
+	At string `yaml:"at,omitempty" json:"at,omitempty"`
+}
+
+// Verifier is one verification event (OKF SPEC.md §5.2): who or what
+// confirmed a concept against its sources/resource, and when.
+type Verifier struct {
+	By string `yaml:"by"           json:"by,omitempty"`
+	At string `yaml:"at,omitempty" json:"at,omitempty"`
+}
+
+// VerifiedList is the parsed form of OKF's `verified` frontmatter field
+// (SPEC.md §5.2): normally a list of Verifier events, but "a single
+// verifier MAY be written as one { by, at } mapping without the list
+// dash." Consumers "MUST treat a bare mapping as a one-element list"
+// (§5.2, restated as a conformance MUST in §11) — UnmarshalYAML below
+// implements exactly that normalization, so every other caller
+// (TrustTier, the CLI, MCP) only ever sees a slice, never a bare
+// mapping.
+type VerifiedList []Verifier
+
+// UnmarshalYAML implements the sequence-or-bare-mapping tolerance
+// documented on VerifiedList.
+func (v *VerifiedList) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.SequenceNode:
+		var list []Verifier
+		if err := value.Decode(&list); err != nil {
+			return err
+		}
+		*v = list
+		return nil
+	case yaml.MappingNode:
+		var single Verifier
+		if err := value.Decode(&single); err != nil {
+			return err
+		}
+		*v = VerifiedList{single}
+		return nil
+	case yaml.ScalarNode:
+		// `verified:` written with an explicit null/empty scalar (e.g.
+		// `~`) is treated the same as the key being absent rather than
+		// as an error — OKF's absent-is-meaningful framing (§5) applies
+		// just as well to a present-but-empty key.
+		if value.Tag == "!!null" || strings.TrimSpace(value.Value) == "" {
+			*v = nil
+			return nil
+		}
+		return fmt.Errorf("verified: expected a mapping or a list of mappings, got scalar %q", value.Value)
+	default:
+		return fmt.Errorf("verified: unsupported YAML node kind %v", value.Kind)
+	}
+}
+
+// Trust tiers derived from Verified (OKF SPEC.md §5.3), lowest to
+// highest. Advisory signals only: a concept with no trust frontmatter
+// at all is still fully consumable and must never be rejected on that
+// basis (§5.3, §11) — meerkat never does; TrustTier is purely
+// informational, surfaced by `mk show --json` and the mk_show MCP tool.
+const (
+	TrustUnverified       = "unverified"
+	TrustMachineConfirmed = "machine-confirmed"
+	TrustHumanReviewed    = "human-reviewed"
+)
+
+// humanActorPrefix is the actor convention (OKF SPEC.md §7) that marks
+// a verifier as a person rather than an agent/tool (<producer>/<version>)
+// or an automated process (process:<id>). TrustTier keys off exactly
+// this prefix, per the spec: "producers MUST use it for hand-authored
+// or human-confirmed content."
+const humanActorPrefix = "human:"
+
+// TrustTier derives the OKF advisory trust tier (SPEC.md §5.3) from
+// Verified:
+//
+//   - Verified is empty (no verified key)                  -> TrustUnverified
+//   - verified, but no entry's By has the "human:" prefix   -> TrustMachineConfirmed
+//   - verified, and at least one entry's By has the
+//     "human:" prefix                                       -> TrustHumanReviewed
+//
+// This is derived on demand rather than stored, mirroring how the spec
+// frames trust (and credibility, §5.1) as inferred from recorded
+// signals rather than a persisted verdict.
+func (fm Frontmatter) TrustTier() string {
+	if len(fm.Verified) == 0 {
+		return TrustUnverified
+	}
+	for _, v := range fm.Verified {
+		if strings.HasPrefix(v.By, humanActorPrefix) {
+			return TrustHumanReviewed
+		}
+	}
+	return TrustMachineConfirmed
+}
+
+// IsStale reports whether the concept is past its OKF stale_after date
+// (SPEC.md §5.5: "content is stale when today >= stale_after"). now is
+// compared as a calendar date and should be in UTC (e.g.
+// time.Now().UTC()) — stale_after is a date, not an instant, and this
+// parses it at UTC midnight, so comparing against now in some other
+// location could flip the answer across midnight. An empty or
+// unparsable StaleAfter is never stale: a missing or malformed optional
+// field must not manufacture a staleness signal that isn't there (§5.5
+// is optional; §11 forbids penalizing a concept for a missing optional
+// field).
+func (fm Frontmatter) IsStale(now time.Time) bool {
+	if fm.StaleAfter == "" {
+		return false
+	}
+	staleAfter, err := time.Parse("2006-01-02", fm.StaleAfter)
+	if err != nil {
+		return false
+	}
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	return !today.Before(staleAfter)
 }
 
 // Page represents a single wiki page with normalised metadata.
@@ -205,6 +379,12 @@ func List() ([]Page, error) {
 		}
 		pg, err := loadByPath(p)
 		if err != nil {
+			if errors.Is(err, errReservedArtifact) {
+				// An OKF navigation artifact (see isReservedArtifact) —
+				// expected, not a data problem, so skip quietly with no
+				// stderr warning (unlike the unreadable-entry case below).
+				return nil
+			}
 			// One unreadable entry must not take out the whole KB.
 			// A broken symlink, a permission error or a symlink loop
 			// aborts fs.WalkDir otherwise, so a single bad file denies
@@ -244,7 +424,13 @@ func Load(id string) (Page, error) {
 	if isExcluded(p) {
 		return Page{}, ErrNotFound
 	}
-	return loadByPath(p)
+	page, err := loadByPath(p)
+	if errors.Is(err, errReservedArtifact) {
+		// A reserved OKF navigation artifact (see isReservedArtifact) is
+		// indistinguishable from a missing page to a direct Load caller.
+		return Page{}, ErrNotFound
+	}
+	return page, err
 }
 
 // FilterFunc selects pages from a slice; nil keeps everything.
@@ -279,6 +465,14 @@ func ByOwner(owner string) FilterFunc {
 	return func(p Page) bool { return p.Front.Owner == owner }
 }
 
+// ByType is a FilterFunc preset matching the OKF `type` field (SPEC.md
+// §4.1) — OKF's only required frontmatter key, and useful as a filter
+// facet independent of OKF (e.g. a meerkat KB that adopts `type` on its
+// own pages). See kb.Frontmatter.Type.
+func ByType(t string) FilterFunc {
+	return func(p Page) bool { return p.Front.Type == t }
+}
+
 // ByPrefix matches pages whose ID starts with the given prefix.
 func ByPrefix(prefix string) FilterFunc {
 	if prefix == "" {
@@ -286,6 +480,51 @@ func ByPrefix(prefix string) FilterFunc {
 	}
 	return func(p Page) bool { return strings.HasPrefix(p.ID, prefix) }
 }
+
+// reservedOKFFilenames are OKF navigation artifacts, reserved at every
+// level of a bundle's hierarchy and which "MUST NOT be used for
+// concept documents" (SPEC.md §3.1): index.md is a directory listing
+// (§8), log.md a change history (§9). Per §8, an index.md/log.md
+// carries no frontmatter at all — the sole exception, a bundle-root
+// index.md's optional okf_version key, is deliberately not
+// special-cased here; see isReservedArtifact.
+//
+// meerkat predates OKF and already uses "index.md" as an ordinary,
+// frontmatter-bearing landing page (id:/title:) in its own KBs. Keying
+// the skip off the filename alone would silently stop indexing every
+// existing meerkat KB's index.md. Keying it off frontmatter PRESENCE
+// instead lets both worlds coexist: a reserved-named file with no
+// frontmatter is an OKF artifact (skip it, see isReservedArtifact);
+// the same name WITH frontmatter is a meerkat page like any other
+// (index it, exactly as before this change).
+var reservedOKFFilenames = map[string]bool{
+	"index.md": true,
+	"log.md":   true,
+}
+
+// isReservedArtifact reports whether p (a "content/..."-rooted path) is
+// an OKF reserved-filename navigation artifact rather than a loadable
+// concept: its basename is index.md/log.md AND it has no frontmatter
+// block. path.Base makes this apply at any directory depth, per §3.1.
+//
+// A bundle-root index.md that opts into OKF's optional okf_version key
+// (SPEC.md §12) would have a frontmatter block and therefore NOT be
+// skipped by this rule. That's a deliberate trade-off, not an
+// oversight: no published OKF sample bundle sets okf_version (it's
+// optional and unused in practice), so there is nothing to validate
+// detection logic against and no known producer to serve; such a file
+// is simply indexed as an ordinary (if unusual) page instead.
+func isReservedArtifact(p string, hasFrontmatter bool) bool {
+	return reservedOKFFilenames[path.Base(p)] && !hasFrontmatter
+}
+
+// errReservedArtifact is loadByPath's internal signal that a path
+// matched isReservedArtifact. It never escapes this package: List
+// treats it as an expected, quiet skip (no stderr warning — unlike
+// other loadByPath errors, this isn't a data problem); Load maps it to
+// the public ErrNotFound, since a reserved artifact is indistinguishable
+// from a missing page to a direct caller.
+var errReservedArtifact = errors.New("reserved OKF navigation artifact")
 
 func loadByPath(p string) (Page, error) {
 	body, err := readCapped(loadFS(), p)
@@ -296,7 +535,10 @@ func loadByPath(p string) (Page, error) {
 		return Page{}, err
 	}
 	id := strings.TrimSuffix(strings.TrimPrefix(p, "content/"), ".md")
-	front, bodyOnly := splitFrontmatter(string(body))
+	front, bodyOnly, hasFrontmatter := splitFrontmatter(string(body))
+	if isReservedArtifact(p, hasFrontmatter) {
+		return Page{}, errReservedArtifact
+	}
 	if front.ID == "" {
 		front.ID = id
 	}
@@ -347,9 +589,15 @@ func readCapped(fsys fs.FS, p string) ([]byte, error) {
 
 // coreKeys is the set of YAML top-level keys that are part of the typed
 // Frontmatter core. Any key NOT in this set ends up in Frontmatter.Extra.
+//
+// type/description/generated/verified/stale_after are OKF (SPEC.md §4.1,
+// §5) fields promoted into the core; resource/sources/okf_version are
+// deliberately NOT here, so they keep landing in Extra.
 var coreKeys = map[string]bool{
 	"id":             true,
 	"title":          true,
+	"type":           true,
+	"description":    true,
 	"category":       true,
 	"subcategory":    true,
 	"owner":          true,
@@ -360,18 +608,30 @@ var coreKeys = map[string]bool{
 	"last_ingested":  true,
 	"language":       true,
 	"failure_reason": true,
+	"generated":      true,
+	"verified":       true,
+	"stale_after":    true,
 }
 
-// splitFrontmatter returns parsed frontmatter plus body-without-
-// frontmatter. If no frontmatter is present the input is returned
-// as the body and Frontmatter{} is returned.
+// splitFrontmatter returns parsed frontmatter, the body with any
+// frontmatter block removed, and whether a frontmatter block was
+// present and successfully parsed. If no frontmatter is present — or a
+// block opens but never closes, or the YAML fails to parse — the input
+// is returned unchanged as the body, Frontmatter{} is returned, and
+// present is false.
+//
+// present is what lets a caller distinguish "no frontmatter at all"
+// from "frontmatter present but every field happens to be empty" — see
+// isReservedArtifact, which relies on exactly that distinction to skip
+// OKF's frontmatter-less index.md/log.md navigation artifacts (SPEC.md
+// §3.1, §8, §9) without mis-skipping a meerkat page that reuses one of
+// those filenames but carries real frontmatter (id:/title:).
 //
 // Unknown top-level keys (those not in the engine core) are collected
 // into Frontmatter.Extra so no data is lost.
-func splitFrontmatter(content string) (Frontmatter, string) {
-	var fm Frontmatter
+func splitFrontmatter(content string) (fm Frontmatter, body string, present bool) {
 	if !strings.HasPrefix(content, "---\n") && !strings.HasPrefix(content, "---\r\n") {
-		return fm, content
+		return fm, content, false
 	}
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -400,13 +660,13 @@ func splitFrontmatter(content string) (Frontmatter, string) {
 		yamlLines = append(yamlLines, line)
 	}
 	if !closed {
-		return fm, content
+		return fm, content, false
 	}
 	raw := []byte(strings.Join(yamlLines, "\n"))
 	if err := yaml.Unmarshal(raw, &fm); err != nil {
 		// On parse error, treat as no frontmatter rather than fail
 		// the whole page load. The lint task can flag invalid YAML.
-		return Frontmatter{}, content
+		return Frontmatter{}, content, false
 	}
 	// Second pass: collect all top-level keys that are not in the core
 	// into fm.Extra so deployment-specific fields are preserved.
@@ -425,7 +685,7 @@ func splitFrontmatter(content string) (Frontmatter, string) {
 	if bodyStart > len(content) {
 		bodyStart = len(content)
 	}
-	return fm, content[bodyStart:]
+	return fm, content[bodyStart:], true
 }
 
 // extractTitle returns the first markdown heading in body, falling

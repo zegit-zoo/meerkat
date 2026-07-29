@@ -6,8 +6,8 @@
 // OpenWebUI tool definition matches what an MCP client sees:
 //
 //	POST /search        body: {"query":"...", "limit":10}        -> [{id,title,score,snippet,category,status}]
-//	POST /show          body: {"id":"concepts/Rate-Limiting"} -> {id,title,body,front}
-//	POST /list          body: {"prefix":"systems/", "category":"systems", "status":"placeholder"} -> [{id,title,category,status,owner,source}]
+//	POST /show          body: {"id":"concepts/Rate-Limiting"} -> {id,title,body,front,trust_tier,stale}
+//	POST /list          body: {"prefix":"systems/", "category":"systems", "status":"placeholder", "type":"BigQuery Table"} -> [{id,title,category,status,owner,type,source}]
 //	GET  /openapi.json  OpenAPI 3.1 schema
 //	GET  /healthz       liveness probe (always 200)
 //	GET  /              human-readable banner
@@ -254,20 +254,50 @@ type showRequest struct {
 	ID string `json:"id"`
 }
 
+// showResponse is the POST /show wire shape: the page's stored fields
+// (embedded, so id/path/title/body/front are top-level exactly as
+// before this change) plus two OKF-derived advisory signals that are
+// computed rather than stored — see kb.Frontmatter.TrustTier / IsStale.
+// Field names and JSON keys are deliberately identical to showResult
+// (internal/cli/show.go) and showPageOutput (internal/mcp/server.go)
+// so all three surfaces agree on what trust_tier/stale are called.
+type showResponse struct {
+	kb.Page
+	TrustTier string `json:"trust_tier"`
+	Stale     bool   `json:"stale"`
+}
+
+// newShowResponse builds the POST /show payload for page, mirroring
+// internal/cli/show.go's newShowResult.
+func newShowResponse(page kb.Page) showResponse {
+	return showResponse{
+		Page:      page,
+		TrustTier: page.Front.TrustTier(),
+		Stale:     page.Front.IsStale(time.Now().UTC()),
+	}
+}
+
 type listRequest struct {
 	Prefix   string `json:"prefix,omitempty"`
 	Category string `json:"category,omitempty"`
 	Status   string `json:"status,omitempty"`
 	Owner    string `json:"owner,omitempty"`
+	// Type filters on frontmatter 'type' (OKF's concept-kind field,
+	// SPEC.md §4.1), matching the --type flag (internal/cli/list.go)
+	// and mk_list's "type" argument (internal/mcp/server.go).
+	Type string `json:"type,omitempty"`
 }
 
 type listEntry struct {
-	ID       string    `json:"id"`
-	Title    string    `json:"title"`
-	Category string    `json:"category"`
-	Status   string    `json:"status"`
-	Owner    string    `json:"owner,omitempty"`
-	Source   kb.Source `json:"source,omitempty"`
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Category string `json:"category"`
+	Status   string `json:"status"`
+	Owner    string `json:"owner,omitempty"`
+	// Type is frontmatter 'type' (OKF's concept-kind field), matching
+	// the "type" key `mk list --json` and mk_list already emit.
+	Type   string    `json:"type,omitempty"`
+	Source kb.Source `json:"source,omitempty"`
 }
 
 type errorResponse struct {
@@ -344,7 +374,7 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, page)
+	writeJSON(w, http.StatusOK, newShowResponse(page))
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -372,6 +402,9 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	if req.Owner != "" {
 		pages = kb.Filter(pages, kb.ByOwner(req.Owner))
 	}
+	if req.Type != "" {
+		pages = kb.Filter(pages, kb.ByType(req.Type))
+	}
 	out := make([]listEntry, 0, len(pages))
 	for _, p := range pages {
 		out = append(out, listEntry{
@@ -380,6 +413,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 			Category: p.Front.Category,
 			Status:   p.Front.Status,
 			Owner:    p.Front.Owner,
+			Type:     p.Front.Type,
 			Source:   p.Front.Source,
 		})
 	}
