@@ -197,18 +197,17 @@ mk ingest --execute (executor) ──► spawns one
 
 **Sources** are declared in your content repo's `ingestion/sources.yaml` —
 see [docs/design/content-sources.md](docs/design/content-sources.md) for the
-schema. Example registry (illustrative, not a real config):
+schema. Example registry for a fictional company — invented to show the
+shapes a source can take, not a configuration to copy:
 
 | Category | Source |
 |---|---|
-| `adr/` | `your-org/architecture/architecture-decision-record` |
-| `adr/` (security) | `your-org/security/security-decisions` |
-| `threat-models/` | `your-org/architecture/threat-model` |
-| `requirements/` | `your-org/requirements` (whole group) |
-| `operations/{dev-portal,pipelines,base-images,runbooks}` | `your-org/operations/<repo>` |
-| `systems/backend/` | `your-org/backend` (whole group) + service-catalog + incident enrichment |
-| `systems/frontend/` | `your-org/frontend` (whole group, with subgroups) + same enrichment |
-| `policies/` | PDF corpus in your extracted-docs directory |
+| `decisions/` | `your-org/engineering/decision-records` (one repo) |
+| `handbook/` | `your-org/handbook` (whole group) |
+| `systems/backend/` | `your-org/backend` (whole group) + service-catalog and past-incident enrichment |
+| `systems/frontend/` | `your-org/frontend` (whole group, with subgroups) |
+| `runbooks/{deploy,oncall,recovery}` | `your-org/operations/<repo>` (one source per repo) |
+| `policies/` | PDF corpus in a local directory |
 | `concepts/` | Synthesised — cross-links from all other categories |
 
 The Go binary ships **without LLM credentials**. The actual model calls happen
