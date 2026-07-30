@@ -8,11 +8,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestAll: at least the seed-known sources are registered, in
-// declaration order.
 // skipIfNoSources skips a registry-dependent test when no sources are
-// embedded (e.g. a build with the content source stripped). See
-// a build with no embedded KB content.
+// embedded — e.g. the public build, which ships an empty registry.
 func skipIfNoSources(t *testing.T) {
 	t.Helper()
 	all, err := All()
@@ -24,20 +21,28 @@ func skipIfNoSources(t *testing.T) {
 	}
 }
 
+// TestAll: every embedded source is well-formed, with unique ids.
+//
+// This asserts the registry's *shape*, deliberately not a fixed list of
+// ids. The registry is deployment-specific — each operator embeds their
+// own ingestion/sources.yaml — so pinning ids here would assert one
+// deployment's taxonomy and fail against every other one.
 func TestAll(t *testing.T) {
 	skipIfNoSources(t)
 	all, err := All()
 	if err != nil {
 		t.Fatalf("All: %v", err)
 	}
-	wantIDs := []string{
-		"adr", "threat-models", "security-decisions", "requirements",
-		"dev-portal", "pipelines", "base-images", "runbooks",
-		"backend-systems", "frontend-systems", "policies", "concepts",
-	}
-	have := map[string]bool{}
-	for _, s := range all {
-		have[s.ID] = true
+	seen := map[string]bool{}
+	for i, s := range all {
+		if s.ID == "" {
+			t.Errorf("source at index %d has an empty id", i)
+			continue
+		}
+		if seen[s.ID] {
+			t.Errorf("duplicate source id %q", s.ID)
+		}
+		seen[s.ID] = true
 		if s.Type == "" {
 			t.Errorf("source %s missing type", s.ID)
 		}
@@ -45,22 +50,26 @@ func TestAll(t *testing.T) {
 			t.Errorf("source %s missing target_category", s.ID)
 		}
 	}
-	for _, id := range wantIDs {
-		if !have[id] {
-			t.Errorf("expected source %q to be registered", id)
-		}
-	}
 }
 
-// TestGet returns the registered source.
+// TestGet returns the registered source. Round-trips whatever the
+// registry's first source happens to be, so it holds for any
+// deployment's sources.yaml rather than pinning one id.
 func TestGet(t *testing.T) {
 	skipIfNoSources(t)
-	s, err := Get("policies")
+	all, err := All()
 	if err != nil {
-		t.Fatalf("Get(policies): %v", err)
+		t.Fatalf("All: %v", err)
 	}
-	if s.Type != "pdf-corpus" {
-		t.Errorf("policies.type = %q, want pdf-corpus", s.Type)
+	want := all[0]
+	got, err := Get(want.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", want.ID, err)
+	}
+	if got.ID != want.ID || got.Type != want.Type || got.TargetCategory != want.TargetCategory {
+		t.Errorf("Get(%s) = {id:%s type:%s target:%s}, want {id:%s type:%s target:%s}",
+			want.ID, got.ID, got.Type, got.TargetCategory,
+			want.ID, want.Type, want.TargetCategory)
 	}
 }
 

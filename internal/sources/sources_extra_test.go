@@ -58,7 +58,7 @@ func TestFS_NonNil(t *testing.T) {
 
 func TestSource_ParsesAllFields(t *testing.T) {
 	snippet := `sources:
-  - id: backend-systems
+  - id: services
     host: gitlab
     type: gitlab-group
     group: your-org/backend
