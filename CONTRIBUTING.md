@@ -145,6 +145,30 @@ before the project moved to a PR-gated flow; ignore it.)
 CI must pass (lint, test+coverage, vuln, gitleaks) before a PR is
 merged.
 
+## Branch and tag protection
+
+`main` is protected by a repository ruleset with no bypass, so it applies
+to maintainers too:
+
+- **Commits must be signed.** Set signing up before your first push —
+  `git config gpg.format ssh`, `git config user.signingkey <your-key.pub>`,
+  `git config commit.gpgsign true`. An unsigned commit is rejected at push
+  time, not at review time.
+- **No force-push, no branch deletion.** History on `main` is append-only.
+
+Release tags (`v*`) are protected separately: they must be signed, must
+match `vX.Y.Z` exactly, and once pushed can never be deleted or moved.
+
+That last rule is not bureaucracy. The release workflow signs whatever a
+`v*.*.*` tag points at, using the repository's own OIDC identity, and
+`mk update` verifies that signature against a certificate identity regexp
+pinned to `refs/tags/v<major>.<minor>.<patch>`. A tag shaped like `v1.0`
+or `v1.0.0-rc1` would therefore produce a release whose signature
+`mk update` refuses; the pattern rule rejects it at push time instead.
+And since moving a tag would yield a *validly signed* release with
+different bytes, immutability is what makes a pinned version mean
+anything.
+
 ## Repo layout
 
 See the "Repo layout" section in `README.md` for a package-by-package

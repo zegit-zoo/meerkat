@@ -37,6 +37,26 @@ The released artifacts are:
 > anonymous — no token or `gh` login required. A token only helps if you
 > hit GitHub's anonymous API rate limit.
 
+## Tag protection
+
+`v*` tags are governed by a repository ruleset with no bypass:
+
+- signed tags only (`git tag -s`)
+- name must match `vX.Y.Z` exactly
+- no deletion, no moving a tag once pushed
+
+The name pattern is load-bearing, not cosmetic: `CertIdentityRegexp` in
+`internal/update/cosign.go` is anchored to
+`refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$`, so a tag like `v1.0` or a
+prerelease suffix would trigger the workflow and publish a release whose
+signature `mk update` then refuses to verify. The ruleset rejects the tag
+at push time instead. If a prerelease convention is ever wanted, both the
+regexp and the ruleset pattern have to change together.
+
+Immutability matters for the same reason: the workflow signs whatever the
+tag points at, so a moved tag yields a validly signed release with
+different bytes. Cut a new version instead.
+
 ## Verifying a release (consumer side)
 
 Download the checksums file and its cosign Sigstore bundle, then run:
