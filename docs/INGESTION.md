@@ -46,7 +46,7 @@ sources:
     template: <name>.md          # under templates/
     prompt: prompts/<name>.md    # under ingestion/prompts/
     schedule: weekly | monthly | on-change
-    enrichment: [past-incidents, datadog-service-catalog]   # optional
+    enrichment: [past-incidents, service-catalog]           # optional
     model: openai/gpt-5.5-fast   # optional per-source override
 ```
 
@@ -60,8 +60,8 @@ PDF corpus, and a synthesised category:
 
 | ID | Type | Source | Target |
 |----|------|--------|--------|
-| `adr` | gitlab | `your-org/architecture/architecture-decision-record` (under `architecture-decision-records/`) | `adr/` |
-| `policies` | pdf-corpus | `<your-extracted-docs>/*.pdf` | `policies/` |
+| `decisions` | gitlab | `your-org/engineering/decision-records` (under `records/`) | `decisions/` |
+| `policies` | pdf-corpus | `<your-pdf-directory>/*.pdf` | `policies/` |
 | `concepts` | synthesised | seed list, cross-links from everything else | `concepts/` |
 
 ## Per-source prompts
@@ -76,7 +76,7 @@ markdown file with `{{var}}` placeholders the planner substitutes:
 | `{{page_id_basename}}` | `incident-response` |
 | `{{template_path}}` | `templates/policy.md` |
 | `{{source}}` | one-line summary, e.g. `type=gitlab repo=… enrichment=…` |
-| `{{enrichment}}` | comma-separated, e.g. `datadog-service-catalog,past-incidents` |
+| `{{enrichment}}` | comma-separated, e.g. `service-catalog,past-incidents` |
 | `{{now}}` | current ISO-8601 UTC time |
 
 Prompts live in the **kb repo** (not the CLI repo) so prompt
