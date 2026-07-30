@@ -186,7 +186,11 @@ func opencodeCLI(bin string) agentCLI {
 		buildCmd: func(ctx context.Context, t Task, env ExecEnv, instruction string) *exec.Cmd {
 			args := []string{"run"}
 			if t.Model != "" {
-				args = append(args, "--model", t.Model)
+				// Joined form, not "--model", t.Model: a model string from an
+				// untrusted sources.yaml that begins with "-" must never be
+				// parseable as a flag of its own (e.g. --dangerously-skip-permissions,
+				// which TrustSources otherwise gates).
+				args = append(args, "--model="+t.Model)
 			}
 			if env.TrustSources {
 				args = append(args, "--dangerously-skip-permissions")
@@ -209,7 +213,7 @@ func claudeCLI(bin string) agentCLI {
 				args = append(args, "--dangerously-skip-permissions")
 			}
 			if t.Model != "" {
-				args = append(args, "--model", t.Model)
+				args = append(args, "--model="+t.Model) // joined form -- see opencodeCLI.
 			}
 			cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: fixed agent binary, no shell; args are page metadata.
 			cmd.Dir = env.WorkdirKB                       // Claude Code uses cwd as the working dir.

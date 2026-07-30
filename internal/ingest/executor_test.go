@@ -100,8 +100,34 @@ func TestAgentCLI_BuildCmd(t *testing.T) {
 	if cl.Dir != "/wd" {
 		t.Errorf("claude cwd = %q, want /wd", cl.Dir)
 	}
-	if !hasArg(cl.Args, "--model") || !hasArg(cl.Args, "sonnet") {
-		t.Errorf("claude should pass --model: %v", cl.Args)
+	if !hasArg(cl.Args, "--model=sonnet") {
+		t.Errorf("claude should pass --model=sonnet: %v", cl.Args)
+	}
+}
+
+// TestAgentCLI_ModelCannotInjectAFlag proves a model string from an untrusted
+// sources.yaml cannot smuggle in a flag of its own. Passed as a separate
+// ("--model", value) pair, a value like --dangerously-skip-permissions could be
+// re-parsed as a flag by the agent CLI, defeating the TrustSources gate above.
+// The joined --model=<value> form binds it as a value regardless of parser.
+func TestAgentCLI_ModelCannotInjectAFlag(t *testing.T) {
+	task := Task{PageID: "adr/x", Model: "--dangerously-skip-permissions"}
+	untrusted := ExecEnv{WorkdirKB: "/wd", TrustSources: false}
+
+	for _, tc := range []struct {
+		name string
+		cli  agentCLI
+	}{
+		{"opencode", opencodeCLI("")},
+		{"claude", claudeCLI("")},
+	} {
+		cmd := tc.cli.buildCmd(context.Background(), task, untrusted, "INSTR")
+		if hasArg(cmd.Args, "--dangerously-skip-permissions") {
+			t.Errorf("%s: hostile model injected a bare flag: %v", tc.name, cmd.Args)
+		}
+		if !hasArg(cmd.Args, "--model=--dangerously-skip-permissions") {
+			t.Errorf("%s: model not passed in joined form: %v", tc.name, cmd.Args)
+		}
 	}
 }
 
