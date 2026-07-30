@@ -405,6 +405,52 @@ measurement from an internal deployment: cold-start ~150 ms on ~700 pages.
 The public repo ships no content, so your own cold-start time depends on
 the size of the content repo you point `content-source.yaml` at.
 
+### Load speed with content from disk
+
+The figure above is for content embedded at build time. If you take the
+pristine binary and point it at your own knowledge base (see ["Serving
+content at runtime"](#serving-content-at-runtime)), the index is built from
+disk at startup instead — so the cost lands differently depending on how
+meerkat is run.
+
+Measured against [meerkat-bim](https://github.com/JonasLundin/meerkat-bim),
+an OKF bundle of 67 concepts / 0.72 MB of markdown (averaging ~10 KB per
+page), served with `--kb-dir` on an Apple M2 Pro (10 cores, macOS 26.6,
+go1.26.5) — medians over 20 runs, warm filesystem cache:
+
+| Invocation | Cost | When it is paid |
+|---|---|---|
+| `mk search` | ~160 ms | **every invocation** — the process exits and the index dies with it |
+| `mk http serve`, `mk mcp serve` | ~160 ms once, then ~1 ms per query | at startup, before the port accepts traffic |
+| `mk show`, `mk list` | ~10–20 ms | never — neither builds the search index |
+
+A ~160 ms cold `mk search` breaks down as ~11 ms process start, ~10 ms
+reading the markdown tree, and ~140 ms building the index. Reading content
+off disk is close to free; the index build is essentially the whole cost, and
+it tracks the **volume** of markdown rather than the number of files — around
+0.2–0.3 s per MB:
+
+| Concepts | Markdown | Server startup | Warm query (median) |
+|---|---|---|---|
+| 67 | 0.72 MB | 0.16 s | 1.0 ms |
+| 134 | 1.42 MB | 0.33 s | 1.2 ms |
+| 268 | 2.84 MB | 0.66 s | 1.3 ms |
+| 536 | 5.68 MB | 1.38 s | 1.4 ms |
+| 1072 | 11.36 MB | 3.01 s | 1.6 ms |
+
+Two caveats on that table. Rows past the first are the same bundle
+duplicated, so vocabulary repeats and a genuinely distinct corpus of that
+size will index somewhat slower. And page size matters more than page count:
+67 pages averaging 10 KB cost more to index than several hundred short ones,
+so compare against your own markdown volume rather than your page count.
+
+The practical consequence is that repeated querying belongs in a server, not
+a shell loop. `mk http serve` pays the index build once and then answers in
+about a millisecond; `mk search` in a loop pays it every time. Because
+`search.New()` runs before the listener binds, a server that has started
+answering `/healthz` has a fully built index — there is no window where it
+serves queries against a partial one.
+
 ## Build / test / release
 
 ```bash
