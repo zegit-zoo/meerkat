@@ -14,8 +14,12 @@ work offline with zero runtime dependencies. The body of content and its
 ingestion sources are configuration — point meerkat at your own content
 and sources.
 
-> **Pre-1.0.** Commands, flags, and the `content-source.yaml` schema may
-> still change between releases.
+> **Early development — pre-1.0.** This project is still under active
+> development and should not be expected to be stable until 1.0. Commands,
+> flags, the MCP and HTTP surfaces, and the `content-source.yaml` schema may
+> all change between releases, and breaking changes ship in 0.x minor
+> versions rather than waiting for a major bump. Pin a release tag if you
+> need reproducibility.
 
 ## Install
 
