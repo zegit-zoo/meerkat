@@ -820,5 +820,8 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
   unauthorized collection is made invisible rather than denied
 - [docs/design/ingestion-pipeline.md](docs/design/ingestion-pipeline.md) —
   how `mk ingest` populates placeholder pages from that content repo
+- [docs/design/index-filtering.md](docs/design/index-filtering.md) — an
+  assessment (not yet implemented) of index-time frontmatter filtering
+  for very large knowledge bases, with measurements
 - Your own content repo holds the KB pages and `ingestion/sources.yaml` —
   meerkat only needs a `content-source.yaml` pointing at it
