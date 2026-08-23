@@ -301,13 +301,17 @@ unverified directory.
 
 ## Follow-ups
 
-- **Per-collection authorization** (the next issue): map a caller to a
-  set of permitted collections and filter at `Registry.target` — the one
-  place every surface already routes through. `Registry.Search`'s
-  per-collection indexes mean a filtered search needs no index rebuild.
-  Note that the ambiguity rule interacts with authorization: an
-  unauthorized collection must be invisible (as if not mounted), not
-  merely denied, or the ambiguity error becomes an existence oracle.
+- ~~**Per-collection authorization**~~ — done, in
+  [hosted-mcp.md](hosted-mcp.md) (#9). It landed slightly upstream of
+  where this section predicted: rather than filtering inside
+  `Registry.target`, `Registry.Restrict` narrows the whole registry
+  once per request, which also covers `Names`, `All`, `Get` and
+  `SplitQualified` — enumeration surfaces that don't route through
+  `target` and would each have leaked on their own. The invisibility
+  warning above turned out to be the load-bearing part of the design;
+  `Registry.Search`'s per-collection indexes did indeed mean a filtered
+  search needs no rebuild, since a restricted view shares the parent's
+  `*Collection` values.
 - **Collection-aware ingest / sources / completion**, replacing the
   first-collection compromise above.
 - **Per-collection refresh.** Content is resolved once at startup;

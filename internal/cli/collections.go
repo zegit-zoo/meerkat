@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
 )
 
@@ -22,6 +23,12 @@ import (
 // covers that case, so a nil here always means "whatever the process
 // globals point at", never a crash.
 var activeRegistry *collections.Registry
+
+// activeAuth is the `auth:` block of the content-source.yaml resolved
+// by the root command's PersistentPreRunE, or nil when there is none
+// (which is every deployment that hasn't opted in). Only `mk mcp
+// serve-http` reads it; see internal/authz.
+var activeAuth *authz.Config
 
 // registry returns the collections this invocation serves, falling back
 // to a single collection over the process-global KB filesystem.

@@ -162,9 +162,58 @@ is small but worth being explicit about:
 | Runtime KB content — generation-pinned (`type: gcs` `content-source.yaml` source) | Tampering, or an unexpected overwrite, of an object in a Google Cloud Storage bucket an operator points meerkat at | **Also not covered by the cosign signature, the checksums file, or `kb_commit`** — same as the two rows above. What *is* different: GCS assigns a new generation on every write, and meerkat fetches with a conditional read (an explicit generation **and** `ifGenerationMatch`), so the bytes written into a cache entry named `<generation>` cannot be another generation's; the cache key is that generation (bundle mode) or a fingerprint over every listed object's `(name, generation)` (prefix mode), so any overwrite/add/delete invalidates it rather than being served from a stale entry. An explicit `generation:` in the config pins the deployment outright — the current generation is never consulted, so a later overwrite cannot change what this binary serves. `sha256:` is optional here (the generation already pins the bytes) and is verified before extraction when set. Bundle extraction reuses the same hardened `type: url` extractor; prefix mode applies the same entry-name validation and `os.Root` containment to object names, plus per-file/cumulative/object-count caps. **Credentials:** Application Default Credentials / Workload Identity Federation only — the schema has no field for a static service-account key, so meerkat cannot be configured to read one. Access control on the bucket is Google Cloud IAM's; meerkat adds none of its own, and any principal that can read the bucket can serve its content. `kb_source` reports `gcs://<bucket>/<object>@<generation>`. |
 | User's GitHub token (used by `mk update` and `mk ingest` git auth) | Disclosure via argv, on-disk config, or logging | The token (from the `gh` auth cache) is handed to the clone/fetch subprocess only via a `credential.helper` script that reads it back from an env var (`MEERKAT_GIT_TOKEN`) at request time — it never appears in argv, in the persisted remote URL, or in `.git/config`. The remote URL is scrubbed back to its tokenless form in a `defer` immediately after clone/fetch, including on error paths, so a live credential doesn't linger in the cache dir. |
 | Downloaded release binary (in `mk update` flow) | Supply-chain swap | SHA256 verified against published `checksums.txt`; cosign signature on the checksums file (Rekor-logged); staged in a user-owned temp dir before final copy/move; `.old` backup during swap |
+| `mk mcp serve-http` — who may reach which collection | An authenticated caller reading a collection they aren't entitled to, or *learning it exists* | Bearer tokens are verified as real OIDC tokens (signature against the issuer's JWKS, `iss`, `aud`, `exp`) by `github.com/coreos/go-oidc`; discovery runs at startup so a bad issuer fails the process rather than producing intermittent 401s. **Audience is mandatory** — a provider with no `audience` and no `auth.resource` is refused at construction, because an audience-unbound resource server accepts tokens minted for any other relying party of the same IdP. Authorization is applied by *narrowing the registry* once per request (`collections.Registry.Restrict`), not by a per-operation check: a collection the caller can't read is absent from `Names`/`All`/`Get`/`target`/`SplitQualified` and therefore from search, list, show, the MCP tool descriptions, the `available: …` list in an error, and `mk_show`'s ambiguity count. See the note below on why that distinction is the security property. Policy validation runs at config-load time (unknown capability, rule with no collections, non-https issuer, rules without providers) so a policy that would silently grant nothing fails the process instead. |
+| `mk mcp serve-http` unauthenticated endpoints (`/livez`, `/readyz`, `/metrics`, `/.well-known/oauth-protected-resource`) | Enumeration of the deployment by an unauthenticated caller | Probes and metrics are deliberately unauthenticated (an orchestrator and a scrape job have no OIDC token, and a probe that can fail for auth reasons restarts healthy pods), so they are written to carry nothing: `/readyz` reports **counts, never collection names** — the names behind a failure go to the structured log; no metric carries a collection name, page ID, query or caller subject as a label; the `route` label is the server's own matched mux pattern from a closed set, never `r.URL.Path`, so a scanner can't add time series. The RFC 9728 metadata is public by definition — its job is to be readable by a client that has no token yet — and contains only the resource identifier and the configured issuers. `GET /` names no collection. |
+| `mk mcp serve-http` access logs | Credential or membership disclosure via logging | The `Authorization` header, the raw token, group membership and request bodies are never logged. Logged: method, path, status, duration, bytes, peer, user agent, MCP session ID, and (authenticated only) `sub`/`issuer`/`tenant` — an audit trail without a directory dump. `X-Forwarded-For` is deliberately **not** consulted: it is client-controlled unless a trusted proxy rewrites it, and meerkat has no way to know that. **The server has no TLS of its own**; default bind is loopback. Exposed beyond one host without a TLS-terminating proxy, bearer tokens and every response body cross the network in plaintext. |
 | `mk http serve` API key, and the traffic it guards | Disclosure — in code/logs, or on the wire | Key comparison is constant-time (`subtle.ConstantTimeCompare`), the key is never echoed, and the server refuses to start without one. **The server has no TLS of its own** (`ListenAndServe`, never `ListenAndServeTLS`) — default bind is loopback (`127.0.0.1`). Exposed beyond one host without a TLS-terminating reverse proxy in front, the bearer token and every response body cross the network in plaintext. See `docs/INTEGRATION-OPENWEBUI.md` for the reverse-proxy pattern. |
 | `mk ingest --execute` spawns an agent CLI (`opencode` or `claude`) | Prompt injection: `Task.Prompt` is rendered from `ingestion/prompts/*.md` in the ingested content source, so a malicious prompt file in any source repo in `sources.yaml` is an arbitrary-action path, running with `cmd.Dir`/`--dir` set to a working copy that holds push credentials, at the operator's full privilege. The generated instruction itself includes a `git push` recipe. | Ingested content is treated as **trusted input** to the agent — meerkat does not sandbox or vet it. The real control is permission prompts: by default the agent CLI runs *with* its normal permission prompts, so an injected instruction still has to get past those before it acts. `--trust-sources` disables the prompts (passes `--dangerously-skip-permissions` to the agent CLI) for unattended/CI runs; it prints a stderr warning before executing. Operators who enable `--trust-sources` must trust every source repo listed in `sources.yaml` — as much as they trust code they'd merge unreviewed. |
 | Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk. **When served from a runtime content source instead** (`--kb-dir`/`MEERKAT_KB_DIR`, or a `content-source.yaml` `type: local`/`type: url`/`type: gcs` source), the three rows above apply here too: unverified for `disk:<path>`, digest-verified (with the same caveats) for `url:<url>@...`, generation-pinned for `gcs://...` — either way, outside the gosec walk and the cosign-signed release. |
+
+### Collection authorization: invisible, not denied
+
+`mk mcp serve-http`'s access control has one rule worth stating on its
+own, because the intuitive implementation of it is insecure.
+
+A collection a caller may not read is **invisible** — filtered out of the
+registry at the start of the request, so every surface downstream behaves
+as if it were never mounted. It is *not* denied per operation.
+
+The difference is not cosmetic. meerkat's multi-collection routing (see
+[design/multi-collection.md](design/multi-collection.md)) is full of
+messages that name collections, deliberately, to make errors actionable:
+
+- `mk_show`'s ambiguity error lists every collection holding a page ID,
+  so the caller can re-ask with a qualified one;
+- an unknown-collection error ends `available: <the mounted set>`;
+- the MCP tool descriptions name the mounted collections, which is how a
+  client discovers them without an extra tool call.
+
+Under a per-operation 403, each of those becomes an **enumeration
+oracle**: an authenticated caller with no access to anything learns the
+name of every collection, and — via the ambiguity error — which
+documents live in which. For a knowledge base the names are frequently
+the sensitive part (`incident-2026-03-payments`,
+`acquisition-target-research`). A 403-vs-404 split on `mk_show` is a
+per-page existence oracle on top of that.
+
+Filtering the registry closes all of them at once, and closes the ones
+added later for free. Specifically:
+
+- the ambiguity count and its suggested qualified IDs reflect the
+  caller's view, so a page in three collections is unambiguous for a
+  caller who can read one;
+- a hidden collection name produces a byte-identical error to a
+  never-mounted one, `available:` list included;
+- `<hidden>:<page-id>` stops parsing as a collection qualification and
+  404s as a bare page ID;
+- `tools/list` and `tools/call` are both rebuilt through mcp-go's tool
+  filter, so a caller with no readable collection is offered no KB tools
+  and cannot invoke them either.
+
+The one thing meerkat *does* say plainly is that a caller has no access
+at all: a token that verifies but matches no policy rule gets **403**.
+That is a statement about the caller, identical whether the deployment
+mounts one collection or fifty, and it names none of them.
 
 ### `kb_commit` vs. `kb_source`: the provenance split
 

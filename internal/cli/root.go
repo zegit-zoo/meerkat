@@ -143,12 +143,27 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 				}
 				kbSourceProvenance = source
 				activeRegistry = collections.Global(source)
+				// --kb-dir means "ignore content-source.yaml entirely", so
+				// no auth: block is discovered either. `mk mcp serve-http
+				// --kb-dir X` gets its policy from --auth-config or runs
+				// unauthenticated — the same rule as for content.
+				activeAuth = nil
 				return nil
 			}
 			resolved, err := contentsource.ResolveRuntimeCollections(cmd.Context(), contentSourceFlag)
 			if err != nil {
 				return err
 			}
+			// The auth: block lives in the same content-source.yaml the
+			// collections came from. Reading it here — once per
+			// invocation, alongside content resolution — is what lets `mk
+			// mcp serve-http` pick it up without re-running discovery.
+			// It is inert for every other subcommand.
+			auth, err := contentsource.LoadRuntimeAuth(contentSourceFlag)
+			if err != nil {
+				return err
+			}
+			activeAuth = auth
 			// Point the process-global KB filesystem at the FIRST resolved
 			// collection. For every single-collection configuration (which
 			// is every configuration that predates collections) that is

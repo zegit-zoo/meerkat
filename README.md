@@ -115,8 +115,9 @@ mk search "incident" --collection runbooks            # search one collection
 mk show runbooks:incidents/paging                     # a collection-qualified page ID
 
 # Servers
-mk mcp serve                                          # stdio for OpenCode
-mk http serve --port 4004                             # for OpenWebUI
+mk mcp serve                                          # stdio MCP for OpenCode
+mk mcp serve-http --port 4005                         # hosted MCP (Streamable HTTP + OIDC)
+mk http serve --port 4004                             # HTTP/OpenAPI for OpenWebUI
 
 # Ingestion (drives OpenCode sub-agents to populate placeholders)
 mk ingest                                             # plan all stale tasks (JSONL)
@@ -156,6 +157,77 @@ Restart OpenCode. Three tools become available to the agent:
 | `mk_search` | `query`, `limit?` | `[{id, title, score, snippet, category, status}]` |
 | `mk_show` | `id` | `{id, title, body, front, trust_tier, stale}` (parsed frontmatter, plus two OKF-derived advisory signals — see [docs/OKF.md](docs/OKF.md#trust-and-lifecycle)) |
 | `mk_list` | `prefix?`, `category?`, `status?`, `owner?`, `type?` | `[{id, title, category, status, owner, type, source}]` |
+
+## Hosted MCP server (Streamable HTTP + OIDC)
+
+`mk mcp serve` is one process per client, spawned by that client, trusted
+because you started it. For **one meerkat serving many people**, run the
+hosted transport instead:
+
+```bash
+mk mcp serve-http --port 4005          # http://127.0.0.1:4005/mcp
+```
+
+It exposes the same `mk_search` / `mk_show` / `mk_list` tools over the MCP
+Streamable HTTP transport, with concurrent sessions, plus:
+
+| endpoint | auth | what it is |
+|---|---|---|
+| `/mcp` | OIDC bearer | the MCP endpoint (POST / GET-SSE / DELETE) |
+| `/.well-known/oauth-protected-resource` | none | RFC 9728 protected-resource metadata |
+| `/livez` | none | liveness (process only) |
+| `/readyz` | none | readiness — content resolution + per-collection index health |
+| `/metrics` | none | Prometheus |
+
+With **no `auth:` block configured** it is unauthenticated and serves every
+mounted collection to any caller — the same posture as `mk mcp serve`, just
+over HTTP. Bind loopback (the default) or put a gateway in front.
+
+### Authentication and per-collection authorization
+
+Add an `auth:` block to `content-source.yaml` (or pass a standalone policy
+file with `--auth-config`):
+
+```yaml
+auth:
+  resource: https://mcp.example.com/mcp        # RFC 9728 resource identifier
+  providers:
+    - issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+      audience: api://meerkat
+      claims: { groups: groups, email: preferred_username, tenant: tid }
+  rules:
+    - name: sre
+      groups: [sre, oncall]
+      collections: [runbooks, architecture]
+      capabilities: [read]
+    - name: platform-admins
+      groups: [platform-admins]
+      collections: ["*"]
+      capabilities: [admin]
+```
+
+OIDC discovery is generic — **Entra ID, Google Workspace and Okta are
+configuration, not code**. Every request to `/mcp` must then carry a token
+whose signature, issuer, audience and expiry verify; one that doesn't gets
+`401` with a `WWW-Authenticate` header pointing at the metadata endpoint, so
+a client can discover where to get a token with nothing configured
+out-of-band.
+
+**A collection a caller may not read is invisible, not denied.** It is
+absent from their tool descriptions, from search results and listings, from
+the "available: …" list in an error, and from `mk_show`'s ambiguity
+resolution — indistinguishable from a collection this deployment never
+mounted. A caller granted exactly one collection gets the plain,
+single-collection UX. This matters because the alternative (a 403 per
+operation) turns every one of those messages into an oracle for what exists
+and what it's called.
+
+Capabilities are `read`, `personal-write`, `team-write` and `admin`. Only
+`read` is enforced today; the rest are parsed, evaluated and reported now so
+a policy written today keeps its meaning when write tooling consumes them.
+
+Full schema: [content-source.example.yaml](content-source.example.yaml).
+Design and threat reasoning: [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md).
 
 ## OpenWebUI integration
 
@@ -505,6 +577,11 @@ unqualified IDs everywhere and nothing to disambiguate.
 and shell completion read the **first** configured collection. See
 [docs/design/multi-collection.md](docs/design/multi-collection.md).
 
+**Restricting who sees which collection** is a hosted-MCP feature — see
+[Hosted MCP server](#hosted-mcp-server-streamable-http--oidc) above. The
+CLI and `mk http serve` grant every mounted collection to whoever can run
+the binary or present the static token.
+
 ### Provenance: `mk version`
 
 `mk version` reports which content is actually being served via the
@@ -596,7 +673,7 @@ go1.26.5) — medians over 20 runs, warm filesystem cache:
 | Invocation | Cost | When it is paid |
 |---|---|---|
 | `mk search` | ~160 ms | **every invocation** — the process exits and the index dies with it |
-| `mk http serve`, `mk mcp serve` | ~160 ms once, then ~1 ms per query | at startup, before the port accepts traffic |
+| `mk http serve`, `mk mcp serve`, `mk mcp serve-http` | ~160 ms once, then ~1 ms per query | at startup, before the port accepts traffic |
 | `mk show`, `mk list` | ~10–20 ms | never — neither builds the search index |
 
 A ~160 ms cold `mk search` breaks down as ~11 ms process start, ~10 ms
@@ -705,7 +782,10 @@ internal/
   search/     Bleve in-memory BM25 index
   sources/    embeds sources.yaml + prompts + templates
   ingest/     Plan(opts) + Run(ctx, tasks) — planner + executor
-  mcp/        stdio MCP server (mk_search / mk_show / mk_list)
+  mcp/        MCP server (mk_search / mk_show / mk_list) — stdio and the
+              hosted Streamable HTTP transport, probes, metrics, access log
+  authn/      OIDC discovery/JWKS verification + the bearer gate (RFC 9728)
+  authz/      capability model, access policy, per-collection grants
   http/       HTTP/OpenAPI server with bearer auth
   update/     mk update — gh token, GitHub Releases download, atomic swap
   cli/        cobra command tree
@@ -735,6 +815,9 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
 - [docs/design/multi-collection.md](docs/design/multi-collection.md) —
   mounting several named collections at once, the routing/disambiguation
   rules, and the GCS backend's generation-keyed caching
+- [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md) — the hosted
+  Streamable HTTP MCP server: OIDC, the capability model, and why an
+  unauthorized collection is made invisible rather than denied
 - [docs/design/ingestion-pipeline.md](docs/design/ingestion-pipeline.md) —
   how `mk ingest` populates placeholder pages from that content repo
 - Your own content repo holds the KB pages and `ingestion/sources.yaml` —

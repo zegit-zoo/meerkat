@@ -89,6 +89,16 @@ type Collection struct {
 	indexOnce sync.Once
 	index     *search.Index
 	indexErr  error
+
+	// rootOnce/rootSeen latch whether the collection's content root was
+	// reachable the first time its health was checked — at startup, for
+	// a server, which calls Check once before it begins serving. See
+	// contentRootReachable for why a latched baseline is the only way to
+	// tell "this deployment has no wiki/ and never did" (legitimate,
+	// documented, serves empty) from "the volume backing this
+	// collection went away" (a real outage).
+	rootOnce sync.Once
+	rootSeen bool
 }
 
 // FromPages builds a collection over an explicit set of pages rather
@@ -174,6 +184,12 @@ func (c *Collection) Close() error {
 type Registry struct {
 	list []*Collection
 	by   map[string]*Collection
+	// derived marks a registry produced by Restrict: a per-request
+	// VIEW over another registry's collections rather than an owner of
+	// them. Close is a no-op on a derived registry, because the
+	// *Collection values (and the built indexes inside them) belong to
+	// the registry it was derived from and outlive this request.
+	derived bool
 }
 
 // PageRef is a page together with the collection it came from.
@@ -269,15 +285,78 @@ func (r *Registry) Names() []string {
 
 // Get returns the named collection, or an error wrapping
 // ErrUnknownCollection that names the ones that exist.
+//
+// "the ones that exist" means the ones THIS registry holds. On a
+// registry restricted to a caller's readable collections (see Restrict)
+// that is the caller's own view, so asking for a collection they may
+// not read produces the identical error to asking for one nobody has
+// ever mounted — which is the point.
 func (r *Registry) Get(name string) (*Collection, error) {
 	if c, ok := r.by[name]; ok {
 		return c, nil
 	}
+	if len(r.list) == 0 {
+		return nil, fmt.Errorf("%w %q — no collections are mounted", ErrUnknownCollection, name)
+	}
 	return nil, fmt.Errorf("%w %q — available: %s", ErrUnknownCollection, name, strings.Join(r.Names(), ", "))
+}
+
+// Restrict returns a VIEW of r holding only the collections allow
+// accepts, in the same configuration order. It is the single point at
+// which authorization is applied.
+//
+// Filtering here rather than per-operation is what makes an
+// unauthorized collection *invisible* rather than *denied*. Everything
+// this type exposes — target (and so Search/Pages/Show), Get's
+// "available: ..." list, Names, All, Len, Single, SplitQualified,
+// Provenance — reads r.list/r.by and therefore sees exactly the allowed
+// set. There is no path by which a filtered-out collection can be
+// counted, named, disambiguated against, or reported as existing:
+//
+//   - Show's ambiguity error counts only visible matches, so it can't
+//     be used to probe whether a page also exists somewhere the caller
+//     can't read;
+//   - Get's error names only visible collections, so a rejected name is
+//     indistinguishable from a name nobody mounted;
+//   - SplitQualified stops recognising "<hidden>:" as a qualification,
+//     so a qualified ID for a hidden collection degrades to a bare page
+//     ID and 404s rather than 403ing;
+//   - a caller who can read one of several mounted collections gets
+//     Single() == true and the unqualified, single-collection UX.
+//
+// The view shares the underlying *Collection values, so a restricted
+// search reuses the already-built per-collection bleve indexes — no
+// rebuild, which is exactly why the indexes are per-collection. It does
+// not own them: Close on a derived registry is a no-op.
+//
+// A nil allow returns r unchanged, so "no policy in force" costs
+// nothing.
+func (r *Registry) Restrict(allow func(name string) bool) *Registry {
+	if allow == nil {
+		return r
+	}
+	out := &Registry{
+		list:    make([]*Collection, 0, len(r.list)),
+		by:      make(map[string]*Collection, len(r.list)),
+		derived: true,
+	}
+	for _, c := range r.list {
+		if !allow(c.Name) {
+			continue
+		}
+		out.list = append(out.list, c)
+		out.by[c.Name] = c
+	}
+	return out
 }
 
 // target resolves a collection argument to the collections to act on:
 // all of them when name is empty, exactly one otherwise.
+//
+// Every read routes through here, over r.list — which on a restricted
+// registry (see Restrict) is already the caller's visible set. That is
+// the whole enforcement mechanism; no operation below re-checks
+// anything.
 func (r *Registry) target(name string) ([]*Collection, error) {
 	if name == "" {
 		return r.list, nil
@@ -289,8 +368,14 @@ func (r *Registry) target(name string) ([]*Collection, error) {
 	return []*Collection{c}, nil
 }
 
-// Close releases every collection's index.
+// Close releases every collection's index. It is a no-op on a registry
+// produced by Restrict, which borrows its collections rather than
+// owning them — closing a per-request view must not tear down indexes
+// the server is still serving other requests from.
 func (r *Registry) Close() error {
+	if r.derived {
+		return nil
+	}
 	var firstErr error
 	for _, c := range r.list {
 		if err := c.Close(); err != nil && firstErr == nil {
@@ -310,6 +395,107 @@ func (r *Registry) Provenance() string {
 		return r.list[0].Provenance
 	}
 	return fmt.Sprintf("collections:%d", len(r.list))
+}
+
+// Health is one collection's serving state, as reported by Check.
+type Health struct {
+	// Name is the collection the entry describes.
+	Name string `json:"collection"`
+	// Ready is true when the collection's content root enumerated and
+	// its search index is built — i.e. search/show/list against it can
+	// be expected to work.
+	Ready bool `json:"ready"`
+	// Pages is how many pages enumerated, when Ready.
+	Pages int `json:"pages"`
+	// Error explains a not-Ready entry.
+	Error string `json:"error,omitempty"`
+}
+
+// contentRootReachable reports whether the collection's content root
+// can be stat'd as a directory right now.
+//
+// It is a separate signal from Pages() erroring because Pages()
+// deliberately does NOT error on a missing content root: kb.ListFS
+// degrades a missing "content/" to an empty page list, so that a
+// partially-populated --kb-dir serves what it has instead of hard
+// failing (see kb.List's doc comment). That is right for serving and
+// useless for a probe — an unmounted volume would read as a healthy,
+// empty knowledge base forever.
+func (c *Collection) contentRootReachable() bool {
+	if c.byID != nil {
+		// A FromPages collection has no filesystem to lose.
+		return true
+	}
+	fsys := c.fsys
+	if fsys == nil {
+		fsys = kb.FS()
+	}
+	info, err := fs.Stat(fsys, "content")
+	return err == nil && info.IsDir()
+}
+
+// health derives one collection's serving state.
+func (c *Collection) health() Health {
+	// Latch the startup baseline on the first call. A deployment whose
+	// content root was already absent when the server started has
+	// deliberately (and documentedly) asked to serve an empty
+	// collection; only a root that WAS there and has since gone is an
+	// outage, and only that transition should un-ready the process.
+	c.rootOnce.Do(func() { c.rootSeen = c.contentRootReachable() })
+
+	h := Health{Name: c.Name}
+	pages, err := c.Pages()
+	if err != nil {
+		h.Error = fmt.Sprintf("list pages: %v", err)
+		return h
+	}
+	h.Pages = len(pages)
+	if _, err := c.Index(); err != nil {
+		h.Error = fmt.Sprintf("search index: %v", err)
+		return h
+	}
+	if c.rootSeen && !c.contentRootReachable() {
+		h.Error = "content root is no longer reachable (it was present at startup)"
+		return h
+	}
+	h.Ready = true
+	return h
+}
+
+// Check re-derives each collection's serving state: that its content
+// root is still reachable, that its pages still enumerate, and that its
+// search index is built (building it if it somehow isn't). It is what a
+// readiness probe reports, so it deliberately does real work rather
+// than reading a flag latched at startup — a content directory that
+// disappeared out from under a long-running server, or an unmounted
+// volume, must show up as not ready rather than as a cached "ready"
+// from an hour ago.
+//
+// Call it once before serving begins: that first call latches each
+// collection's startup baseline (see health).
+//
+// Enumeration is the expensive part for a large collection. Callers
+// that probe frequently should cache the result for a few seconds (the
+// hosted MCP server does).
+func (r *Registry) Check() []Health {
+	out := make([]Health, 0, len(r.list))
+	for _, c := range r.list {
+		out = append(out, c.health())
+	}
+	return out
+}
+
+// Ready reports whether every mounted collection is serveable, and the
+// per-collection detail behind that answer. An empty registry is ready:
+// there is nothing that could be broken.
+func (r *Registry) Ready() (bool, []Health) {
+	health := r.Check()
+	for _, h := range health {
+		if !h.Ready {
+			return false, health
+		}
+	}
+	return true, health
 }
 
 // Pages returns the pages of the named collection, or of every
