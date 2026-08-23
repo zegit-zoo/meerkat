@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/update"
@@ -82,15 +83,27 @@ show, or list. What gets served instead is resolved in priority order:
   4. ./content-source.yaml in the working directory
   5. the embedded build (the fallback when none of the above apply)
 
-content-source.yaml's "content.type" may be none, local, or url at
+content-source.yaml's "content.type" may be none, local, url or gcs at
 runtime (git/submodule are build-time only — 'make sync' — since they
 need git and a working tree; using one here fails with an error rather
 than silently serving nothing). type: url fetches an HTTPS .tar.gz,
 verifies it against a required sha256, and caches the extracted result
-locally, keyed by that digest — see content-source.example.yaml.
+locally, keyed by that digest. type: gcs loads a Google Cloud Storage
+.tar.gz object or bucket prefix, authenticating via Application Default
+Credentials and caching by object generation — see
+content-source.example.yaml.
+
+A content-source.yaml may instead declare a "collections:" list of
+named sources with heterogeneous backends, all mounted at once. Then:
+
+  mk list --collections            enumerate what's mounted
+  mk search "term"                 search across every collection
+  mk search "term" --collection x  search just collection x
+  mk show x:concepts/Thing         a page ID qualified by collection
 
 Page IDs are slash-paths from the wiki root without ".md" — e.g.
-"concepts/Some-Concept", "systems/backend/some-service".
+"concepts/Some-Concept", "systems/backend/some-service" — optionally
+prefixed with "<collection>:" when several collections are mounted.
 
 Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 		Example: `  # Knowledge base (offline)
@@ -103,8 +116,13 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
   meerkat --kb-dir ./meerkat-kb search "some term"
   MEERKAT_KB_DIR=./meerkat-kb meerkat list
 
-  # Serve content resolved from a content-source.yaml (type: none|local|url)
-  meerkat --content-source ./content-source.yaml list`,
+  # Serve content resolved from a content-source.yaml (type: none|local|url|gcs)
+  meerkat --content-source ./content-source.yaml list
+
+  # Multiple named collections mounted at once
+  meerkat list --collections
+  meerkat search "incident" --collection runbooks
+  meerkat show runbooks/index --collection runbooks`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		// PersistentPreRunE resolves the content to serve once per
@@ -124,23 +142,32 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 					return err
 				}
 				kbSourceProvenance = source
+				activeRegistry = collections.Global(source)
 				return nil
 			}
-			rc, err := contentsource.ResolveRuntime(contentSourceFlag)
+			resolved, err := contentsource.ResolveRuntimeCollections(cmd.Context(), contentSourceFlag)
 			if err != nil {
 				return err
 			}
-			source, err := kbdir.ConfigureLayout(rc.Dir, rc.Source.Layout)
+			// Point the process-global KB filesystem at the FIRST resolved
+			// collection. For every single-collection configuration (which
+			// is every configuration that predates collections) that is
+			// simply "the" collection, and this line is exactly the call
+			// this function always made. For a multi-collection config it
+			// is what internal/sources, `mk ingest` and shell completion —
+			// none of which are collection-aware yet — read through; the
+			// collection-aware surfaces (search/show/list, MCP, HTTP) go
+			// through the registry below instead and see all of them.
+			primary := resolved[0]
+			if _, err := kbdir.ConfigureLayout(primary.Dir, primary.Source.Layout); err != nil {
+				return err
+			}
+			reg, err := collections.Open(resolved)
 			if err != nil {
 				return err
 			}
-			if rc.Source.Type == contentsource.TypeURL {
-				// url: content is verified (sha256-checked); disk:<path>
-				// (ConfigureLayout's default label above) would just name
-				// an opaque cache directory — see URLProvenance.
-				source = contentsource.URLProvenance(rc.Source)
-			}
-			kbSourceProvenance = source
+			activeRegistry = reg
+			kbSourceProvenance = reg.Provenance()
 			return nil
 		},
 		// PersistentPostRun fires after every (sub-)command's RunE.
@@ -167,7 +194,8 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 			"discovery below.")
 	root.PersistentFlags().StringVar(&contentSourceFlag, "content-source", "",
 		"Path to a content-source.yaml describing where to serve KB content from "+
-			"(content.type: none|local|url — git/submodule are build-time-only, 'make sync'). "+
+			"(content.type: none|local|url|gcs, or a collections: list of named sources — "+
+			"git/submodule are build-time-only, 'make sync'). "+
 			"Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this "+
 			"nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, "+
 			"then ./content-source.yaml, then the embedded build.")

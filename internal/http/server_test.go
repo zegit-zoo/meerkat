@@ -12,6 +12,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/search"
 )
@@ -26,20 +27,25 @@ func newTestServer(t *testing.T) *Server {
 	return srv
 }
 
-// newTestServerWithConfig builds a Server around an injected index and
-// config, bypassing New's search.New() (which reads embedded/--kb-dir
-// content unavailable to tests) so limit/timeout behavior can be tested
-// against a known fixture corpus. Same-package test file, so it can
-// reach Server's unexported fields directly — mirrors internal/mcp's
-// pattern of calling searchHandler(idx) with an injected index.
-func newTestServerWithConfig(t *testing.T, cfg Config, idx *search.Index) *Server {
+// newTestServerWithConfig builds a Server around an injected page set
+// and config, bypassing New's index build over embedded/--kb-dir
+// content (unavailable to tests) so limit/timeout behavior can be
+// tested against a known fixture corpus. The pages are mounted as a
+// single collection named "default" — the one-collection shape every
+// pre-collections deployment resolves to. Same-package test file, so it
+// can reach Server's unexported fields directly.
+func newTestServerWithConfig(t *testing.T, cfg Config, pages []kb.Page) *Server {
 	t.Helper()
 	if cfg.QueryTimeout == 0 {
 		cfg.QueryTimeout = search.DefaultQueryTimeout
 	}
-	s := &Server{cfg: cfg, idx: idx, mux: nethttp.NewServeMux()}
+	reg, err := collections.New(collections.FromPages(collections.DefaultName, pages))
+	if err != nil {
+		t.Fatalf("collections.New: %v", err)
+	}
+	s := &Server{cfg: cfg, reg: reg, mux: nethttp.NewServeMux()}
 	s.routes()
-	t.Cleanup(func() { _ = idx.Close() })
+	t.Cleanup(func() { _ = reg.Close() })
 	return s
 }
 
@@ -278,13 +284,9 @@ func TestSearch_QueryPathologicallyNested(t *testing.T) {
 // context deadline: with an already-expired budget, the handler must
 // answer 504 rather than hang or 500.
 func TestSearch_QueryTimeout(t *testing.T) {
-	idx, err := search.NewFromPages([]kb.Page{
+	srv := newTestServerWithConfig(t, Config{APIKey: "test-key", QueryTimeout: -1 * time.Second}, []kb.Page{
 		{ID: "a/b", Title: "T", Body: "some searchable body text", Front: kb.Frontmatter{Category: "concepts"}},
 	})
-	if err != nil {
-		t.Fatalf("NewFromPages: %v", err)
-	}
-	srv := newTestServerWithConfig(t, Config{APIKey: "test-key", QueryTimeout: -1 * time.Second}, idx)
 
 	rec := postSearch(t, srv, `{"query":"searchable"}`)
 	if rec.Code != nethttp.StatusGatewayTimeout {
@@ -305,11 +307,7 @@ func TestSearch_LimitClampedToMax(t *testing.T) {
 			Front: kb.Frontmatter{Category: "concepts"},
 		}
 	}
-	idx, err := search.NewFromPages(pages)
-	if err != nil {
-		t.Fatalf("NewFromPages: %v", err)
-	}
-	srv := newTestServerWithConfig(t, Config{APIKey: "test-key"}, idx)
+	srv := newTestServerWithConfig(t, Config{APIKey: "test-key"}, pages)
 
 	rec := postSearch(t, srv, `{"query":"widget","limit":100000}`)
 	if rec.Code != nethttp.StatusOK {
@@ -520,7 +518,7 @@ func TestNewShowResponse_Shape(t *testing.T) {
 			Verified:    kb.VerifiedList{{By: "human:ahormati"}},
 		},
 	}
-	raw, err := json.Marshal(newShowResponse(page))
+	raw, err := json.Marshal(newShowResponse(collections.PageRef{Collection: collections.DefaultName, Page: page}))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

@@ -40,8 +40,10 @@ import (
 const EnvVar = "MEERKAT_KB_DIR"
 
 // SourceEmbedded is the kb_source provenance value reported by `mk
-// version` when no runtime directory is configured.
-const SourceEmbedded = "embedded"
+// version` when no runtime directory is configured. Aliased from
+// contentsource, which computes the same provenance for a resolved
+// collection, so the two can't drift apart.
+const SourceEmbedded = contentsource.SourceEmbedded
 
 // Resolve returns the effective kb-dir path given the --kb-dir flag
 // value, applying the documented priority: flag, then MEERKAT_KB_DIR,

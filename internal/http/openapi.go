@@ -1,6 +1,8 @@
 package http
 
 import (
+	"strings"
+
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/search"
 )
@@ -11,12 +13,25 @@ import (
 // schema drifts.
 //
 // Reference: https://docs.openwebui.com/features/plugin/tools/openapi-tools/
-func openAPISchema(version string) map[string]any {
+func openAPISchema(version string, collectionNames []string) map[string]any {
 	if version == "" {
 		version = "dev"
 	}
 
 	bearerSecurity := []map[string]any{{"bearerAuth": []string{}}}
+
+	// collectionProperty is the optional "collection" field every data
+	// endpoint accepts. Its description carries the mounted names, so a
+	// client that fetches the schema (OpenWebUI does) learns the set
+	// without a second call.
+	collectionDesc := "Optional. Restrict to one collection. "
+	if len(collectionNames) > 1 {
+		collectionDesc += "Mounted collections: " + strings.Join(collectionNames, ", ") +
+			". Omit to span all of them; every result names the collection it came from."
+	} else {
+		collectionDesc += "This deployment mounts a single collection, so it can be omitted."
+	}
+	collectionProperty := map[string]any{"type": "string", "description": collectionDesc}
 
 	paths := map[string]any{
 		"/search": map[string]any{
@@ -44,6 +59,7 @@ func openAPISchema(version string) map[string]any {
 										"minimum":     1,
 										"maximum":     search.MaxLimit,
 									},
+									"collection": collectionProperty,
 								},
 							},
 						},
@@ -59,12 +75,13 @@ func openAPISchema(version string) map[string]any {
 									"items": map[string]any{
 										"type": "object",
 										"properties": map[string]any{
-											"id":       map[string]any{"type": "string"},
-											"title":    map[string]any{"type": "string"},
-											"category": map[string]any{"type": "string"},
-											"status":   map[string]any{"type": "string"},
-											"score":    map[string]any{"type": "number"},
-											"snippet":  map[string]any{"type": "string"},
+											"id":         map[string]any{"type": "string"},
+											"collection": map[string]any{"type": "string"},
+											"title":      map[string]any{"type": "string"},
+											"category":   map[string]any{"type": "string"},
+											"status":     map[string]any{"type": "string"},
+											"score":      map[string]any{"type": "number"},
+											"snippet":    map[string]any{"type": "string"},
 										},
 									},
 								},
@@ -92,8 +109,9 @@ func openAPISchema(version string) map[string]any {
 								"properties": map[string]any{
 									"id": map[string]any{
 										"type":        "string",
-										"description": "Page ID, e.g. 'concepts/Rate-Limiting'",
+										"description": "Page ID, e.g. 'concepts/Rate-Limiting'. May be qualified as '<collection>:<page-id>'.",
 									},
+									"collection": collectionProperty,
 								},
 							},
 						},
@@ -107,10 +125,11 @@ func openAPISchema(version string) map[string]any {
 								"schema": map[string]any{
 									"type": "object",
 									"properties": map[string]any{
-										"id":    map[string]any{"type": "string"},
-										"title": map[string]any{"type": "string"},
-										"body":  map[string]any{"type": "string"},
-										"front": map[string]any{"type": "object"},
+										"id":         map[string]any{"type": "string"},
+										"collection": map[string]any{"type": "string"},
+										"title":      map[string]any{"type": "string"},
+										"body":       map[string]any{"type": "string"},
+										"front":      map[string]any{"type": "object"},
 										"trust_tier": map[string]any{
 											"type":        "string",
 											"description": "OKF advisory trust tier derived from front.verified (SPEC.md §5.3): unverified (no verified entries), machine-confirmed (verified, but no entry's by has the human: prefix), or human-reviewed (at least one verified entry's by has the human: prefix).",
@@ -127,6 +146,9 @@ func openAPISchema(version string) map[string]any {
 					},
 					"401": errorResponseSchema(),
 					"404": errorResponseSchema(),
+					// 409: the ID exists in several mounted collections and
+					// none was named — the body lists the qualified IDs.
+					"409": errorResponseSchema(),
 				},
 			},
 		},
@@ -143,11 +165,12 @@ func openAPISchema(version string) map[string]any {
 							"schema": map[string]any{
 								"type": "object",
 								"properties": map[string]any{
-									"prefix":   map[string]any{"type": "string", "description": "ID prefix filter, e.g. 'systems/backend/'."},
-									"category": map[string]any{"type": "string", "description": "Frontmatter category filter."},
-									"status":   map[string]any{"type": "string", "description": "Frontmatter status filter."},
-									"owner":    map[string]any{"type": "string", "description": "Frontmatter owner filter."},
-									"type":     map[string]any{"type": "string", "description": "Frontmatter type filter (OKF's concept-kind field), e.g. 'BigQuery Table', 'Metric', 'Playbook'."},
+									"prefix":     map[string]any{"type": "string", "description": "ID prefix filter, e.g. 'systems/backend/'."},
+									"category":   map[string]any{"type": "string", "description": "Frontmatter category filter."},
+									"status":     map[string]any{"type": "string", "description": "Frontmatter status filter."},
+									"owner":      map[string]any{"type": "string", "description": "Frontmatter owner filter."},
+									"type":       map[string]any{"type": "string", "description": "Frontmatter type filter (OKF's concept-kind field), e.g. 'BigQuery Table', 'Metric', 'Playbook'."},
+									"collection": collectionProperty,
 								},
 							},
 						},
@@ -163,13 +186,44 @@ func openAPISchema(version string) map[string]any {
 									"items": map[string]any{
 										"type": "object",
 										"properties": map[string]any{
-											"id":       map[string]any{"type": "string"},
-											"title":    map[string]any{"type": "string"},
-											"category": map[string]any{"type": "string"},
-											"status":   map[string]any{"type": "string"},
-											"owner":    map[string]any{"type": "string"},
-											"type":     map[string]any{"type": "string"},
-											"source":   map[string]any{"type": "object"},
+											"id":         map[string]any{"type": "string"},
+											"collection": map[string]any{"type": "string"},
+											"title":      map[string]any{"type": "string"},
+											"category":   map[string]any{"type": "string"},
+											"status":     map[string]any{"type": "string"},
+											"owner":      map[string]any{"type": "string"},
+											"type":       map[string]any{"type": "string"},
+											"source":     map[string]any{"type": "object"},
+										},
+									},
+								},
+							},
+						},
+					},
+					"401": errorResponseSchema(),
+				},
+			},
+		},
+		"/collections": map[string]any{
+			"get": map[string]any{
+				"operationId": "mk_collections",
+				"summary":     "List the knowledge-base collections this server mounts",
+				"description": "Returns one entry per mounted collection: its name (what to pass as \"collection\" to /search, /show and /list), the content-source type behind it, its provenance, and how many pages it serves.",
+				"security":    bearerSecurity,
+				"responses": map[string]any{
+					"200": map[string]any{
+						"description": "The mounted collections, in configuration order.",
+						"content": map[string]any{
+							"application/json": map[string]any{
+								"schema": map[string]any{
+									"type": "array",
+									"items": map[string]any{
+										"type": "object",
+										"properties": map[string]any{
+											"name":   map[string]any{"type": "string"},
+											"type":   map[string]any{"type": "string"},
+											"source": map[string]any{"type": "string"},
+											"pages":  map[string]any{"type": "integer"},
 										},
 									},
 								},

@@ -6,7 +6,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
-	"github.com/zegit-zoo/meerkat/internal/search"
+	"github.com/zegit-zoo/meerkat/internal/collections"
 )
 
 // TestRegisterTools_BuildsCleanly exercises the registration
@@ -18,19 +18,19 @@ import (
 // content/ missing) this test fails loudly at server construction
 // time — exactly when CI should catch it.
 func TestRegisterTools_BuildsCleanly(t *testing.T) {
-	idx, err := search.New()
-	if err != nil {
-		t.Fatalf("search.New: %v", err)
+	reg := collections.Global("test")
+	if _, err := reg.All()[0].Index(); err != nil {
+		t.Fatalf("build index: %v", err)
 	}
-	defer idx.Close()
+	defer func() { _ = reg.Close() }()
 
 	s := mcpserver.NewMCPServer(
 		"meerkat-test", "test",
 		mcpserver.WithToolCapabilities(true),
 	)
-	registerSearch(s, idx)
-	registerShow(s)
-	registerList(s)
+	registerSearch(s, reg)
+	registerShow(s, reg)
+	registerList(s, reg)
 
 	// Exercise the public CapabilityRegistry too — confirms the
 	// server has the tool-capability flag set, which is what an
@@ -49,7 +49,8 @@ func TestRegisterTools_BuildsCleanly(t *testing.T) {
 // this process, so every tool must advertise the opposite of that
 // default shape: read-only, non-destructive, idempotent, closed-world.
 func TestToolAnnotations_ReadOnlyNonDestructive(t *testing.T) {
-	for _, tool := range []mcp.Tool{searchTool(), showTool(), listTool()} {
+	reg := collections.Global("test")
+	for _, tool := range []mcp.Tool{searchTool(reg), showTool(reg), listTool(reg)} {
 		t.Run(tool.Name, func(t *testing.T) {
 			a := tool.Annotations
 			if a.ReadOnlyHint == nil || !*a.ReadOnlyHint {

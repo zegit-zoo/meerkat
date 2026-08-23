@@ -30,6 +30,14 @@ import (
 // ConfigFile is the repo-root config filename.
 const ConfigFile = "content-source.yaml"
 
+// DefaultCollectionName is the name given to the collection a
+// single-source (`content:`) config resolves to, and to the embedded
+// fallback. Nothing in a legacy config mentions collections at all, so
+// the name is synthesised here rather than read from the file — it's
+// what `--collection`/`mk list --collections` show, and what the
+// multi-collection routing rules treat as "the one collection".
+const DefaultCollectionName = "default"
+
 // Source type values.
 const (
 	TypeNone      = "none"
@@ -42,11 +50,71 @@ const (
 	// or working tree, so — unlike them — it is supported at runtime as
 	// well as at build time. See FetchURL and ResolveRuntime.
 	TypeURL = "url"
+	// TypeGCS loads content from a Google Cloud Storage bucket, either as
+	// a single .tar.gz object or as an object prefix treated as a
+	// directory tree. Credentials resolve through Application Default
+	// Credentials / Workload Identity Federation — the schema carries no
+	// key material of any kind. Runtime-only, like TypeURL. See FetchGCS.
+	TypeGCS = "gcs"
 )
 
 // Config is the top-level content-source.yaml document.
+//
+// Exactly one of Content and Collections carries the configuration:
+//
+//   - `content:` — the original single-source form. Still the whole
+//     schema for the overwhelmingly common one-KB deployment, and
+//     unchanged in behaviour: it resolves to one collection named
+//     DefaultCollectionName.
+//   - `collections:` — an ordered list of named sources, each reusing
+//     the same Source schema `content:` uses (type/path/url/bucket/...
+//     plus a per-collection layout). Order is significant: it is the
+//     order collections are searched, listed, and disambiguated in (see
+//     internal/collections).
+//
+// Setting both is a configuration error rather than a merge: a reader
+// of the file should never have to work out which of two content
+// declarations won.
 type Config struct {
-	Content Source `yaml:"content"`
+	Content     Source       `yaml:"content"`
+	Collections []Collection `yaml:"collections,omitempty"`
+}
+
+// Collection is one named entry of a `collections:` list — a Source
+// (inlined, so every existing source key is written exactly as it is
+// under `content:`) plus the name it is mounted under.
+type Collection struct {
+	// Name is how the collection is addressed: `--collection <name>`,
+	// the MCP tools' `collection` argument, and the `<name>:<page-id>`
+	// qualified page ID form. Constrained to [A-Za-z0-9][A-Za-z0-9_-]*
+	// so a name is always safe to use unquoted in a CLI argument, as a
+	// qualified-ID prefix (hence: no colon), and — with the per-
+	// collection authorization work this is the foundation for — as a
+	// stable identifier in a policy document.
+	Name   string `yaml:"name"`
+	Source `yaml:",inline"`
+}
+
+// maxCollectionNameLen bounds a collection name. Nothing technical
+// requires a bound; it exists so a pathological name can't turn every
+// error message and tool description into a wall of text.
+const maxCollectionNameLen = 64
+
+// validCollectionName reports whether name matches the documented
+// [A-Za-z0-9][A-Za-z0-9_-]* shape (see Collection.Name).
+func validCollectionName(name string) bool {
+	if name == "" || len(name) > maxCollectionNameLen {
+		return false
+	}
+	for i, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case (c == '-' || c == '_') && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Source declares a single content source (build-time or runtime — see
@@ -80,6 +148,28 @@ type Source struct {
 	// what the on-disk cache is keyed on.
 	URL    string `yaml:"url,omitempty"`
 	SHA256 string `yaml:"sha256,omitempty"`
+
+	// type: gcs — runtime-capable (see FetchGCS). Bucket is required;
+	// exactly one of Object (a .tar.gz bundle) or Prefix (an object
+	// prefix served as a directory tree) selects the mode.
+	//
+	// There is deliberately no credentials/key-file field: authentication
+	// is Application Default Credentials / Workload Identity Federation,
+	// resolved by the Google client library from the ambient environment.
+	// A static service-account key has nowhere to be named here, which is
+	// the point.
+	Bucket string `yaml:"bucket,omitempty"`
+	Object string `yaml:"object,omitempty"`
+	Prefix string `yaml:"prefix,omitempty"`
+	// Generation optionally pins Object to one exact object generation.
+	// When set, no metadata lookup is made at all and the pinned
+	// generation is fetched directly — the reproducible-deployment
+	// equivalent of pinning a type: url source by digest. When unset, the
+	// object's current generation is resolved once at startup and used
+	// both for the conditional read and as the cache key. Prefix mode
+	// ignores it (a prefix spans many objects, each with its own
+	// generation).
+	Generation int64 `yaml:"generation,omitempty"`
 
 	// Layout maps artifacts to their location WITHIN the resolved source.
 	Layout Layout `yaml:"layout,omitempty"`
@@ -132,10 +222,56 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 		cfg.Content.Type = TypeNone
 	}
 	cfg.Content.Layout = MergeLayout(cfg.Content.Layout)
+	if len(cfg.Collections) > 0 {
+		// Mutually exclusive, not merged — see Config's doc comment. Only
+		// a content: block that actually declares something conflicts; the
+		// TypeNone default filled in above (i.e. no content: key at all)
+		// is what a collections-only file legitimately looks like.
+		if cfg.Content.Type != TypeNone {
+			return Config{}, fmt.Errorf("%s: content: and collections: are mutually exclusive — declare the single source under content:, or move it into collections: as a named entry", displayPath)
+		}
+		if err := validateCollections(cfg.Collections); err != nil {
+			return Config{}, err
+		}
+		for i := range cfg.Collections {
+			cfg.Collections[i].Layout = MergeLayout(cfg.Collections[i].Layout)
+		}
+		// Re-validate now that layouts are defaulted (validateCollections
+		// checked names + type-specific fields; layout.wiki is only
+		// meaningful after the merge).
+		for _, c := range cfg.Collections {
+			if err := c.validate(fmt.Sprintf("collections[%s]", c.Name)); err != nil {
+				return Config{}, err
+			}
+		}
+		return cfg, nil
+	}
 	if err := cfg.Content.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// validateCollections checks the collection-level invariants that
+// Source.validate can't see: names are present, well-formed and unique,
+// and no entry is type: none (an unserveable collection is a config
+// mistake, not an empty-KB fallback — that fallback only exists for the
+// single-source form).
+func validateCollections(cols []Collection) error {
+	seen := make(map[string]bool, len(cols))
+	for i, c := range cols {
+		if !validCollectionName(c.Name) {
+			return fmt.Errorf("collections[%d].name %q is not a valid collection name: use letters/digits, optionally with - or _ after the first character (max %d chars)", i, c.Name, maxCollectionNameLen)
+		}
+		if seen[c.Name] {
+			return fmt.Errorf("collections: duplicate collection name %q — names address a collection (--collection, <name>:<page-id>) and must be unique", c.Name)
+		}
+		seen[c.Name] = true
+		if c.Type == "" || c.Type == TypeNone {
+			return fmt.Errorf("collections[%s].type is required (none is not meaningful for a named collection)", c.Name)
+		}
+	}
+	return nil
 }
 
 // MergeLayout fills any empty field of l with the documented default for
@@ -160,36 +296,48 @@ func MergeLayout(l Layout) Layout {
 	return l
 }
 
-// Validate checks the source for the required fields of its type.
-func (s Source) Validate() error {
+// Validate checks the source for the required fields of its type. It is
+// the `content:`-rooted form of validate — errors name the offending
+// key as "content.<field>". A named collection validates the same
+// fields under a "collections[<name>]." prefix instead.
+func (s Source) Validate() error { return s.validate("content") }
+
+// validate is Validate with the field path a message should name made
+// explicit (see Validate). p is the parent path — "content" or
+// "collections[docs]" — with no trailing dot.
+func (s Source) validate(p string) error {
 	switch s.Type {
 	case TypeNone:
 		return nil
 	case TypeLocal:
 		if s.Path == "" {
-			return errors.New("content.path is required for type: local")
+			return fmt.Errorf("%s.path is required for type: local", p)
 		}
 	case TypeGit:
 		if s.Repo == "" {
-			return errors.New("content.repo is required for type: git")
+			return fmt.Errorf("%s.repo is required for type: git", p)
 		}
 		if s.Ref == "" {
-			return errors.New("content.ref is required for type: git")
+			return fmt.Errorf("%s.ref is required for type: git", p)
 		}
 		if s.Host != "" && s.Host != "github" && s.Host != "gitlab" {
-			return fmt.Errorf("content.host must be github or gitlab, got %q", s.Host)
+			return fmt.Errorf("%s.host must be github or gitlab, got %q", p, s.Host)
 		}
 	case TypeSubmodule:
 		if s.Submodule == "" {
-			return errors.New("content.submodule (path) is required for type: submodule")
+			return fmt.Errorf("%s.submodule (path) is required for type: submodule", p)
+		}
+	case TypeGCS:
+		if err := s.validateGCS(p); err != nil {
+			return err
 		}
 	case TypeURL:
 		if s.URL == "" {
-			return errors.New("content.url is required for type: url")
+			return fmt.Errorf("%s.url is required for type: url", p)
 		}
 		u, perr := url.Parse(s.URL)
 		if perr != nil || !strings.EqualFold(u.Scheme, "https") {
-			return fmt.Errorf("content.url must be an https:// URL, got %q", s.URL)
+			return fmt.Errorf("%s.url must be an https:// URL, got %q", p, s.URL)
 		}
 		// SECURITY: sha256 is mandatory, not merely recommended. It's what
 		// makes a fetched archive verifiable at all — FetchURL refuses to
@@ -199,16 +347,46 @@ func (s Source) Validate() error {
 		// source with no digest would be an unauthenticated fetch of
 		// arbitrary remote content into the process that serves it.
 		if s.SHA256 == "" {
-			return errors.New("content.sha256 is required for type: url (the archive's digest — required so fetched content is verifiable, and used to key the local cache)")
+			return fmt.Errorf("%s.sha256 is required for type: url (the archive's digest — required so fetched content is verifiable, and used to key the local cache)", p)
 		}
 		if !isHex64(s.SHA256) {
-			return fmt.Errorf("content.sha256 must be 64 hex characters (a sha256 digest), got %q (%d chars)", s.SHA256, len(s.SHA256))
+			return fmt.Errorf("%s.sha256 must be 64 hex characters (a sha256 digest), got %q (%d chars)", p, s.SHA256, len(s.SHA256))
 		}
 	default:
-		return fmt.Errorf("content.type must be one of none|local|git|submodule|url, got %q", s.Type)
+		return fmt.Errorf("%s.type must be one of none|local|git|submodule|url|gcs, got %q", p, s.Type)
 	}
 	if s.Layout.Wiki == "" {
-		return fmt.Errorf("content.layout.wiki is required for type: %s", s.Type)
+		return fmt.Errorf("%s.layout.wiki is required for type: %s", p, s.Type)
+	}
+	return nil
+}
+
+// validateGCS checks the type: gcs fields. Exactly one of object (a
+// .tar.gz bundle) or prefix (a directory tree) must be set: they are
+// two different retrieval modes with two different cache keys, and
+// guessing between them from an ambiguous config would make it
+// impossible to tell from the file which one a deployment gets.
+func (s Source) validateGCS(p string) error {
+	if s.Bucket == "" {
+		return fmt.Errorf("%s.bucket is required for type: gcs", p)
+	}
+	if strings.Contains(s.Bucket, "/") {
+		return fmt.Errorf("%s.bucket must be a bucket name, not a path or gs:// URL, got %q", p, s.Bucket)
+	}
+	switch {
+	case s.Object == "" && s.Prefix == "":
+		return fmt.Errorf("%s: type: gcs needs either object: (a .tar.gz bundle) or prefix: (an object prefix served as a directory tree)", p)
+	case s.Object != "" && s.Prefix != "":
+		return fmt.Errorf("%s: type: gcs takes object: or prefix:, not both — object: fetches one .tar.gz bundle, prefix: serves an object prefix as a directory tree", p)
+	}
+	if s.Object != "" && s.Generation < 0 {
+		return fmt.Errorf("%s.generation must be a positive object generation, got %d", p, s.Generation)
+	}
+	if s.SHA256 != "" && !isHex64(s.SHA256) {
+		return fmt.Errorf("%s.sha256 must be 64 hex characters (a sha256 digest), got %q (%d chars)", p, s.SHA256, len(s.SHA256))
+	}
+	if s.Prefix != "" && s.SHA256 != "" {
+		return fmt.Errorf("%s.sha256 applies to object: (one archive's bytes), not to prefix: (many objects)", p)
 	}
 	return nil
 }

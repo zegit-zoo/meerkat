@@ -291,12 +291,13 @@ func TestList_OversizedPageIsSkippedWithWarning(t *testing.T) {
 // `go test -race` to prove it no longer does; there's deliberately no
 // assertion on *which* FS a given read lands on (UseFS gives no
 // ordering guarantee against concurrent readers), only that no read
-// ever observes a torn/invalid fs.FS value. Expect (benign, expected)
-// "meerkat: skipping ...: page not found" chatter on stderr: List's
-// WalkDir can enumerate a.md from fsA in the same instant the writer
-// flips to fsB, so the subsequent loadByPath legitimately misses it —
-// that race is inherent to calling UseFS while readers are live and is
-// not what this test is guarding against.
+// ever observes a torn/invalid fs.FS value. A concurrent Load can of
+// course miss a page the writer just flipped away from (it returns
+// ErrNotFound, which the readers below ignore); that race is inherent
+// to calling UseFS while readers are live and is not what this test is
+// guarding against. List itself resolves the active FS exactly once per
+// call (see ListFS) and so always walks and reads one consistent
+// snapshot.
 func TestUseFS_ConcurrentReadersAndWriter(t *testing.T) {
 	fsA := fstest.MapFS{"content/a.md": {Data: []byte("---\nid: a\ntitle: A\n---\nbody a\n")}}
 	fsB := fstest.MapFS{"content/b.md": {Data: []byte("---\nid: b\ntitle: B\n---\nbody b\n")}}

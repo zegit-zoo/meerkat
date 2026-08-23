@@ -32,6 +32,11 @@ disk at run time). One binary still equals one knowledge base.
 - **Ingestion pipeline rebuild** (generalizing `mk ingest`'s planner/executor
   and multi-host source fetching). Tracked as a follow-up (see §11).
 - **Multiple/merged content roots.** One content source per build for now.
+  *(2026-08-23: multiple content roots at RUNTIME — several named
+  collections mounted at once, routed by name — implemented; see
+  [multi-collection.md](multi-collection.md). One content source per
+  BUILD is unchanged, and merging several roots into one KB remains out
+  of scope.)*
 
 ## Background — state before this spec
 
@@ -223,6 +228,10 @@ copying — usable as a CI lint on `content-source.yaml`.
   appeared; implemented — see the Non-goals note above and the README.)*
 - **Multiple content roots / overlays:** compose several sources into one KB
   (e.g. a base KB + a team overlay). Out of scope; note if demand appears.
+  *(2026-08-23: demand appeared for mounting several roots SIDE BY SIDE
+  as separately addressable collections — implemented, see
+  [multi-collection.md](multi-collection.md). Composing/overlaying
+  several roots into a single merged KB is still out of scope.)*
 - **Config file name:** `content-source.yaml` (single-purpose) vs a broader
   `meerkat.yaml` that could later hold other build/runtime config. Recommend
   starting single-purpose; promote to `meerkat.yaml` with a `content:` block

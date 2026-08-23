@@ -10,6 +10,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/search"
 )
@@ -38,17 +39,32 @@ func callTool(args map[string]any) mcp.CallToolRequest {
 	return req
 }
 
+// testRegistry mounts pages as a single collection named "default" —
+// the one-collection shape every pre-collections deployment resolves
+// to, so these tests keep asserting the same behaviour they always did.
+func testRegistry(t *testing.T, pages ...kb.Page) *collections.Registry {
+	t.Helper()
+	reg, err := collections.New(collections.FromPages(collections.DefaultName, pages))
+	if err != nil {
+		t.Fatalf("collections.New: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+	return reg
+}
+
+// testGlobalRegistry mounts the process-global kb filesystem (whatever
+// kb.UseFS currently points at) as the single "default" collection.
+func testGlobalRegistry() *collections.Registry {
+	return collections.Global("test")
+}
+
 func TestSearchHandler_ReturnsHits(t *testing.T) {
-	idx, err := search.NewFromPages([]kb.Page{
+	reg := testRegistry(t,
 		testPage("concepts/quorum", "Quorum", "A write needs a quorum of replicas.", "concepts", "reviewed", "team-a"),
 		testPage("concepts/sharding", "Sharding", "Split data across shards.", "concepts", "reviewed", "team-a"),
-	})
-	if err != nil {
-		t.Fatalf("NewFromPages: %v", err)
-	}
-	t.Cleanup(func() { _ = idx.Close() })
+	)
 
-	res, err := searchHandler(idx)(context.Background(), callTool(map[string]any{"query": "quorum"}))
+	res, err := searchHandler(reg)(context.Background(), callTool(map[string]any{"query": "quorum"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -64,7 +80,7 @@ func TestSearchHandler_ReturnsHits(t *testing.T) {
 	if len(hits) == 0 {
 		t.Fatal("expected at least one hit")
 	}
-	for _, k := range []string{"id", "title", "category", "status", "score", "snippet"} {
+	for _, k := range []string{"id", "collection", "title", "category", "status", "score", "snippet"} {
 		if _, ok := hits[0][k]; !ok {
 			t.Errorf("hit missing field %q", k)
 		}
@@ -76,11 +92,10 @@ func TestSearchHandler_ReturnsHits(t *testing.T) {
 // transport-level Go error, matching TestSearchHandler_MissingQueryIsToolError's
 // existing contract for the missing-query case.
 func TestSearchHandler_QueryTooLongIsToolError(t *testing.T) {
-	idx, _ := search.NewFromPages(nil)
-	t.Cleanup(func() { _ = idx.Close() })
+	reg := testRegistry(t)
 
 	huge := strings.Repeat("x", 5000)
-	res, err := searchHandler(idx)(context.Background(), callTool(map[string]any{"query": huge}))
+	res, err := searchHandler(reg)(context.Background(), callTool(map[string]any{"query": huge}))
 	if err != nil {
 		t.Fatalf("handler returned transport error: %v", err)
 	}
@@ -93,11 +108,10 @@ func TestSearchHandler_QueryTooLongIsToolError(t *testing.T) {
 // confirmed attack shape (a long run of nested parens) at a size that's
 // cheap to run in a test.
 func TestSearchHandler_PathologicalNestingIsToolError(t *testing.T) {
-	idx, _ := search.NewFromPages(nil)
-	t.Cleanup(func() { _ = idx.Close() })
+	reg := testRegistry(t)
 
 	nested := strings.Repeat("(", 100)
-	res, err := searchHandler(idx)(context.Background(), callTool(map[string]any{"query": nested}))
+	res, err := searchHandler(reg)(context.Background(), callTool(map[string]any{"query": nested}))
 	if err != nil {
 		t.Fatalf("handler returned transport error: %v", err)
 	}
@@ -110,18 +124,14 @@ func TestSearchHandler_PathologicalNestingIsToolError(t *testing.T) {
 // threads its ctx into the search and surfaces cancellation as a clean
 // tool error rather than hanging or returning a transport error.
 func TestSearchHandler_ContextCancelledIsToolError(t *testing.T) {
-	idx, err := search.NewFromPages([]kb.Page{
+	reg := testRegistry(t,
 		testPage("concepts/quorum", "Quorum", "A write needs a quorum of replicas.", "concepts", "reviewed", "team-a"),
-	})
-	if err != nil {
-		t.Fatalf("NewFromPages: %v", err)
-	}
-	t.Cleanup(func() { _ = idx.Close() })
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	res, err := searchHandler(idx)(ctx, callTool(map[string]any{"query": "quorum"}))
+	res, err := searchHandler(reg)(ctx, callTool(map[string]any{"query": "quorum"}))
 	if err != nil {
 		t.Fatalf("handler returned transport error: %v", err)
 	}
@@ -142,13 +152,9 @@ func TestSearchHandler_LimitClampedToMax(t *testing.T) {
 			"widget widget shared searchable term", "concepts", "reviewed", "team-a",
 		)
 	}
-	idx, err := search.NewFromPages(pages)
-	if err != nil {
-		t.Fatalf("NewFromPages: %v", err)
-	}
-	t.Cleanup(func() { _ = idx.Close() })
+	reg := testRegistry(t, pages...)
 
-	res, err := searchHandler(idx)(context.Background(), callTool(map[string]any{"query": "widget", "limit": float64(100000)}))
+	res, err := searchHandler(reg)(context.Background(), callTool(map[string]any{"query": "widget", "limit": float64(100000)}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -163,9 +169,8 @@ func TestSearchHandler_LimitClampedToMax(t *testing.T) {
 }
 
 func TestSearchHandler_MissingQueryIsToolError(t *testing.T) {
-	idx, _ := search.NewFromPages(nil)
-	t.Cleanup(func() { _ = idx.Close() })
-	res, err := searchHandler(idx)(context.Background(), callTool(map[string]any{}))
+	reg := testRegistry(t)
+	res, err := searchHandler(reg)(context.Background(), callTool(map[string]any{}))
 	if err != nil {
 		t.Fatalf("handler returned transport error: %v", err)
 	}
@@ -175,8 +180,8 @@ func TestSearchHandler_MissingQueryIsToolError(t *testing.T) {
 }
 
 func TestSearchResultsJSON_Shape(t *testing.T) {
-	results := []search.Result{
-		{Page: testPage("a/b", "Title", "body", "concepts", "reviewed", "o"), Score: 1.5, Snippet: "a  snippet   here"},
+	results := []collections.Hit{
+		{Collection: "default", Result: search.Result{Page: testPage("a/b", "Title", "body", "concepts", "reviewed", "o"), Score: 1.5, Snippet: "a  snippet   here"}},
 	}
 	out, err := searchResultsJSON(results)
 	if err != nil {
@@ -192,11 +197,11 @@ func TestSearchResultsJSON_Shape(t *testing.T) {
 }
 
 func TestFilterPages_ComposesAND(t *testing.T) {
-	pages := []kb.Page{
-		testPageWithType("systems/backend/api", "API", "", "systems", "reviewed", "team-a", "API Endpoint"),
-		testPageWithType("systems/backend/db", "DB", "", "systems", "placeholder", "team-a", ""),
-		testPageWithType("concepts/quorum", "Quorum", "", "concepts", "reviewed", "team-b", ""),
-		testPageWithType("tables/orders", "Orders", "", "tables", "stable", "team-b", "BigQuery Table"),
+	refs := []collections.PageRef{
+		{Collection: "default", Page: testPageWithType("systems/backend/api", "API", "", "systems", "reviewed", "team-a", "API Endpoint")},
+		{Collection: "default", Page: testPageWithType("systems/backend/db", "DB", "", "systems", "placeholder", "team-a", "")},
+		{Collection: "default", Page: testPageWithType("concepts/quorum", "Quorum", "", "concepts", "reviewed", "team-b", "")},
+		{Collection: "default", Page: testPageWithType("tables/orders", "Orders", "", "tables", "stable", "team-b", "BigQuery Table")},
 	}
 	cases := []struct {
 		name                                 string
@@ -214,10 +219,10 @@ func TestFilterPages_ComposesAND(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := filterPages(pages, tc.prefix, tc.category, tc.status, tc.owner, tc.typ)
+			got := filterPages(refs, tc.prefix, tc.category, tc.status, tc.owner, tc.typ)
 			var ids []string
-			for _, p := range got {
-				ids = append(ids, p.ID)
+			for _, r := range got {
+				ids = append(ids, r.Page.ID)
 			}
 			if strings.Join(ids, ",") != strings.Join(tc.wantIDs, ",") {
 				t.Errorf("filterPages = %v, want %v", ids, tc.wantIDs)
@@ -227,8 +232,8 @@ func TestFilterPages_ComposesAND(t *testing.T) {
 }
 
 func TestListPagesJSON_Shape(t *testing.T) {
-	pages := []kb.Page{testPageWithType("concepts/x", "X", "", "concepts", "reviewed", "owner-1", "Metric")}
-	out, err := listPagesJSON(pages)
+	refs := []collections.PageRef{{Collection: "default", Page: testPageWithType("concepts/x", "X", "", "concepts", "reviewed", "owner-1", "Metric")}}
+	out, err := listPagesJSON(refs)
 	if err != nil {
 		t.Fatalf("listPagesJSON: %v", err)
 	}
@@ -238,6 +243,9 @@ func TestListPagesJSON_Shape(t *testing.T) {
 	}
 	if parsed[0]["id"] != "concepts/x" || parsed[0]["owner"] != "owner-1" {
 		t.Errorf("unexpected list shape: %v", parsed[0])
+	}
+	if parsed[0]["collection"] != "default" {
+		t.Errorf("collection = %v, want default", parsed[0]["collection"])
 	}
 	if parsed[0]["type"] != "Metric" {
 		t.Errorf("type = %v, want Metric", parsed[0]["type"])
@@ -254,7 +262,7 @@ func TestListHandler_TypeFilter(t *testing.T) {
 	})
 	t.Cleanup(func() { kb.UseFS(nil) })
 
-	res, err := listHandler()(context.Background(), callTool(map[string]any{"type": "BigQuery Table"}))
+	res, err := listHandler(testGlobalRegistry())(context.Background(), callTool(map[string]any{"type": "BigQuery Table"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -294,7 +302,7 @@ func TestShowPageJSON_Shape(t *testing.T) {
 			Verified:    kb.VerifiedList{{By: "human:ahormati"}},
 		},
 	}
-	out, err := showPageJSON(page)
+	out, err := showPageJSON(collections.PageRef{Collection: "default", Page: page})
 	if err != nil {
 		t.Fatalf("showPageJSON: %v", err)
 	}
@@ -337,7 +345,7 @@ body
 	})
 	t.Cleanup(func() { kb.UseFS(nil) })
 
-	res, err := showHandler()(context.Background(), callTool(map[string]any{"id": "tables/orders"}))
+	res, err := showHandler(testGlobalRegistry())(context.Background(), callTool(map[string]any{"id": "tables/orders"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -357,7 +365,7 @@ func TestShowHandler_NotFoundIsToolError(t *testing.T) {
 	kb.UseFS(fstest.MapFS{})
 	t.Cleanup(func() { kb.UseFS(nil) })
 
-	res, err := showHandler()(context.Background(), callTool(map[string]any{"id": "does-not-exist"}))
+	res, err := showHandler(testGlobalRegistry())(context.Background(), callTool(map[string]any{"id": "does-not-exist"}))
 	if err != nil {
 		t.Fatalf("handler returned transport error: %v", err)
 	}

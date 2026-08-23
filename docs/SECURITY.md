@@ -130,7 +130,7 @@ Additional hardening in place:
   release/download requests.
 - Ingest executor validates that task `page_path` resolves within the
   configured KB workdir before reading/writing page files.
-- `type: url` content archive extraction (`internal/contentsource/archive.go`)
+- `type: url` / `type: gcs` content archive extraction (`internal/contentsource/archive.go`)
   treats every entry as hostile: symlink and hardlink entries are skipped
   outright (never created, never followed — the same escape vector
   `internal/kbdir`'s read-side adapter is hardened against, reproduced here
@@ -140,7 +140,11 @@ Additional hardening in place:
   goes through an `os.Root` rooted at the extraction directory, so
   containment holds even against a name engineered to defeat a
   string-only check; and per-file, cumulative, and entry-count caps bound
-  decompression against a zip-bomb-style archive.
+  decompression against a zip-bomb-style archive. A `type: gcs` bundle is
+  extracted by that same code; a `type: gcs` prefix mount applies the same
+  entry-name validation and `os.Root` containment to remote object names,
+  with per-file, cumulative and object-count caps of its own
+  (`internal/contentsource/gcs.go`).
 
 ---
 
@@ -155,11 +159,12 @@ is small but worth being explicit about:
 | Embedded wiki content | Tampering between source and binary | Content is embedded at build time; `mk version`'s `kb_commit` records the content commit it was built from. The release binary's SHA256 is published and cosign-signed, so consumers can verify the exact bytes — **this mitigation covers embedded content only** (see the next row). |
 | Runtime KB content — unverified (`--kb-dir` flag / `MEERKAT_KB_DIR` env var, or a `type: local` `content-source.yaml` source) | Tampering, or malicious content, in a directory an operator points meerkat at | **Not covered by the cosign signature, the checksums file, or `kb_commit`.** `kb_commit` always names the build-time embedded content's commit regardless of what's actually being served — it says nothing about this directory's contents. `mk version`'s `kb_source` field (`disk:<path>`) reports that this kind of content is in effect, so operators and auditors can tell it apart from `embedded`/`url:...` (below), but it is a provenance label, not an integrity guarantee: meerkat performs no signature check, hashing, or sandboxing here. An operator who configures one of these is trusting that directory themselves, at the moment of every invocation — comparable in posture to `--trust-sources` for ingestion (below). |
 | Runtime KB content — digest-verified (`type: url` `content-source.yaml` source) | Tampering in transit, or at rest wherever the archive is hosted | **Also not covered by the cosign signature, the checksums file, or `kb_commit`** — same as the row above. What *is* different: the archive's sha256 is checked before anything is extracted or cached (`internal/contentsource.FetchURL`), so tampered bytes are rejected outright rather than served, and extraction itself is hardened against a hostile archive (symlink/hardlink entries skipped, absolute/traversing entry names rejected, writes contained by an `os.Root`, per-file/cumulative/entry-count decompression caps — see "Additional hardening in place" above). What the digest does **not** buy: it does not place the archive under the release's cosign signature — that covers the binary's own checksums file, not an arbitrary operator-named URL — and meerkat cannot tell a correct digest for the *wrong* archive from a correct digest for the intended one. The choice of `url`/`sha256` in `content-source.yaml` is still the operator's, unverified by meerkat. `kb_source` reports `url:<url>@<digest12>` so this case is distinguishable from `disk:<path>` at a glance. |
+| Runtime KB content — generation-pinned (`type: gcs` `content-source.yaml` source) | Tampering, or an unexpected overwrite, of an object in a Google Cloud Storage bucket an operator points meerkat at | **Also not covered by the cosign signature, the checksums file, or `kb_commit`** — same as the two rows above. What *is* different: GCS assigns a new generation on every write, and meerkat fetches with a conditional read (an explicit generation **and** `ifGenerationMatch`), so the bytes written into a cache entry named `<generation>` cannot be another generation's; the cache key is that generation (bundle mode) or a fingerprint over every listed object's `(name, generation)` (prefix mode), so any overwrite/add/delete invalidates it rather than being served from a stale entry. An explicit `generation:` in the config pins the deployment outright — the current generation is never consulted, so a later overwrite cannot change what this binary serves. `sha256:` is optional here (the generation already pins the bytes) and is verified before extraction when set. Bundle extraction reuses the same hardened `type: url` extractor; prefix mode applies the same entry-name validation and `os.Root` containment to object names, plus per-file/cumulative/object-count caps. **Credentials:** Application Default Credentials / Workload Identity Federation only — the schema has no field for a static service-account key, so meerkat cannot be configured to read one. Access control on the bucket is Google Cloud IAM's; meerkat adds none of its own, and any principal that can read the bucket can serve its content. `kb_source` reports `gcs://<bucket>/<object>@<generation>`. |
 | User's GitHub token (used by `mk update` and `mk ingest` git auth) | Disclosure via argv, on-disk config, or logging | The token (from the `gh` auth cache) is handed to the clone/fetch subprocess only via a `credential.helper` script that reads it back from an env var (`MEERKAT_GIT_TOKEN`) at request time — it never appears in argv, in the persisted remote URL, or in `.git/config`. The remote URL is scrubbed back to its tokenless form in a `defer` immediately after clone/fetch, including on error paths, so a live credential doesn't linger in the cache dir. |
 | Downloaded release binary (in `mk update` flow) | Supply-chain swap | SHA256 verified against published `checksums.txt`; cosign signature on the checksums file (Rekor-logged); staged in a user-owned temp dir before final copy/move; `.old` backup during swap |
 | `mk http serve` API key, and the traffic it guards | Disclosure — in code/logs, or on the wire | Key comparison is constant-time (`subtle.ConstantTimeCompare`), the key is never echoed, and the server refuses to start without one. **The server has no TLS of its own** (`ListenAndServe`, never `ListenAndServeTLS`) — default bind is loopback (`127.0.0.1`). Exposed beyond one host without a TLS-terminating reverse proxy in front, the bearer token and every response body cross the network in plaintext. See `docs/INTEGRATION-OPENWEBUI.md` for the reverse-proxy pattern. |
 | `mk ingest --execute` spawns an agent CLI (`opencode` or `claude`) | Prompt injection: `Task.Prompt` is rendered from `ingestion/prompts/*.md` in the ingested content source, so a malicious prompt file in any source repo in `sources.yaml` is an arbitrary-action path, running with `cmd.Dir`/`--dir` set to a working copy that holds push credentials, at the operator's full privilege. The generated instruction itself includes a `git push` recipe. | Ingested content is treated as **trusted input** to the agent — meerkat does not sandbox or vet it. The real control is permission prompts: by default the agent CLI runs *with* its normal permission prompts, so an injected instruction still has to get past those before it acts. `--trust-sources` disables the prompts (passes `--dangerously-skip-permissions` to the agent CLI) for unattended/CI runs; it prints a stderr warning before executing. Operators who enable `--trust-sources` must trust every source repo listed in `sources.yaml` — as much as they trust code they'd merge unreviewed. |
-| Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk. **When served from a runtime content source instead** (`--kb-dir`/`MEERKAT_KB_DIR`, or a `content-source.yaml` `type: local`/`type: url` source), the two rows above apply here too: unverified for `disk:<path>`, digest-verified (with the same caveats) for `url:<url>@...` — either way, outside the gosec walk and the cosign-signed release. |
+| Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk. **When served from a runtime content source instead** (`--kb-dir`/`MEERKAT_KB_DIR`, or a `content-source.yaml` `type: local`/`type: url`/`type: gcs` source), the three rows above apply here too: unverified for `disk:<path>`, digest-verified (with the same caveats) for `url:<url>@...`, generation-pinned for `gcs://...` — either way, outside the gosec walk and the cosign-signed release. |
 
 ### `kb_commit` vs. `kb_source`: the provenance split
 
@@ -172,10 +177,14 @@ not be conflated:
   runtime directory or archive.
 - **`kb_source`** — what's actually being served for *this invocation*:
   `embedded`, `disk:<path>` (`--kb-dir`/`MEERKAT_KB_DIR`, or a `type: local`
-  `content-source.yaml` source), or `url:<url>@<digest12>` (a `type: url`
+  `content-source.yaml` source), `url:<url>@<digest12>` (a `type: url`
   `content-source.yaml` source — `<digest12>` is the first 12 hex
-  characters of its verified `sha256`). Set once per invocation, before
-  any subcommand runs.
+  characters of its verified `sha256`), `gcs://<bucket>/<object>@<gen>` /
+  `gcs://<bucket>/<prefix>*@<fingerprint>` (a `type: gcs` source), or
+  `collections:<n>` when several named collections are mounted at once —
+  in which case each collection's own `kb_source`-vocabulary provenance
+  is reported in `mk version --json`'s `collections` array. Set once per
+  invocation, before any subcommand runs.
 
 When `kb_source` is `embedded`, `kb_commit` describes what's being served,
 and the "Embedded wiki content" mitigation above applies in full. In every

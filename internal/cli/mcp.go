@@ -44,13 +44,17 @@ func newMCPServeCmd() *cobra.Command {
   mk_show    - retrieve one page by ID (returns body + frontmatter)
   mk_list    - list pages, optionally filtered (prefix/category/status/owner)
 
+Every tool takes an optional "collection" argument; with several
+collections mounted, each tool's description names them, so a client
+discovers the set from the tool list it already fetches.
+
 Designed to be spawned by an MCP client (OpenCode, Claude Desktop, etc.).
 The server runs until stdin closes or it receives SIGINT/SIGTERM.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
-			if err := mcp.ServeStdio(ctx); err != nil {
+			if err := mcp.ServeStdio(ctx, registry()); err != nil {
 				return fmt.Errorf("mcp serve: %w", err)
 			}
 			return nil

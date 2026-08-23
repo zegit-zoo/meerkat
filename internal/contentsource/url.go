@@ -136,49 +136,15 @@ func FetchURL(src Source) (dir string, err error) {
 		return "", fmt.Errorf("content.sha256 mismatch for %s: got %s, want %s — refusing to extract or cache", src.URL, gotDigest, digest)
 	}
 
-	cacheParent := filepath.Dir(cacheDir)
-	if err := os.MkdirAll(cacheParent, 0o750); err != nil {
-		return "", fmt.Errorf("create cache parent dir: %w", err)
-	}
-	// The extraction tempdir is a *sibling* of cacheDir (same parent), not
-	// under os.TempDir(): the final step below is an os.Rename, which
-	// requires both paths to be on the same filesystem to be atomic (a
-	// cross-device rename fails outright). Extracting anywhere else would
-	// risk either an error or a silent non-atomic copy-then-delete
-	// fallback, defeating the "half-extracted directory never mistaken
-	// for a good one" property this whole dance is for.
-	tmpDir, err := os.MkdirTemp(cacheParent, ".extract-*")
-	if err != nil {
-		return "", fmt.Errorf("create extraction tempdir: %w", err)
-	}
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			_ = os.RemoveAll(tmpDir)
-		}
-	}()
-
-	if err := extractTarGz(tmpFile, tmpDir); err != nil {
+	// populateCacheDir (gcs.go) does the extract-into-a-sibling-tempdir,
+	// write-marker-last, atomic-rename dance this function used to inline;
+	// type: gcs needs exactly the same guarantees, so it lives in one
+	// place. See its doc comment for why each step is what it is.
+	if err := populateCacheDir(cacheDir, digest, func(tmpDir string) error {
+		return extractTarGz(tmpFile, tmpDir)
+	}); err != nil {
 		return "", fmt.Errorf("extract %s: %w", src.URL, err)
 	}
-	// Written last, inside the not-yet-visible tmpDir, so the eventual
-	// rename below moves a tree that already contains it — there is no
-	// window where cacheDir could exist without the marker.
-	if err := os.WriteFile(filepath.Join(tmpDir, completionMarker), []byte(digest+"\n"), 0o600); err != nil {
-		return "", fmt.Errorf("write completion marker: %w", err)
-	}
-
-	// Best-effort: clear out any previous incomplete attempt at this
-	// exact path (e.g. left by a process that crashed between MkdirTemp
-	// and Rename in an earlier run — isCacheComplete's doc comment on
-	// completionMarker covers why such a directory, if present, is never
-	// treated as a cache hit above) so Rename can't fail on an existing
-	// non-empty directory.
-	_ = os.RemoveAll(cacheDir)
-	if err := os.Rename(tmpDir, cacheDir); err != nil {
-		return "", fmt.Errorf("finalize cache dir: %w", err)
-	}
-	succeeded = true
 	return cacheDir, nil
 }
 

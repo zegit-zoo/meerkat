@@ -28,6 +28,10 @@ func resetKBToEmbedded(t *testing.T) {
 			t.Fatalf("reset kbdir.Configure(\"\"): %v", err)
 		}
 		kbSourceProvenance = kbdir.SourceEmbedded
+		// The root command's PersistentPreRunE also leaves a resolved
+		// registry behind; clearing it puts later tests back on the
+		// process-global (embedded) fallback registry() builds on demand.
+		activeRegistry = nil
 	})
 }
 
