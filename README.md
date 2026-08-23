@@ -72,6 +72,27 @@ mk update --check       # newest GitHub release
 mk update               # download + verified swap
 ```
 
+### Container image
+
+Every `vX.Y.Z` tag also publishes a hardened, multi-arch (linux/amd64,
+linux/arm64) OCI image to `ghcr.io/zegit-zoo/meerkat`, signed keylessly
+with cosign and carrying SLSA provenance + a Syft SBOM:
+
+```bash
+docker pull ghcr.io/zegit-zoo/meerkat:v1.2.3
+
+docker run --rm --read-only --user 65532:65532 \
+  ghcr.io/zegit-zoo/meerkat:v1.2.3 \
+  http serve --host 0.0.0.0 --api-key "$MEERKAT_API_KEY"
+```
+
+The image runs non-root (numeric UID/GID `65532`) on a distroless base
+and needs no writable filesystem for the default embedded-content path —
+`--read-only` above is not just permitted, it's the recommended way to
+run it. See [docs/CONTAINER.md](docs/CONTAINER.md) for the full run
+reference (read-only-fs flags, the cache-dir mount needed only for
+`--content-source` `type: url`, and cosign verification).
+
 ## Use
 
 > **The knowledge base ships empty.** The public repo intentionally embeds
@@ -862,9 +883,10 @@ internal/
   cli/        cobra command tree
   clidocs/    docs/CLI.md generator (cobra tree -> single-file MD)
 docs/
-  CLI.md      auto-generated CLI reference (make docs)
-  INSTALL.md  install + verify + troubleshooting
-  SECURITY.md threat model + scanner suite + fix workflows
+  CLI.md        auto-generated CLI reference (make docs)
+  INSTALL.md    install + verify + troubleshooting
+  CONTAINER.md  running the OCI image (read-only fs, cache-dir mount, verify)
+  SECURITY.md   threat model + scanner suite + fix workflows
 content-source.yaml   optional, not shipped; tells `make sync` (build) or
                       meerkat itself (runtime) where KB content lives
                       (local path / git repo / submodule / url archive /
@@ -879,6 +901,8 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
   — official meerkat documentation
 - [zegit.dev/documentation/meerkat-cli.html](https://zegit.dev/documentation/meerkat-cli.html)
   — CLI reference and integration guides
+- [docs/CONTAINER.md](docs/CONTAINER.md) — running the OCI image (read-only
+  root filesystem, the cache-dir mount, cosign verification)
 - [docs/OKF.md](docs/OKF.md) — serving an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
   (Open Knowledge Format) bundle unmodified, and what meerkat does with
   its frontmatter

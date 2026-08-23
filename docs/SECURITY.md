@@ -15,6 +15,9 @@ catches, and how to fix the things they flag.
 | `gitleaks` | Accidentally committed secrets (PATs, OAuth tokens, private keys) | CI (gitleaks job) + `make gitleaks` | Hard fail on any leak |
 | `goreleaser sboms` | SPDX SBOM generated per release artifact via syft | CI release workflow | Attached to the GitHub release |
 | `goreleaser signs` | Cosign keyless (Fulcio + Rekor) signature on the checksums file | CI release workflow | Cosign-verifiable transparency-logged signature |
+| `docker buildx --sbom` | SPDX SBOM attestation for the container image (BuildKit's syft-based scanner) | CI release workflow (`docker` job) | Attached to the image manifest as an OCI referrer |
+| `docker buildx --provenance` | SLSA provenance attestation for the container image | CI release workflow (`docker` job) | Attached to the image manifest as an OCI referrer |
+| cosign (image) | Cosign keyless (Fulcio + Rekor) signature on the pushed image manifest | CI release workflow (`docker` job) | Cosign-verifiable transparency-logged signature |
 
 CI (GitHub Actions) runs lint, test, govulncheck, and gitleaks as
 **parallel** jobs on every push and PR; `release.yml` re-runs the full
