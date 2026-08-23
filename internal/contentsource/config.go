@@ -25,6 +25,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/zegit-zoo/meerkat/internal/authz"
 )
 
 // ConfigFile is the repo-root config filename.
@@ -75,9 +77,17 @@ const (
 // Setting both is a configuration error rather than a merge: a reader
 // of the file should never have to work out which of two content
 // declarations won.
+//
+// The optional `auth:` block is orthogonal to both: it declares the
+// OIDC providers whose tokens the hosted MCP server accepts and the
+// rules mapping a verified caller to collections and capabilities. It
+// is read only by `mk mcp serve-http`; every other surface ignores it,
+// so adding one cannot change what the CLI, stdio MCP or the
+// static-token HTTP server do. See internal/authz.
 type Config struct {
-	Content     Source       `yaml:"content"`
-	Collections []Collection `yaml:"collections,omitempty"`
+	Content     Source        `yaml:"content"`
+	Collections []Collection  `yaml:"collections,omitempty"`
+	Auth        *authz.Config `yaml:"auth,omitempty"`
 }
 
 // Collection is one named entry of a `collections:` list — a Source
@@ -222,6 +232,14 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 		cfg.Content.Type = TypeNone
 	}
 	cfg.Content.Layout = MergeLayout(cfg.Content.Layout)
+	// Validate auth: at load time so a policy mistake fails the process
+	// rather than the first request that would have been affected by it
+	// — an unknown capability or a rule with no collections silently
+	// granting nothing is exactly the class of error that only shows up
+	// as "why can't this user see anything" weeks later.
+	if err := cfg.Auth.Validate(); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
+	}
 	if len(cfg.Collections) > 0 {
 		// Mutually exclusive, not merged — see Config's doc comment. Only
 		// a content: block that actually declares something conflicts; the

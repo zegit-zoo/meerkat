@@ -399,7 +399,13 @@ Run an MCP (Model Context Protocol) server
 
 Manage MCP servers exposing the meerkat KB.
 
-Wire into OpenCode by adding to ~/.config/opencode/opencode.json:
+Two transports serve the identical tool set:
+
+  mcp serve       stdio — spawned by a local MCP client, no auth
+  mcp serve-http  Streamable HTTP — hosted, concurrent, OIDC-authenticated
+
+Wire the stdio server into OpenCode by adding to
+~/.config/opencode/opencode.json:
 
   {
     "mcp": {
@@ -420,6 +426,7 @@ meerkat mcp
 **Subcommands**
 
 - `serve` — Serve the meerkat KB tools over MCP/stdio
+- `serve-http` — Serve the meerkat KB tools over MCP Streamable HTTP with OIDC auth
 
 **Inherited flags**
 
@@ -451,6 +458,80 @@ The server runs until stdin closes or it receives SIGINT/SIGTERM.
 
 ```
 meerkat mcp serve
+```
+
+**Inherited flags**
+
+```
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the embedded build.
+      --kb-dir string           Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
+```
+
+---
+
+### `meerkat mcp serve-http`
+
+Serve the meerkat KB tools over MCP Streamable HTTP with OIDC auth
+
+Run a hosted Model Context Protocol server on the Streamable HTTP
+transport. It exposes the same tools as 'mcp serve':
+
+  mk_search  - full-text search across the KB
+  mk_show    - retrieve one page by ID (returns body + frontmatter)
+  mk_list    - list pages, optionally filtered
+
+Endpoints:
+
+  /mcp                                    MCP Streamable HTTP (POST/GET/DELETE)
+  /.well-known/oauth-protected-resource   RFC 9728 metadata (no auth)
+  /livez                                  liveness probe (no auth)
+  /readyz                                 readiness: content + index health (no auth)
+  /metrics                                Prometheus metrics (no auth)
+
+Authentication and authorization are configured by an "auth:" block in
+content-source.yaml, or by a standalone file passed with --auth-config:
+
+  auth:
+    resource: https://mcp.example.com/mcp
+    providers:
+      - issuer: https://login.microsoftonline.com/<tenant>/v2.0
+        audience: api://meerkat
+        claims: { groups: groups, email: preferred_username, tenant: tid }
+    rules:
+      - name: sre
+        groups: [sre]
+        collections: [runbooks]
+        capabilities: [read]
+
+With providers configured, every request to /mcp must carry a verified
+OIDC bearer token; one that doesn't gets 401 with a WWW-Authenticate
+header pointing at the metadata endpoint. Each caller then sees ONLY
+the collections their rules grant 'read' on — the rest are invisible,
+not merely denied: they are absent from tool descriptions, from search
+and list results, from the collection named in an error message, and
+from show's ambiguity resolution.
+
+With NO auth: block configured the server is unauthenticated and every
+mounted collection is readable by any caller — the same posture as
+'mcp serve'. Bind loopback (the default) or put a gateway in front.
+
+The server has no TLS of its own; terminate TLS at a reverse proxy.
+
+**Usage**
+
+```
+meerkat mcp serve-http [flags]
+```
+
+**Flags**
+
+```
+      --auth-config string   Path to a standalone YAML policy file with a top-level auth: block. Overrides the auth: block in content-source.yaml.
+      --host string          Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
+      --path string          Path the MCP Streamable HTTP endpoint is mounted at (default "/mcp")
+      --port int             Bind port (default 4005)
+      --stateful             Keep per-session state in this process instead of accepting any well-formed session ID. Requires sticky routing when more than one replica sits behind a load balancer.
+      --trust-proxy-host     Disable DNS-rebinding protection (which rejects loopback requests whose Host header is not a localhost value). Only for a same-host reverse proxy that preserves the original Host header; prefer rewriting Host at the proxy instead.
 ```
 
 **Inherited flags**

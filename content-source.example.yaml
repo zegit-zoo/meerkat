@@ -158,3 +158,94 @@ content:
 #     sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 #     layout:
 #       wiki: docs
+
+# --- auth: OIDC + collection authorization (runtime, hosted MCP only) --------
+#
+# Read ONLY by `mk mcp serve-http` (docs/design/hosted-mcp.md). Every
+# other surface — the CLI, `mk mcp serve` on stdio, `mk http serve` —
+# ignores it, so adding this block cannot change what they do. Absent, the
+# hosted server is unauthenticated and serves every mounted collection to
+# any caller, which is the same posture as the stdio server.
+#
+# May also live in a standalone file (same `auth:` key, same validation)
+# passed as `mk mcp serve-http --auth-config policy.yaml`, for deployments
+# where content config and access policy have different owners or
+# lifecycles.
+#
+# Validation runs at LOAD time: an unknown capability, a rule with no
+# collections, a non-https issuer, or rules with no providers fails the
+# process rather than quietly granting nothing.
+#
+# auth:
+#   # RFC 9728 resource identifier: the https URL clients reach this server
+#   # at. Published as the protected-resource metadata's `resource`, and
+#   # REQUIRED in every token's audience (an audience-unbound resource
+#   # server accepts tokens minted for anyone else at the same IdP).
+#   resource: https://mcp.example.com/mcp
+#
+#   # OpenID Connect issuers whose tokens are accepted. Discovery is
+#   # generic (<issuer>/.well-known/openid-configuration + JWKS), so Entra
+#   # ID, Google Workspace and Okta are configuration, not code. Discovery
+#   # runs once at STARTUP: an unreachable issuer fails the process rather
+#   # than producing intermittent 401s later.
+#   #
+#   # The presented token must be a signed JWT: an ID token, or a JWT
+#   # access token minted for `resource:` as a custom API audience (Entra
+#   # and Okta do this for a registered API). Google's OAuth access tokens
+#   # are opaque, so a Google deployment audiences an ID token at the
+#   # OAuth client ID instead. Opaque-token introspection is not supported.
+#   providers:
+#     - issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+#       audience: api://meerkat        # defaults to auth.resource above
+#       claims:                        # which claim carries what
+#         groups: groups               # "roles" for Entra app roles
+#         email: preferred_username    # default "email"
+#         tenant: tid                  # default "tid"
+#       require_tenant: <tenant-id>    # optional: pin a multi-tenant issuer
+#
+#     - issuer: https://accounts.google.com
+#       audience: <oauth-client-id>.apps.googleusercontent.com
+#       claims: { groups: groups, email: email }
+#
+#   # Who may do what to which collection. EVERY matching rule contributes
+#   # (union); there is no ordering, no first-match-wins, and no deny rule,
+#   # so a rule's effect can be read without holding the whole document in
+#   # your head. Narrowing access = deleting a rule.
+#   #
+#   # Selectors: subjects (exact), emails (case-insensitive), groups
+#   # (any-of, case-insensitive), tenant, issuer. Any value WITHIN a
+#   # selector matches; ALL selectors present must match. A rule with no
+#   # selector matches every authenticated caller.
+#   #
+#   # Capabilities: read | personal-write | team-write | admin.
+#   # Only `read` is enforced today — it is also what decides whether a
+#   # collection is VISIBLE at all: one a caller can't read is absent from
+#   # their tool descriptions, search results, listings, error messages and
+#   # page-ID disambiguation, exactly as if it were never mounted. The
+#   # write capabilities are parsed and evaluated now so a policy written
+#   # today keeps its meaning when the memory toolset consumes them.
+#   # `admin` implies every capability, including ones added later.
+#   rules:
+#     - name: sre
+#       groups: [sre, oncall]
+#       collections: [runbooks, architecture]
+#       capabilities: [read]           # the default when omitted
+#
+#     - name: hr
+#       groups: [people-ops]
+#       collections: [team-notes]
+#       capabilities: [read, team-write]
+#
+#     - name: platform-admins
+#       groups: [platform-admins]
+#       collections: ["*"]             # every collection, including future ones
+#       capabilities: [admin]
+#
+#     - name: everyone-authenticated
+#       collections: [vendor-docs]     # no selector: anyone with a valid token
+#
+#   # Delegate authentication to a gateway that has already established
+#   # identity. No token is checked and NOTHING is filtered — every mounted
+#   # collection is readable by any caller that reaches the process. Cannot
+#   # be combined with providers: above.
+#   # allow_unauthenticated: false

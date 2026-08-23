@@ -13,8 +13,19 @@
 // they came from, and a page ID can be qualified as
 // "<collection>:<page-id>".
 //
-// The transport is stdio; the server runs until the parent process
-// closes its stdin (or context cancellation).
+// Two transports serve the identical tool set:
+//
+//   - stdio (ServeStdio, `mk mcp serve`) — unauthenticated, spawned by
+//     a local MCP client, running until its stdin closes.
+//   - Streamable HTTP (ServeStreamableHTTP, `mk mcp serve-http` — see
+//     hosted.go) — a hosted, concurrent, OIDC-authenticated server.
+//
+// Under the hosted transport every handler operates on the caller's
+// *visible* registry rather than the mounted one: see visible, and
+// docs/design/hosted-mcp.md for why an unauthorized collection has to
+// be invisible rather than denied. Under stdio nothing is filtered, so
+// the code path below is bit-for-bit the one that ran before
+// authorization existed.
 package mcp
 
 import (
@@ -28,40 +39,140 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
+	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/search"
 )
+
+// serverName and serverVersion identify meerkat in the MCP initialize
+// handshake. Shared by both transports so a client sees the same server
+// whichever way it connects.
+const (
+	serverName    = "meerkat"
+	serverVersion = "0.2.0"
+)
+
+// visible returns the collections ctx's caller may read.
+//
+// This is the ONLY place the MCP surface consults authorization, and it
+// does so by narrowing the registry rather than by checking a
+// permission at each operation. Everything downstream — the handlers
+// below, the tool descriptions, the ambiguity error, the "available:"
+// list in an unknown-collection error — then works from a registry that
+// simply does not contain the collections this caller may not read.
+//
+// A context with no grants (stdio, and any hosted deployment with no
+// auth: block) yields reg itself, unfiltered and unallocated.
+func visible(ctx context.Context, reg *collections.Registry) *collections.Registry {
+	g := authz.FromContext(ctx)
+	if g == nil {
+		return reg
+	}
+	return reg.Restrict(g.CanRead)
+}
+
+// newServer builds the MCP server and registers the tool set. Shared by
+// both transports so they cannot drift: adding a tool here adds it to
+// stdio and to the hosted HTTP server at once.
+//
+// opts are appended after the defaults, so a transport can add its own
+// server options (the hosted one adds a per-request tool filter and
+// session hooks).
+func newServer(reg *collections.Registry, opts ...mcpserver.ServerOption) *mcpserver.MCPServer {
+	opts = append([]mcpserver.ServerOption{mcpserver.WithToolCapabilities(true)}, opts...)
+	s := mcpserver.NewMCPServer(serverName, serverVersion, opts...)
+	registerSearch(s, reg)
+	registerShow(s, reg)
+	registerList(s, reg)
+	return s
+}
+
+// indexAll builds every mounted collection's index.
+//
+// Lazy building is right for a CLI invocation, but a server should pay
+// its startup cost at startup — not inside whichever request happens to
+// be first — and should fail to start at all if a collection can't be
+// indexed, rather than surfacing that as a tool error much later.
+func indexAll(reg *collections.Registry) error {
+	for _, c := range reg.All() {
+		if _, err := c.Index(); err != nil {
+			return fmt.Errorf("build search index for collection %q: %w", c.Name, err)
+		}
+	}
+	return nil
+}
 
 // ServeStdio constructs an MCP server serving reg's collections and
 // serves it on stdio until ctx is cancelled or stdin closes.
 //
 // Each collection's search index is built on first use and reused
 // across calls. Bleve in-memory indexes are safe for concurrent reads.
+//
+// stdio is unauthenticated by construction: the transport is a pipe
+// from a process the user already started, so there is no caller to
+// identify and nothing to filter. No grants ever enter the context
+// here, and every collection is visible.
 func ServeStdio(ctx context.Context, reg *collections.Registry) error {
-	// Build every mounted collection's index up front. Lazy building is
-	// right for a CLI invocation, but a server should pay its startup
-	// cost at startup — not inside whichever request happens to be first
-	// — and should fail to start at all if a collection can't be indexed,
-	// rather than surfacing that as a tool error much later.
-	for _, c := range reg.All() {
-		if _, err := c.Index(); err != nil {
-			return fmt.Errorf("build search index for collection %q: %w", c.Name, err)
-		}
+	if err := indexAll(reg); err != nil {
+		return err
 	}
 	defer func() { _ = reg.Close() }()
 
-	s := mcpserver.NewMCPServer(
-		"meerkat",
-		"0.2.0",
-		mcpserver.WithToolCapabilities(true),
-	)
+	return mcpserver.ServeStdio(newServer(reg))
+}
 
-	registerSearch(s, reg)
-	registerShow(s, reg)
-	registerList(s, reg)
+// Tool names. Constants because the per-request tool filter
+// (toolFilter) has to recognise a tool by name in order to rebuild its
+// description for the caller, and a name that drifts between the
+// registration and the filter would silently stop the rebuild — leaving
+// the unfiltered, collection-naming description in place.
+const (
+	toolSearch = "mk_search"
+	toolShow   = "mk_show"
+	toolList   = "mk_list"
+)
 
-	return mcpserver.ServeStdio(s)
+// toolFilter rebuilds each tool's definition against the caller's
+// visible registry, and removes the KB tools entirely from a caller who
+// can read nothing.
+//
+// It exists because a tool DESCRIPTION is an enumeration surface: the
+// mounted collection names are written into mk_search/mk_show/mk_list's
+// prose and into the "collection" argument's description, precisely so
+// a client discovers them from the tool list it already fetches. Left
+// alone under authorization, tools/list would hand every caller the
+// full mounted set — the same leak as an unfiltered GET /collections,
+// arriving through the one surface every MCP client reads first.
+//
+// mcp-go applies tool filters to tools/call as well as tools/list, so
+// this is an access boundary and not only a display fix: a caller with
+// no readable collections cannot invoke the tools either.
+func toolFilter(reg *collections.Registry) mcpserver.ToolFilterFunc {
+	return func(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
+		g := authz.FromContext(ctx)
+		if g == nil {
+			return tools
+		}
+		view := reg.Restrict(g.CanRead)
+		if view.Len() == 0 {
+			return nil
+		}
+		out := make([]mcp.Tool, 0, len(tools))
+		for _, t := range tools {
+			switch t.Name {
+			case toolSearch:
+				out = append(out, searchTool(view))
+			case toolShow:
+				out = append(out, showTool(view))
+			case toolList:
+				out = append(out, listTool(view))
+			default:
+				out = append(out, t)
+			}
+		}
+		return out
+	}
 }
 
 // collectionArg builds the shared, optional "collection" argument. Its
@@ -99,7 +210,7 @@ func registerSearch(s *mcpserver.MCPServer, reg *collections.Registry) {
 // registerSearch so its annotations (see the inline comment below) are
 // directly unit-testable without standing up a server or driving stdio.
 func searchTool(reg *collections.Registry) mcp.Tool {
-	return mcp.NewTool("mk_search",
+	return mcp.NewTool(toolSearch,
 		mcp.WithDescription(
 			"Full-text search across the knowledge base "+
 				"(meerkat). Title and ID matches are boosted so "+
@@ -153,7 +264,7 @@ func searchHandler(reg *collections.Registry) mcpserver.ToolHandlerFunc {
 		ctx, cancel := context.WithTimeout(ctx, search.DefaultQueryTimeout)
 		defer cancel()
 
-		results, err := reg.Search(ctx, req.GetString("collection", ""), query, limit)
+		results, err := visible(ctx, reg).Search(ctx, req.GetString("collection", ""), query, limit)
 		if err != nil {
 			switch {
 			case errors.Is(err, search.ErrInvalidQuery), errors.Is(err, collections.ErrUnknownCollection):
@@ -208,7 +319,7 @@ func registerShow(s *mcpserver.MCPServer, reg *collections.Registry) {
 // registerShow for the same reason as searchTool: direct annotation
 // unit-testing.
 func showTool(reg *collections.Registry) mcp.Tool {
-	return mcp.NewTool("mk_show",
+	return mcp.NewTool(toolShow,
 		mcp.WithDescription(
 			"Retrieve a single knowledge-base page by ID. Page IDs are "+
 				"slash-separated paths from the wiki root without "+
@@ -246,7 +357,7 @@ func showHandler(reg *collections.Registry) mcpserver.ToolHandlerFunc {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		ref, err := reg.Show(req.GetString("collection", ""), id)
+		ref, err := visible(ctx, reg).Show(req.GetString("collection", ""), id)
 		if err != nil {
 			switch {
 			case errors.Is(err, kb.ErrNotFound):
@@ -308,7 +419,7 @@ func registerList(s *mcpserver.MCPServer, reg *collections.Registry) {
 // registerList for the same reason as searchTool: direct annotation
 // unit-testing.
 func listTool(reg *collections.Registry) mcp.Tool {
-	return mcp.NewTool("mk_list",
+	return mcp.NewTool(toolList,
 		mcp.WithDescription(
 			"List knowledge-base pages, optionally filtered. Filters "+
 				"compose (AND): prefix (page ID prefix), category "+
@@ -349,7 +460,7 @@ func listTool(reg *collections.Registry) mcp.Tool {
 // searchHandler's shape.
 func listHandler(reg *collections.Registry) mcpserver.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		refs, err := reg.Pages(req.GetString("collection", ""))
+		refs, err := visible(ctx, reg).Pages(req.GetString("collection", ""))
 		if err != nil {
 			if errors.Is(err, collections.ErrUnknownCollection) {
 				return mcp.NewToolResultError(err.Error()), nil
