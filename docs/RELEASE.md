@@ -23,19 +23,23 @@ flat CI run — it's part of the tag-triggered release gate below.
    git tag -s v1.2.3 -m "release v1.2.3"
    git push origin v1.2.3
    ```
-3. The `release.yml` workflow triggers on the tag push:
+3. The `release.yml` workflow triggers on the tag push, running two jobs
+   in parallel once `verify` passes:
    - **`verify` job** — re-runs the full gate (lint + test + vuln + gosec + gitleaks) on the exact tagged SHA.
    - **`goreleaser` job** (runs only after `verify` passes) — builds cross-platform binaries (darwin/linux/windows, amd64/arm64), creates archives and a checksums file, generates SPDX SBOMs via syft, signs the checksums file with cosign (keyless, GitHub OIDC), and publishes a GitHub Release with all artifacts attached.
+   - **`docker` job** (runs only after `verify` passes, in parallel with `goreleaser`) — builds the hardened multi-stage [`Dockerfile`](../Dockerfile) for `linux/amd64` + `linux/arm64` via QEMU + buildx, pushes the manifest list to `ghcr.io/zegit-zoo/meerkat`, signs it with cosign (keyless, GitHub OIDC), and attaches a Syft SBOM + SLSA provenance attestation via buildx's native `--sbom`/`--provenance`. See [docs/CONTAINER.md](CONTAINER.md).
 
 The released artifacts are:
 - `meerkat_<v>_<os>_<arch>.tar.gz` / `.zip` (Windows)
 - `meerkat_<v>_checksums.txt` (SHA-256)
 - `meerkat_<v>_checksums.txt.sigstore.json` (cosign Sigstore bundle: signature + certificate + Rekor inclusion proof)
 - `*.sbom.json` (SPDX SBOM per archive)
+- `ghcr.io/zegit-zoo/meerkat:<v>` / `:<major>.<minor>` / `:latest` (multi-arch OCI image, signed + attested — see [docs/CONTAINER.md](CONTAINER.md))
 
 > **Note:** the repository is public. Downloading release assets is
 > anonymous — no token or `gh` login required. A token only helps if you
-> hit GitHub's anonymous API rate limit.
+> hit GitHub's anonymous API rate limit. Pulling the container image from
+> `ghcr.io` is likewise anonymous once the package is public.
 
 ## Tag protection
 
@@ -74,3 +78,20 @@ A successful verification confirms the checksums file was produced by the
 the signature is included in the public Rekor transparency log — the
 inclusion proof is embedded in the bundle, so this check happens offline
 rather than by querying Rekor live.
+
+## Verifying the container image (consumer side)
+
+```sh
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  ghcr.io/zegit-zoo/meerkat:<v>
+```
+
+Same identity/issuer pair as the checksums-file verification above,
+applied to the image manifest instead of a blob. `cosign verify` for an
+OCI image queries the public Rekor transparency log directly (rather
+than checking an embedded offline inclusion proof, which is what
+`verify-blob --bundle` does). See [docs/CONTAINER.md](CONTAINER.md) for
+running the image itself, including the read-only-filesystem flags and
+the SBOM/provenance inspection commands.

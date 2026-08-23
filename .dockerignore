@@ -1,0 +1,17 @@
+# Keep the build context small and avoid leaking anything that isn't
+# needed to build the image (mirrors .gitignore's build-artifact
+# entries; the embed placeholders under internal/kb/content and
+# internal/sources/etc are intentionally NOT excluded — the Dockerfile
+# needs them present for `go run ./internal/contentsync` to work the
+# same way `make sync` does).
+.git
+.github
+.claude
+bin/
+dist/
+coverage.out
+coverage.xml
+*.md
+!README.md
+docs/
+.DS_Store
