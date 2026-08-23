@@ -443,13 +443,19 @@ Serve the meerkat KB tools over MCP/stdio
 
 Run a Model Context Protocol server on stdio. Exposes:
 
-  mk_search  - full-text search across the embedded KB
-  mk_show    - retrieve one page by ID (returns body + frontmatter)
-  mk_list    - list pages, optionally filtered (prefix/category/status/owner)
+  mk_search       - full-text search across the embedded KB
+  mk_show         - retrieve one page by ID (returns body + frontmatter)
+  mk_list         - list pages, optionally filtered (prefix/category/status/owner)
+  mk_save_memory  - save a personal/team/global memory, searchable at once
+                    (only when a collection declares a "memory:" store)
 
 Every tool takes an optional "collection" argument; with several
 collections mounted, each tool's description names them, so a client
 discovers the set from the tool list it already fetches.
+
+stdio is unauthenticated by construction — the process was started by
+the one user it serves — so personal memories saved here land in a fixed
+"local" namespace rather than one derived from a token.
 
 Designed to be spawned by an MCP client (OpenCode, Claude Desktop, etc.).
 The server runs until stdin closes or it receives SIGINT/SIGTERM.
@@ -476,9 +482,11 @@ Serve the meerkat KB tools over MCP Streamable HTTP with OIDC auth
 Run a hosted Model Context Protocol server on the Streamable HTTP
 transport. It exposes the same tools as 'mcp serve':
 
-  mk_search  - full-text search across the KB
-  mk_show    - retrieve one page by ID (returns body + frontmatter)
-  mk_list    - list pages, optionally filtered
+  mk_search       - full-text search across the KB
+  mk_show         - retrieve one page by ID (returns body + frontmatter)
+  mk_list         - list pages, optionally filtered
+  mk_save_memory  - save a personal/team/global memory (only when a
+                    collection declares a "memory:" store)
 
 Endpoints:
 
@@ -510,6 +518,15 @@ the collections their rules grant 'read' on — the rest are invisible,
 not merely denied: they are absent from tool descriptions, from search
 and list results, from the collection named in an error message, and
 from show's ambiguity resolution.
+
+mk_save_memory is gated the same way, on the write capabilities
+(personal-write / team-write / global-write) rather than on read: a
+caller holding none of them anywhere is not offered the tool at all. A
+personal memory's namespace comes from the verified token's subject and
+issuer — there is no argument that could name anybody else. A team or
+global memory a caller may not write is saved as a pending review
+artifact under the store's _staging/ prefix, which is never indexed or
+served. See docs/design/memory.md.
 
 With NO auth: block configured the server is unauthenticated and every
 mounted collection is readable by any caller — the same posture as

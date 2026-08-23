@@ -189,7 +189,11 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		s.metrics.sessions.Dec()
 	})
 
-	mcpSrv := newServer(reg,
+	// AllowAnonymousPersonal is deliberately false on this transport,
+	// including under allow_unauthenticated: a hosted server that cannot
+	// name its caller must not let them write into a personal namespace,
+	// because every anonymous caller would share the same one.
+	mcpSrv := newServer(reg, memoryOptions{},
 		mcpserver.WithHooks(hooks),
 		// The per-request tool filter is what keeps tools/list from
 		// naming collections the caller may not read — see toolFilter.

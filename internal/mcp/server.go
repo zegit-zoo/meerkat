@@ -1,9 +1,11 @@
 // Package mcp wires the embedded knowledge base to a Model Context
 // Protocol server. The server exposes:
 //
-//	mk_search - full-text search across all wiki pages
-//	mk_show   - retrieve a single wiki page by ID
-//	mk_list   - enumerate wiki pages with optional filters
+//	mk_search      - full-text search across all wiki pages
+//	mk_show        - retrieve a single wiki page by ID
+//	mk_list        - enumerate wiki pages with optional filters
+//	mk_save_memory - save a personal/team/global memory document
+//	                 (only when a collection declares a memory: store)
 //
 // Every tool takes an optional "collection" argument. When several
 // collections are mounted (see internal/collections), each tool's
@@ -21,11 +23,11 @@
 //     hosted.go) — a hosted, concurrent, OIDC-authenticated server.
 //
 // Under the hosted transport every handler operates on the caller's
-// *visible* registry rather than the mounted one: see visible, and
-// docs/design/hosted-mcp.md for why an unauthorized collection has to
-// be invisible rather than denied. Under stdio nothing is filtered, so
-// the code path below is bit-for-bit the one that ran before
-// authorization existed.
+// own registry view rather than the mounted one: see visible (reads)
+// and writable (memory writes), and docs/design/hosted-mcp.md for why
+// an unauthorized collection has to be invisible rather than denied.
+// Under stdio nothing is filtered, so the read code path below is
+// bit-for-bit the one that ran before authorization existed.
 package mcp
 
 import (
@@ -76,15 +78,20 @@ func visible(ctx context.Context, reg *collections.Registry) *collections.Regist
 // both transports so they cannot drift: adding a tool here adds it to
 // stdio and to the hosted HTTP server at once.
 //
+// mem carries the few decisions the memory tool cannot make for itself
+// — see memoryOptions — and is the one place the two transports
+// deliberately differ.
+//
 // opts are appended after the defaults, so a transport can add its own
 // server options (the hosted one adds a per-request tool filter and
 // session hooks).
-func newServer(reg *collections.Registry, opts ...mcpserver.ServerOption) *mcpserver.MCPServer {
+func newServer(reg *collections.Registry, mem memoryOptions, opts ...mcpserver.ServerOption) *mcpserver.MCPServer {
 	opts = append([]mcpserver.ServerOption{mcpserver.WithToolCapabilities(true)}, opts...)
 	s := mcpserver.NewMCPServer(serverName, serverVersion, opts...)
 	registerSearch(s, reg)
 	registerShow(s, reg)
 	registerList(s, reg)
+	registerSaveMemory(s, reg, mem)
 	return s
 }
 
@@ -119,7 +126,11 @@ func ServeStdio(ctx context.Context, reg *collections.Registry) error {
 	}
 	defer func() { _ = reg.Close() }()
 
-	return mcpserver.ServeStdio(newServer(reg))
+	// AllowAnonymousPersonal is true here and nowhere else: a stdio
+	// server was spawned by the one user it serves, so a personal memory
+	// has an unambiguous owner even though no token established it. See
+	// memoryOptions.
+	return mcpserver.ServeStdio(newServer(reg, memoryOptions{AllowAnonymousPersonal: true}))
 }
 
 // Tool names. Constants because the per-request tool filter
@@ -131,11 +142,13 @@ const (
 	toolSearch = "mk_search"
 	toolShow   = "mk_show"
 	toolList   = "mk_list"
+	// toolSaveMemory is declared in memory.go, alongside the tool it
+	// names.
 )
 
-// toolFilter rebuilds each tool's definition against the caller's
-// visible registry, and removes the KB tools entirely from a caller who
-// can read nothing.
+// toolFilter rebuilds each tool's definition against the caller's own
+// registry views, and removes a tool entirely from a caller who has no
+// collection it could act on.
 //
 // It exists because a tool DESCRIPTION is an enumeration surface: the
 // mounted collection names are written into mk_search/mk_show/mk_list's
@@ -144,32 +157,52 @@ const (
 // alone under authorization, tools/list would hand every caller the
 // full mounted set — the same leak as an unfiltered GET /collections,
 // arriving through the one surface every MCP client reads first.
+// mk_save_memory names collections in exactly the same way and is
+// filtered by exactly the same mechanism.
 //
 // mcp-go applies tool filters to tools/call as well as tools/list, so
 // this is an access boundary and not only a display fix: a caller with
-// no readable collections cannot invoke the tools either.
+// no readable collections cannot invoke the read tools either, and one
+// with nowhere to write cannot invoke the memory tool.
+//
+// The two views are kept apart on purpose. A caller granted only
+// `personal-write` on one collection reads nothing and gets no KB
+// tools, but must still be offered mk_save_memory; a caller granted
+// only `read` gets the KB tools and no memory tool. Collapsing them
+// into one view would silently take one of those two away.
 func toolFilter(reg *collections.Registry) mcpserver.ToolFilterFunc {
 	return func(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
 		g := authz.FromContext(ctx)
 		if g == nil {
 			return tools
 		}
-		view := reg.Restrict(g.CanRead)
-		if view.Len() == 0 {
-			return nil
-		}
+		readView := reg.Restrict(g.CanRead)
+		memView := writable(ctx, reg)
 		out := make([]mcp.Tool, 0, len(tools))
 		for _, t := range tools {
 			switch t.Name {
 			case toolSearch:
-				out = append(out, searchTool(view))
+				if readView.Len() > 0 {
+					out = append(out, searchTool(readView))
+				}
 			case toolShow:
-				out = append(out, showTool(view))
+				if readView.Len() > 0 {
+					out = append(out, showTool(readView))
+				}
 			case toolList:
-				out = append(out, listTool(view))
+				if readView.Len() > 0 {
+					out = append(out, listTool(readView))
+				}
+			case toolSaveMemory:
+				if memView.Len() > 0 {
+					out = append(out, saveMemoryTool(memView))
+				}
 			default:
 				out = append(out, t)
 			}
+		}
+		if len(out) == 0 {
+			return nil
 		}
 		return out
 	}

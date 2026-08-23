@@ -35,6 +35,9 @@ Two constraints shape everything below.
   `team-write` and `admin`, and the policy parses, evaluates and
   reports them — but only `read` is enforced, because only reads exist.
   The memory toolset (the next issue) is what consumes the rest.
+  *(Superseded by #10: see [memory.md](memory.md). The write
+  capabilities are enforced now, and `global-write` was added alongside
+  them rather than folded into `admin`.)*
 - **Being an authorization server.** meerkat is an OAuth 2.0 *protected
   resource*. It validates tokens; it never issues them, never runs a
   redirect flow, and never sees a client secret.
@@ -268,8 +271,9 @@ nothing, discovered weeks later as "why can't this user see anything".
 | capability | means | enforced today |
 | --- | --- | --- |
 | `read` | search / show / list the collection — and therefore whether it is visible at all | **yes** |
-| `personal-write` | write pages scoped to the caller's own identity | no |
-| `team-write` | write pages shared with the caller's team | no |
+| `personal-write` | save a memory into the caller's own namespace | **yes**, since #10 |
+| `team-write` | save a memory into the collection's team space | **yes**, since #10 |
+| `global-write` | save a memory into the collection's global space | **yes**; added by #10 |
 | `admin` | implies every capability, present and future | implication only |
 
 `admin` implying capabilities that do not exist yet is deliberate and
@@ -277,10 +281,14 @@ documented: a rule granting `admin` today also grants whatever a later
 meerkat adds, which is what "admin" should mean and is why the schema
 says to grant it sparingly.
 
-The unenforced three are defined, parsed, evaluated and reported now so
-that a policy an operator writes today keeps meaning the same thing when
-the memory toolset starts consuming it. Writing them into a policy is
-inert, not an error.
+At the time of writing this spec the write capabilities were defined,
+parsed, evaluated and reported but unenforced, so that a policy an
+operator wrote then would keep meaning the same thing when the memory
+toolset started consuming it. #10 is that toolset — see
+[memory.md](memory.md) for the scope→capability table, and for why
+`global-write` was added as a capability of its own rather than folded
+into `admin` (folding it in would have retroactively widened every
+`admin` rule already written against this spec).
 
 ## Production endpoints
 
@@ -412,10 +420,12 @@ reachable only where it is correct.
 
 ## Follow-ups
 
-- **Memory toolset** (the next issue): `mk_save_memory` with
-  personal/team/global scopes keyed to the OIDC identity, consuming
-  `personal-write`/`team-write`/`admin`. `Grants.Capabilities(name)` and
-  `Grants.Identity()` exist for it.
+- ~~**Memory toolset** (the next issue): `mk_save_memory` with
+  personal/team/global scopes keyed to the OIDC identity.~~ **Done in
+  #10** — see [memory.md](memory.md). It consumes
+  `Grants.Capabilities(name)` and `Grants.Identity()`, and adds a second
+  registry view (`Restrict(CanWrite)`) alongside `Restrict(CanRead)`
+  rather than widening the read one.
 - **OIDC for `mk http serve`.** The OpenWebUI-facing server still takes
   a single static token. `internal/authn.Gate` is transport-agnostic and
   would drop straight in.

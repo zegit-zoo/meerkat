@@ -539,6 +539,31 @@ func isReservedArtifact(p string, hasFrontmatter bool) bool {
 // from a missing page to a direct caller.
 var errReservedArtifact = errors.New("reserved OKF navigation artifact")
 
+// ParsePage builds a Page from bytes that did not come from this
+// package's filesystem at all — the memory store's documents (see
+// internal/memory), which live outside the served content tree and are
+// layered into a collection as an overlay.
+//
+// id and srcPath are supplied by the CALLER rather than derived from
+// the bytes, and that is the point: a document's own `id:` frontmatter
+// is advisory everywhere in meerkat (loadByPath overrides it with the
+// path the file was found at), so a memory whose frontmatter claims to
+// be `policies/expenses` is still served under the id its store key
+// says it is. Trusting the body would let whoever can write one memory
+// shadow any page in the collection.
+func ParsePage(id, srcPath string, body []byte) (Page, error) {
+	if len(body) > maxPageSize {
+		return Page{}, fmt.Errorf("%w: %s is %d bytes (cap %d)", ErrPageTooLarge, srcPath, len(body), maxPageSize)
+	}
+	front, bodyOnly, _ := splitFrontmatter(string(body))
+	front.ID = id
+	title := front.Title
+	if title == "" {
+		title = extractTitle(bodyOnly, id)
+	}
+	return Page{ID: id, Path: srcPath, Title: title, Body: bodyOnly, Front: front}, nil
+}
+
 func loadByPath(fsys fs.FS, p string) (Page, error) {
 	body, err := readCapped(fsys, p)
 	if err != nil {

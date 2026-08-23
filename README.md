@@ -157,6 +157,7 @@ Restart OpenCode. Three tools become available to the agent:
 | `mk_search` | `query`, `limit?` | `[{id, title, score, snippet, category, status}]` |
 | `mk_show` | `id` | `{id, title, body, front, trust_tier, stale}` (parsed frontmatter, plus two OKF-derived advisory signals — see [docs/OKF.md](docs/OKF.md#trust-and-lifecycle)) |
 | `mk_list` | `prefix?`, `category?`, `status?`, `owner?`, `type?` | `[{id, title, category, status, owner, type, source}]` |
+| `mk_save_memory` | `scope`, `title`, `content`, `key?`, `tags?`, `version?`, `replace?` | `{status, id, version, location, searchable}` — only when a collection declares a [`memory:`](#memory-mk_save_memory) store |
 
 ## Hosted MCP server (Streamable HTTP + OIDC)
 
@@ -222,12 +223,79 @@ single-collection UX. This matters because the alternative (a 403 per
 operation) turns every one of those messages into an oracle for what exists
 and what it's called.
 
-Capabilities are `read`, `personal-write`, `team-write` and `admin`. Only
-`read` is enforced today; the rest are parsed, evaluated and reported now so
-a policy written today keeps its meaning when write tooling consumes them.
+Capabilities are `read`, `personal-write`, `team-write`, `global-write` and
+`admin`. `read` decides visibility; the three write capabilities gate
+[`mk_save_memory`](#memory-mk_save_memory), one per scope; `admin` implies
+every capability, including ones a later meerkat adds — grant it sparingly.
 
 Full schema: [content-source.example.yaml](content-source.example.yaml).
 Design and threat reasoning: [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md).
+
+## Memory (`mk_save_memory`)
+
+Give a collection a **memory store** and agents can save what they learn —
+a decision and its reasoning, a convention, a correction you made — as a
+Markdown page that is searchable by the very next `mk_search` call, with no
+restart:
+
+```yaml
+collections:
+  - name: team-notes
+    type: local
+    path: ../notes
+    memory:
+      type: local            # or: type: gcs, with bucket + prefix
+      path: memory           # a SIBLING of wiki/, not inside it
+```
+
+With no `memory:` block anywhere the tool is not registered at all, and
+nothing else changes — which is what every configuration written before
+this feature gets.
+
+**Three scopes, three capabilities:**
+
+| scope | needs | if you don't hold it |
+|---|---|---|
+| `personal` | `personal-write` | refused (a personal memory has no reviewer) |
+| `team` | `team-write` | **staged for review**, if you hold any other write capability |
+| `global` | `global-write` | **staged for review**, likewise |
+
+A staged memory lands under `<store>/_staging/<scope>/<namespace>/` with
+`status: pending-review`. It is **not** searchable, showable or listable —
+the store sits outside the served content tree, so a pending proposal cannot
+become readable by being forgotten about. The tool's response says exactly
+where it went and which capability would promote it. Promotion is `mv`
+today; a review command is future work.
+
+**You cannot save as somebody else.** A personal memory's namespace is
+derived from your verified OIDC `sub` and `iss` and from nothing else —
+there is no `namespace`, `subject`, `owner` or `author` argument, because
+there is none to offer. Your `key` chooses *where inside your own space* a
+memory goes; nothing chooses whose space that is. (On stdio, which has no
+token and one user, personal memories land in a fixed `local` namespace.)
+
+**Two agents cannot silently overwrite each other.** Every write carries an
+optimistic-locking precondition — create-only by default, or conditioned on
+the `version` a previous save returned. A local store compares a content
+hash and writes temp-file + atomic rename; a GCS store uses
+`ifGenerationMatch` preconditions the backend evaluates itself, so several
+replicas can share one store. A lost race is a retryable `conflict` naming
+the current version, never a silent overwrite:
+
+```
+conflict: the memory "memory/team/runbook" was created or changed by someone
+else since you last read it, so this save was refused rather than overwriting
+it. It is now at version "3f2a1c0b9d8e7f60". Read it with mk_show, merge what
+you wanted to add, and save again with version="3f2a1c0b9d8e7f60".
+```
+
+Memories are ordinary pages under a reserved `memory/` prefix, so
+`mk list --prefix memory/` and `mk search` find them like anything else.
+Note that **`personal` is about who may write, not who may read**: the
+collection remains the unit of read access, so a personal memory is visible
+to everyone who can read its collection.
+
+Design and threat reasoning: [docs/design/memory.md](docs/design/memory.md).
 
 ## OpenWebUI integration
 
@@ -782,8 +850,11 @@ internal/
   search/     Bleve in-memory BM25 index
   sources/    embeds sources.yaml + prompts + templates
   ingest/     Plan(opts) + Run(ctx, tasks) — planner + executor
-  mcp/        MCP server (mk_search / mk_show / mk_list) — stdio and the
-              hosted Streamable HTTP transport, probes, metrics, access log
+  mcp/        MCP server (mk_search / mk_show / mk_list / mk_save_memory) —
+              stdio and the hosted Streamable HTTP transport, probes,
+              metrics, access log
+  memory/     writable memory stores (local dir / GCS prefix) with
+              optimistic locking, identity-derived namespaces, staging
   authn/      OIDC discovery/JWKS verification + the bearer gate (RFC 9728)
   authz/      capability model, access policy, per-collection grants
   http/       HTTP/OpenAPI server with bearer auth
@@ -798,7 +869,8 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
                       meerkat itself (runtime) where KB content lives
                       (local path / git repo / submodule / url archive /
                       GCS object or prefix), as one source or several
-                      named collections
+                      named collections, plus the optional auth: policy
+                      and per-collection memory: stores
 ```
 
 ## See also
@@ -818,6 +890,9 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
 - [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md) — the hosted
   Streamable HTTP MCP server: OIDC, the capability model, and why an
   unauthorized collection is made invisible rather than denied
+- [docs/design/memory.md](docs/design/memory.md) — `mk_save_memory`: why
+  the personal namespace is structurally unspoofable, the scope→capability
+  table, the optimistic-locking scheme, and the staging shape
 - [docs/design/ingestion-pipeline.md](docs/design/ingestion-pipeline.md) —
   how `mk ingest` populates placeholder pages from that content repo
 - [docs/design/index-filtering.md](docs/design/index-filtering.md) — an

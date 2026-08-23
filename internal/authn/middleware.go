@@ -24,7 +24,8 @@ const (
 	// audience, expiry or tenant verification.
 	ReasonInvalidToken Reason = "invalid_token"
 	// ReasonNoGrants — a valid token whose identity no policy rule
-	// matched, so it may read nothing.
+	// matched, so it holds no capability over any collection: it may
+	// neither read nor write anything.
 	ReasonNoGrants Reason = "no_grants"
 )
 
@@ -78,8 +79,8 @@ func NewGate(v *Verifier, metadataURL string, opts ...GateOption) *Gate {
 //
 //	no token          -> 401, WWW-Authenticate: Bearer resource_metadata=...
 //	token won't verify-> 401, ... error="invalid_token"
-//	verifies, no rule -> 403 (the caller exists and may read nothing;
-//	                     this says nothing about what exists)
+//	verifies, no rule -> 403 (the caller exists and holds no capability
+//	                     at all; this says nothing about what exists)
 //	verifies, matched -> next, with *authz.Grants in the context
 //
 // The 403 case is worth being precise about: it is a statement about
@@ -88,6 +89,11 @@ func NewGate(v *Verifier, metadataURL string, opts ...GateOption) *Gate {
 // fifty. Callers who hold some grants never reach it, and the
 // collections they don't hold are filtered out of the registry rather
 // than refused — see authz's package comment.
+//
+// "Some grants" means ANY capability, not `read`: Grants.Empty is
+// capability-agnostic, so a principal granted only `personal-write`
+// passes the gate and reaches the memory tool, even though every read
+// surface will show them an empty registry.
 func (g *Gate) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !g.verifier.Enabled() {

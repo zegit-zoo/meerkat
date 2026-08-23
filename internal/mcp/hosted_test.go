@@ -490,7 +490,7 @@ func TestHosted_ReadyzReflectsContentHealth(t *testing.T) {
 			Source: contentsource.Source{Type: contentsource.TypeLocal, Layout: contentsource.MergeLayout(contentsource.Layout{})},
 		})
 	}
-	reg, err := collections.Open(resolved)
+	reg, err := collections.Open(context.Background(), resolved)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

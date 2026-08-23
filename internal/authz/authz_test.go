@@ -346,6 +346,93 @@ func TestIdentity_StringOmitsGroups(t *testing.T) {
 	}
 }
 
+// --- write capabilities (the memory toolset) ---------------------------
+
+func TestGrants_CanWrite(t *testing.T) {
+	id := Identity{Subject: "s", Issuer: "i"}
+	for name, tc := range map[string]struct {
+		caps []Capability
+		want bool
+	}{
+		"read only":     {[]Capability{CapRead}, false},
+		"personal":      {[]Capability{CapPersonalWrite}, true},
+		"team":          {[]Capability{CapTeamWrite}, true},
+		"global":        {[]Capability{CapGlobalWrite}, true},
+		"admin implies": {[]Capability{CapAdmin}, true},
+		"nothing":       {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := NewGrants(id, map[string][]Capability{"notes": tc.caps})
+			if got := g.CanWrite("notes"); got != tc.want {
+				t.Errorf("CanWrite = %v, want %v", got, tc.want)
+			}
+			// A collection the rule never mentioned confers nothing,
+			// whatever is held elsewhere.
+			if g.CanWrite("other") {
+				t.Error("CanWrite is true for an unmentioned collection")
+			}
+		})
+	}
+	// No policy in force is unrestricted, on the write side too.
+	if !(*Grants)(nil).CanWrite("anything") {
+		t.Error("nil grants must be unrestricted")
+	}
+}
+
+func TestGlobalWriteIsNotImpliedByAnyOtherWriteCapability(t *testing.T) {
+	// The reason global-write exists as its own capability rather than
+	// as an overload of admin or team-write: neither of those may widen
+	// into it, because both are already written into policies that
+	// predate it.
+	id := Identity{Subject: "s", Issuer: "i"}
+	for _, held := range []Capability{CapRead, CapPersonalWrite, CapTeamWrite} {
+		g := NewGrants(id, map[string][]Capability{"notes": {held}})
+		if g.Can("notes", CapGlobalWrite) {
+			t.Errorf("%q conferred global-write", held)
+		}
+	}
+	// admin is the one exception, and that is its documented meaning.
+	admin := NewGrants(id, map[string][]Capability{"notes": {CapAdmin}})
+	if !admin.Can("notes", CapGlobalWrite) {
+		t.Error("admin does not imply global-write")
+	}
+}
+
+func TestParseCapability_AcceptsGlobalWrite(t *testing.T) {
+	got, ok := ParseCapability("global-write")
+	if !ok || got != CapGlobalWrite {
+		t.Fatalf("ParseCapability(global-write) = %q, %v", got, ok)
+	}
+	// A policy written today must round-trip through Validate.
+	cfg := &Config{
+		Resource:  "https://mcp.example.com/mcp",
+		Providers: []Provider{{Issuer: "https://idp.example.com", Audience: "api://meerkat"}},
+		Rules:     []Rule{{Name: "publishers", Collections: []string{"notes"}, Capabilities: []string{"read", "global-write"}}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a policy granting global-write is rejected: %v", err)
+	}
+}
+
+func TestGrants_EmptyIsCapabilityAgnostic(t *testing.T) {
+	id := Identity{Subject: "s", Issuer: "i"}
+	// This is what keeps the authentication gate's 403 from refusing a
+	// principal who holds only write capabilities: a "drop notes here,
+	// don't read the others'" grant must pass the gate and reach the
+	// memory tool, even though every read surface shows them nothing.
+	for _, caps := range [][]Capability{
+		{CapPersonalWrite}, {CapTeamWrite}, {CapGlobalWrite}, {CapRead},
+	} {
+		g := NewGrants(id, map[string][]Capability{"notes": caps})
+		if g.Empty() {
+			t.Errorf("grants holding %v report Empty", caps)
+		}
+	}
+	if !NewGrants(id, nil).Empty() {
+		t.Error("grants holding nothing at all do not report Empty")
+	}
+}
+
 func mustPolicy(t *testing.T, cfg *Config) *Policy {
 	t.Helper()
 	p, err := NewPolicy(cfg)

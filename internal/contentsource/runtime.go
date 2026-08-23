@@ -190,7 +190,13 @@ const SourceEmbedded = "embedded"
 func resolveSource(ctx context.Context, src Source, cfgPath string) (ResolvedCollection, error) {
 	switch src.Type {
 	case TypeNone:
-		return embeddedCollection(), nil
+		// Dir stays empty (serve the embedded build), but the source is
+		// carried through: a type: none entry may still declare a
+		// `memory:` block, and dropping it here would silently disable
+		// writes for a deployment that asked for them.
+		rc := embeddedCollection()
+		rc.Source = src
+		return rc, nil
 	case TypeLocal:
 		dir := src.Path
 		if !filepath.IsAbs(dir) {

@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/mapping"
@@ -31,7 +32,11 @@ type Result struct {
 
 // Index wraps a Bleve in-memory index over all KB pages.
 type Index struct {
-	bleve          bleve.Index
+	bleve bleve.Index
+	// mu guards pages. bleve's own index is already safe for concurrent
+	// Index/Search calls; the page map beside it is not, and Put writes
+	// to it while QueryContext reads — see Put.
+	mu             sync.RWMutex
 	pages          map[string]kb.Page
 	categoryBoosts map[string]float64
 }
@@ -92,13 +97,7 @@ func NewFromPages(pages []kb.Page, opts ...Option) (*Index, error) {
 	pageMap := make(map[string]kb.Page, len(pages))
 	batch := idx.NewBatch()
 	for _, p := range pages {
-		doc := map[string]interface{}{
-			"id":       p.ID,
-			"title":    p.Title,
-			"body":     p.Body,
-			"category": p.Front.Category,
-		}
-		if err := batch.Index(p.ID, doc); err != nil {
+		if err := batch.Index(p.ID, indexDoc(p)); err != nil {
 			return nil, fmt.Errorf("index %q: %w", p.ID, err)
 		}
 		pageMap[p.ID] = p
@@ -116,6 +115,52 @@ func NewFromPages(pages []kb.Page, opts ...Option) (*Index, error) {
 		opt(result)
 	}
 	return result, nil
+}
+
+// indexDoc is the document shape one page is indexed as. Shared by the
+// bulk build and by Put, so an incrementally-indexed page cannot end up
+// with different fields — or different boosts — from a page that was
+// present at startup.
+func indexDoc(p kb.Page) map[string]any {
+	return map[string]any{
+		"id":       p.ID,
+		"title":    p.Title,
+		"body":     p.Body,
+		"category": p.Front.Category,
+	}
+}
+
+// Put indexes (or re-indexes) a single page into a LIVE index, so it is
+// searchable immediately — no rebuild, no restart.
+//
+// It exists for the memory toolset: mk_save_memory writes a document
+// and the very next mk_search must find it, which is the whole point of
+// saving a memory during a session. Bleve supports incremental
+// Index(id, doc) against an open index, and re-indexing an existing ID
+// replaces that document, so a save and a re-save of the same memory
+// both do the right thing.
+//
+// Safe to call concurrently with searches: bleve serialises its own
+// writes against readers, and the page map beside it is under mu.
+func (i *Index) Put(p kb.Page) error {
+	if p.ID == "" {
+		return fmt.Errorf("cannot index a page with no ID")
+	}
+	if err := i.bleve.Index(p.ID, indexDoc(p)); err != nil {
+		return fmt.Errorf("index %q: %w", p.ID, err)
+	}
+	i.mu.Lock()
+	i.pages[p.ID] = p
+	i.mu.Unlock()
+	return nil
+}
+
+// page returns the stored page for a hit ID.
+func (i *Index) page(id string) (kb.Page, bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	p, ok := i.pages[id]
+	return p, ok
 }
 
 // Query runs a free-text query and returns up to limit results, sorted
@@ -217,7 +262,7 @@ func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result
 
 	out := make([]Result, 0, len(res.Hits))
 	for _, hit := range res.Hits {
-		page, ok := i.pages[hit.ID]
+		page, ok := i.page(hit.ID)
 		if !ok {
 			continue // index/page map drift - shouldn't happen
 		}
