@@ -677,6 +677,47 @@ and shell completion read the **first** configured collection. See
 CLI and `mk http serve` grant every mounted collection to whoever can run
 the binary or present the static token.
 
+### Update contract (`update:`)
+
+A collection can also declare how knowledge flows back *into* it, so an
+agent that learned something has a sanctioned path instead of a guess:
+
+```yaml
+collections:
+  - name: handbook
+    type: gcs                    # served from a mirror…
+    bucket: my-org-knowledge
+    prefix: handbook/live/
+    description: Engineering handbook — conventions, onboarding, how we work.
+    update:                      # …but maintained in git, so contributions
+      method: merge-request      # go there: direct | merge-request | none
+      repo: https://github.com/example-org/handbook.git
+      host: github               # github | gitlab | other — which CLI to use
+      branch: main
+      path: wiki                 # where pages live in the CONTRIBUTION repo
+      instructions: |
+        Fork example-org/handbook and open the PR from your fork.
+        One page per pull request.
+```
+
+The contract is **declared, never inferred** from the source type: a
+serving mirror and a contribution repo are different addresses, and only
+you know which is which. The one rule meerkat enforces is that
+`method: direct` needs a backend a write can land in (a local directory or
+a GCS prefix) — declaring it on a `type: url` archive, a `gcs` bundle or
+the embedded build fails at **startup**, not at the first lost write.
+
+What a caller is *told* depends on what that caller may do. Without
+`global-write` on a `direct` collection they are pointed at the staging
+path ([`mk_save_memory`](#memory-mk_save_memory)) or told there is none —
+never at a write they would be refused for. Capabilities only ever narrow
+a declared contract: an admin on a `merge-request` collection still opens
+a merge request.
+
+Not yet surfaced through the tools — that lands with collection
+discovery. Design and rendering rules:
+[docs/design/update-contract.md](docs/design/update-contract.md).
+
 ### Provenance: `mk version`
 
 `mk version` reports which content is actually being served via the
@@ -897,8 +938,8 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
                       meerkat itself (runtime) where KB content lives
                       (local path / git repo / submodule / url archive /
                       GCS object or prefix), as one source or several
-                      named collections, plus the optional auth: policy
-                      and per-collection memory: stores
+                      named collections, plus the optional auth: policy,
+                      per-collection memory: stores and update: contracts
 ```
 
 ## See also
@@ -923,6 +964,10 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
 - [docs/design/memory.md](docs/design/memory.md) — `mk_save_memory`: why
   the personal namespace is structurally unspoofable, the scope→capability
   table, the optimistic-locking scheme, and the staging shape
+- [docs/design/update-contract.md](docs/design/update-contract.md) — the
+  per-collection `update:` contract: why it is declared rather than
+  inferred, and how the path a caller is shown is narrowed to what that
+  caller can actually do
 - [docs/design/ingestion-pipeline.md](docs/design/ingestion-pipeline.md) —
   how `mk ingest` populates placeholder pages from that content repo
 - [docs/design/index-filtering.md](docs/design/index-filtering.md) — an
