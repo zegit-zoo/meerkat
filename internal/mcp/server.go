@@ -599,7 +599,13 @@ func listCollectionsTool(reg *collections.Registry) mcp.Tool {
 		"and the capabilities YOU hold on it (e.g. [\"read\"], [\"read\",\"personal-write\"]). " +
 		"Takes no arguments. Call this before naming an unfamiliar 'collection' value on " +
 		"mk_search/mk_show/mk_list, or to check whether mk_save_memory is worth trying. " +
-		"Returns a JSON array of {name, type, source, pages, capabilities}. " +
+		"Returns a JSON array of {name, type, source, pages, capabilities, description?, contract?}. " +
+		"When present, 'contract' is the sanctioned way to contribute knowledge back to " +
+		"that collection, already adjusted to YOUR capabilities: method 'direct' means " +
+		"write through this server; 'merge-request' means patch the contribution repo it " +
+		"names (repo/host/branch/path/instructions tell you how); 'staging' means submit " +
+		"via mk_save_memory for review; 'none' plus a reason means you currently have no " +
+		"contribution path. " +
 		"A hosted server lists only the collections you may read; one you cannot read is " +
 		"absent from the result, not merely empty."
 	if reg.Single() {
@@ -642,17 +648,38 @@ func listCollectionsHandler(reg *collections.Registry) mcpserver.ToolHandlerFunc
 // it — something only an authz-aware transport can compute, so it lives
 // here and not in the other two.
 //
-// Kept minimal and stable on purpose: issue #23 adds a
-// contribution-contract field. It slots in as one more struct field
-// (`json:"contract,omitempty"`, after Capabilities) so an old client
-// parsing this shape is unaffected and a new one gets the field for
-// free.
+// Description and Contract are omitempty additions (issue #23): an old
+// client parsing the original shape is unaffected, a new one gets them
+// for free. Contract is present only when the operator declared an
+// update: block for the collection — `method: none` (or no block) is a
+// statement that there is nothing to say, per the update-contract
+// design doc.
 type collectionSummary struct {
-	Name         string   `json:"name"`
-	Type         string   `json:"type"`
-	Source       string   `json:"source"`
-	Pages        int      `json:"pages"`
-	Capabilities []string `json:"capabilities"`
+	Name         string           `json:"name"`
+	Type         string           `json:"type"`
+	Source       string           `json:"source"`
+	Pages        int              `json:"pages"`
+	Capabilities []string         `json:"capabilities"`
+	Description  string           `json:"description,omitempty"`
+	Contract     *contractSummary `json:"contract,omitempty"`
+}
+
+// contractSummary is the wire shape of the caller-effective
+// contribution contract inside a collectionSummary. It is
+// collections.EffectiveContract minus the fields collectionSummary
+// already carries (collection name, description): Method is what THIS
+// caller should do, Declared what the operator configured — when they
+// differ, Reason says why (e.g. a missing publish capability demoted
+// direct to staging).
+type contractSummary struct {
+	Method       string `json:"method"`
+	Declared     string `json:"declared_method"`
+	Repo         string `json:"repo,omitempty"`
+	Host         string `json:"host,omitempty"`
+	Branch       string `json:"branch,omitempty"`
+	Path         string `json:"path,omitempty"`
+	Instructions string `json:"instructions,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 // listCollectionsJSON renders the mk_list_collections wire shape: a
@@ -680,9 +707,23 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry) (strin
 			Type:         c.Type(),
 			Source:       c.Provenance,
 			Capabilities: g.Capabilities(c.Name).Strings(),
+			Description:  c.Description(),
 		}
 		if pages, err := c.Pages(); err == nil {
 			entry.Pages = len(pages)
+		}
+		if c.Contract().Declared() {
+			ec := c.EffectiveContract(g)
+			entry.Contract = &contractSummary{
+				Method:       string(ec.Method),
+				Declared:     string(ec.Declared),
+				Repo:         ec.Repo,
+				Host:         ec.Host,
+				Branch:       ec.Branch,
+				Path:         ec.Path,
+				Instructions: ec.Instructions,
+				Reason:       ec.Reason,
+			}
 		}
 		out = append(out, entry)
 	}
