@@ -72,12 +72,23 @@ func TestSync_FailedSyncDoesNotTouchAmbientRepo(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cache)
 	t.Setenv("HOME", cache)
 
-	// An innocent bystander repo that we run from inside.
+	// An innocent bystander repo that we run from inside. Every direct
+	// `git -C ambient ...` call below sets cmd.Env to cleanGitEnv() (as
+	// gitInit already does) — not just belt-and-suspenders: when this
+	// suite runs from inside a git hook (e.g. the repo's own
+	// pre-commit `go-test` hook), git exports GIT_DIR/GIT_WORK_TREE/
+	// GIT_INDEX_FILE for the hook process, which — left in the
+	// environment — silently redirects `-C ambient` to the *real*
+	// ambient repo (this checkout) instead of the throwaway temp dir,
+	// which already has an "origin" remote and breaks exactly the
+	// isolation this test exists to guard.
 	ambient := filepath.Join(t.TempDir(), "ambient")
 	write(t, filepath.Join(ambient, "README.md"), "# ambient\n")
 	gitInit(t, ambient)
 	const sentinel = "git@example.invalid:someone/their-own-repo.git"
-	if out, err := exec.Command("git", "-C", ambient, "remote", "add", "origin", sentinel).CombinedOutput(); err != nil {
+	seedCmd := exec.Command("git", "-C", ambient, "remote", "add", "origin", sentinel)
+	seedCmd.Env = cleanGitEnv()
+	if out, err := seedCmd.CombinedOutput(); err != nil {
 		t.Fatalf("seed ambient origin: %v: %s", err, out)
 	}
 	t.Chdir(ambient)
@@ -94,7 +105,9 @@ func TestSync_FailedSyncDoesNotTouchAmbientRepo(t *testing.T) {
 		t.Fatal("Sync with a nonexistent ref should fail")
 	}
 
-	got, err := exec.Command("git", "-C", ambient, "remote", "get-url", "origin").Output()
+	checkCmd := exec.Command("git", "-C", ambient, "remote", "get-url", "origin")
+	checkCmd.Env = cleanGitEnv()
+	got, err := checkCmd.Output()
 	if err != nil {
 		t.Fatalf("read ambient origin: %v", err)
 	}
