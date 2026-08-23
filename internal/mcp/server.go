@@ -1,11 +1,14 @@
 // Package mcp wires the embedded knowledge base to a Model Context
 // Protocol server. The server exposes:
 //
-//	mk_search      - full-text search across all wiki pages
-//	mk_show        - retrieve a single wiki page by ID
-//	mk_list        - enumerate wiki pages with optional filters
-//	mk_save_memory - save a personal/team/global memory document
-//	                 (only when a collection declares a memory: store)
+//	mk_search           - full-text search across all wiki pages
+//	mk_show             - retrieve a single wiki page by ID
+//	mk_list             - enumerate wiki pages with optional filters
+//	mk_list_collections - enumerate mounted collections: name, backend
+//	                      source type, page count and the CALLER's own
+//	                      capabilities over each
+//	mk_save_memory      - save a personal/team/global memory document
+//	                      (only when a collection declares a memory: store)
 //
 // Every tool takes an optional "collection" argument. When several
 // collections are mounted (see internal/collections), each tool's
@@ -91,6 +94,7 @@ func newServer(reg *collections.Registry, mem memoryOptions, opts ...mcpserver.S
 	registerSearch(s, reg)
 	registerShow(s, reg)
 	registerList(s, reg)
+	registerListCollections(s, reg)
 	registerSaveMemory(s, reg, mem)
 	return s
 }
@@ -139,9 +143,10 @@ func ServeStdio(ctx context.Context, reg *collections.Registry) error {
 // registration and the filter would silently stop the rebuild — leaving
 // the unfiltered, collection-naming description in place.
 const (
-	toolSearch = "mk_search"
-	toolShow   = "mk_show"
-	toolList   = "mk_list"
+	toolSearch          = "mk_search"
+	toolShow            = "mk_show"
+	toolList            = "mk_list"
+	toolListCollections = "mk_list_collections"
 	// toolSaveMemory is declared in memory.go, alongside the tool it
 	// names.
 )
@@ -192,6 +197,10 @@ func toolFilter(reg *collections.Registry) mcpserver.ToolFilterFunc {
 			case toolList:
 				if readView.Len() > 0 {
 					out = append(out, listTool(readView))
+				}
+			case toolListCollections:
+				if readView.Len() > 0 {
+					out = append(out, listCollectionsTool(readView))
 				}
 			case toolSaveMemory:
 				if memView.Len() > 0 {
@@ -566,6 +575,116 @@ func listPagesJSON(refs []collections.PageRef) (string, error) {
 			"type":       p.Front.Type,
 			"source":     p.Front.Source,
 		})
+	}
+	body, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func registerListCollections(s *mcpserver.MCPServer, reg *collections.Registry) {
+	s.AddTool(listCollectionsTool(reg), listCollectionsHandler(reg))
+}
+
+// listCollectionsTool builds the mk_list_collections tool definition.
+// Split out from registerListCollections for the same reason as
+// searchTool: direct annotation unit-testing, and so toolFilter can
+// rebuild it against the caller's own view (its description names the
+// mounted collections exactly as collectionArg's does, so it is an
+// enumeration surface too and gets the same per-request treatment).
+func listCollectionsTool(reg *collections.Registry) mcp.Tool {
+	desc := "Enumerate the knowledge-base collections available on this server: " +
+		"what each is named, its backend source type, how many pages it holds, " +
+		"and the capabilities YOU hold on it (e.g. [\"read\"], [\"read\",\"personal-write\"]). " +
+		"Takes no arguments. Call this before naming an unfamiliar 'collection' value on " +
+		"mk_search/mk_show/mk_list, or to check whether mk_save_memory is worth trying. " +
+		"Returns a JSON array of {name, type, source, pages, capabilities}. " +
+		"A hosted server lists only the collections you may read; one you cannot read is " +
+		"absent from the result, not merely empty."
+	if reg.Single() {
+		desc += " This server currently mounts a single collection (" + reg.Names()[0] + ")."
+	} else {
+		desc += " Mounted collections: " + strings.Join(reg.Names(), ", ") + "."
+	}
+	return mcp.NewTool(toolListCollections,
+		mcp.WithDescription(desc),
+		// See registerSearch's comment: this tool only reads registry and
+		// collection metadata already resolved at startup, so it gets the
+		// same read-only/non-destructive/idempotent/closed-world
+		// annotations instead of NewTool's defaults.
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithIdempotentHintAnnotation(true),
+		mcp.WithOpenWorldHintAnnotation(false),
+	)
+}
+
+// listCollectionsHandler returns the mk_list_collections handler bound
+// to reg. It takes no arguments — see visible() for the hosted-mode
+// filtering, applied here exactly as it is for mk_search/mk_show/
+// mk_list.
+func listCollectionsHandler(reg *collections.Registry) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		body, err := listCollectionsJSON(ctx, visible(ctx, reg))
+		if err != nil {
+			return nil, fmt.Errorf("encode collections: %w", err)
+		}
+		return mcp.NewToolResultText(body), nil
+	}
+}
+
+// collectionSummary is the mk_list_collections wire shape for one
+// mounted collection: the same name/type/source/pages that `mk list
+// --collections` (internal/cli/list.go) and GET /collections
+// (internal/http/server.go) report, so all three surfaces agree on what
+// those fields mean, plus the CALLER's own effective capabilities over
+// it — something only an authz-aware transport can compute, so it lives
+// here and not in the other two.
+//
+// Kept minimal and stable on purpose: issue #23 adds a
+// contribution-contract field. It slots in as one more struct field
+// (`json:"contract,omitempty"`, after Capabilities) so an old client
+// parsing this shape is unaffected and a new one gets the field for
+// free.
+type collectionSummary struct {
+	Name         string   `json:"name"`
+	Type         string   `json:"type"`
+	Source       string   `json:"source"`
+	Pages        int      `json:"pages"`
+	Capabilities []string `json:"capabilities"`
+}
+
+// listCollectionsJSON renders the mk_list_collections wire shape: a
+// JSON array of collectionSummary, one per collection in view, in
+// configuration order.
+//
+// view is already the caller's restricted read view (see visible): a
+// collection this caller may not read was filtered out before this
+// function ever sees it, so there is nothing left to check here — the
+// same invisibility guarantee mk_search/mk_show/mk_list get from
+// routing through visible().
+//
+// Capabilities comes from authz.Grants.Capabilities, which is nil-safe:
+// under stdio, or a hosted server with no auth: configured, ctx carries
+// no grants and Capabilities reports the full capability set — there is
+// no identity to restrict against, the same reasoning mk_save_memory's
+// AllowAnonymousPersonal applies to anonymous/local mode (see
+// memory.go).
+func listCollectionsJSON(ctx context.Context, view *collections.Registry) (string, error) {
+	g := authz.FromContext(ctx)
+	out := make([]collectionSummary, 0, view.Len())
+	for _, c := range view.All() {
+		entry := collectionSummary{
+			Name:         c.Name,
+			Type:         c.Type(),
+			Source:       c.Provenance,
+			Capabilities: g.Capabilities(c.Name).Strings(),
+		}
+		if pages, err := c.Pages(); err == nil {
+			entry.Pages = len(pages)
+		}
+		out = append(out, entry)
 	}
 	body, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {

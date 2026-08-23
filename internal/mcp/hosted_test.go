@@ -289,8 +289,8 @@ func TestHosted_HiddenCollectionIsInvisibleEverywhere(t *testing.T) {
 		if err != nil {
 			t.Fatalf("tools/list: %v", err)
 		}
-		if len(res.Tools) != 3 {
-			t.Fatalf("got %d tools, want 3", len(res.Tools))
+		if len(res.Tools) != 4 {
+			t.Fatalf("got %d tools, want 4", len(res.Tools))
 		}
 		for _, tool := range res.Tools {
 			blob, _ := json.Marshal(tool)
@@ -318,6 +318,30 @@ func TestHosted_HiddenCollectionIsInvisibleEverywhere(t *testing.T) {
 		}
 		if !strings.Contains(body, "incidents/paging") {
 			t.Errorf("mk_list should return the caller's pages: %s", body)
+		}
+	})
+
+	t.Run("list collections", func(t *testing.T) {
+		body, isErr := callText(t, ctx, c, toolListCollections, map[string]any{})
+		if isErr {
+			t.Fatalf("mk_list_collections failed: %s", body)
+		}
+		if strings.Contains(body, "secrets") {
+			t.Errorf("mk_list_collections leaked the hidden collection: %s", body)
+		}
+		var entries []map[string]any
+		if err := json.Unmarshal([]byte(body), &entries); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, body)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("got %d collections, want exactly the caller's 2 (runbooks, architecture): %s", len(entries), body)
+		}
+		names := map[string]bool{}
+		for _, e := range entries {
+			names[fmt.Sprint(e["name"])] = true
+		}
+		if !names["runbooks"] || !names["architecture"] {
+			t.Errorf("mk_list_collections should name the caller's own collections, got %v", names)
 		}
 	})
 
@@ -378,6 +402,63 @@ func TestHosted_HiddenCollectionIsInvisibleEverywhere(t *testing.T) {
 			t.Errorf("want a not-found error, got: %s", body)
 		}
 	})
+}
+
+// TestHostedListCollections_CapabilitiesReflectTheCallersGrants proves
+// mk_list_collections' "capabilities" field is the CALLER's own
+// effective grants (authz.Grants.Capabilities), not a fixed or
+// server-wide value: two callers with different rules over the same
+// mounted collections must see different capability lists.
+func TestHostedListCollections_CapabilitiesReflectTheCallersGrants(t *testing.T) {
+	f := newHostedFixture(t, []authz.Rule{
+		{Name: "sre", Groups: []string{"sre"}, Collections: []string{"runbooks"}, Capabilities: []string{"read"}},
+		{Name: "leads", Groups: []string{"leads"}, Collections: []string{"runbooks", "architecture"},
+			Capabilities: []string{"read", "personal-write"}},
+	})
+	ctx := context.Background()
+
+	cases := []struct {
+		group string
+		want  map[string][]string // collection name -> expected capabilities
+	}{
+		{"sre", map[string][]string{"runbooks": {"read"}}},
+		{"leads", map[string][]string{
+			"runbooks":     {"read", "personal-write"},
+			"architecture": {"read", "personal-write"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.group, func(t *testing.T) {
+			c := f.client(ctx, f.token(tc.group+"-caller", tc.group))
+			body, isErr := callText(t, ctx, c, toolListCollections, map[string]any{})
+			if isErr {
+				t.Fatalf("mk_list_collections failed: %s", body)
+			}
+			var entries []map[string]any
+			if err := json.Unmarshal([]byte(body), &entries); err != nil {
+				t.Fatalf("invalid JSON: %v\n%s", err, body)
+			}
+			seen := map[string][]string{}
+			for _, e := range entries {
+				name := fmt.Sprint(e["name"])
+				raw, _ := e["capabilities"].([]any)
+				caps := make([]string, len(raw))
+				for i, c := range raw {
+					caps[i] = fmt.Sprint(c)
+				}
+				seen[name] = caps
+			}
+			if len(seen) != len(tc.want) {
+				t.Fatalf("%s: got collections %v, want exactly %v", tc.group, seen, tc.want)
+			}
+			for name, want := range tc.want {
+				got := seen[name]
+				if strings.Join(got, ",") != strings.Join(want, ",") {
+					t.Errorf("%s: capabilities for %q = %v, want %v", tc.group, name, got, want)
+				}
+			}
+		})
+	}
 }
 
 func TestHosted_SingleVisibleCollectionGetsSingleCollectionUX(t *testing.T) {

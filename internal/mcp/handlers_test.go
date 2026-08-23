@@ -374,6 +374,84 @@ func TestShowHandler_NotFoundIsToolError(t *testing.T) {
 	}
 }
 
+// TestListCollectionsHandler_Shape drives the full mk_list_collections
+// handler against a multi-collection registry with no grants installed
+// (the stdio / unauthenticated-hosted shape), proving the documented
+// wire shape: {name, type, source, pages, capabilities}.
+func TestListCollectionsHandler_Shape(t *testing.T) {
+	reg, err := collections.New(
+		collections.FromPages("runbooks", []kb.Page{
+			testPage("incidents/paging", "Paging", "body", "concepts", "reviewed", "team-a"),
+		}),
+		collections.FromPages("architecture", []kb.Page{
+			testPage("adr/0001", "ADR 1", "body", "adr", "reviewed", "team-b"),
+			testPage("adr/0002", "ADR 2", "body", "adr", "reviewed", "team-b"),
+		}),
+	)
+	if err != nil {
+		t.Fatalf("collections.New: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+
+	res, err := listCollectionsHandler(reg)(context.Background(), callTool(nil))
+	if err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(resultText(t, res)), &entries); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+	for _, field := range []string{"name", "type", "source", "pages", "capabilities"} {
+		if _, ok := entries[0][field]; !ok {
+			t.Errorf("entry missing field %q: %v", field, entries[0])
+		}
+	}
+	if entries[0]["name"] != "runbooks" || entries[1]["name"] != "architecture" {
+		t.Errorf("order = %v/%v, want runbooks then architecture (configuration order)", entries[0]["name"], entries[1]["name"])
+	}
+	// FromPages sets no contentsource.Source, so Type() falls back to
+	// "none" — the same default `mk list --collections` and GET
+	// /collections use.
+	if entries[0]["type"] != "none" {
+		t.Errorf("type = %v, want %q", entries[0]["type"], "none")
+	}
+	if n, _ := entries[1]["pages"].(float64); int(n) != 2 {
+		t.Errorf("pages = %v, want 2", entries[1]["pages"])
+	}
+	// No grants in context (stdio, or an unauthenticated hosted server):
+	// authz.Grants.Capabilities' nil receiver reports the full capability
+	// set — there is no identity to restrict against.
+	wantCaps := []string{"read", "personal-write", "team-write", "global-write", "admin"}
+	for _, e := range entries {
+		gotRaw, _ := e["capabilities"].([]any)
+		got := make([]string, len(gotRaw))
+		for i, c := range gotRaw {
+			got[i] = c.(string)
+		}
+		if strings.Join(got, ",") != strings.Join(wantCaps, ",") {
+			t.Errorf("%v: capabilities = %v, want the full set %v", e["name"], got, wantCaps)
+		}
+	}
+}
+
+// TestListCollectionsJSON_EmptyViewIsArrayNotNull mirrors
+// TestListPagesJSON_EmptyIsArrayNotNull: an empty registry view (every
+// collection restricted away) must render as [], not null.
+func TestListCollectionsJSON_EmptyViewIsArrayNotNull(t *testing.T) {
+	reg := testRegistry(t, testPage("a/b", "A", "body", "concepts", "reviewed", "team-a"))
+	empty := reg.Restrict(func(string) bool { return false })
+	out, err := listCollectionsJSON(context.Background(), empty)
+	if err != nil {
+		t.Fatalf("listCollectionsJSON: %v", err)
+	}
+	if strings.TrimSpace(out) != "[]" {
+		t.Errorf("empty view should render as [], got %q", out)
+	}
+}
+
 func resultText(t *testing.T, res *mcp.CallToolResult) string {
 	t.Helper()
 	if res == nil {

@@ -137,6 +137,21 @@ func FromPages(name string, pages []kb.Page) *Collection {
 	return &Collection{Name: name, Provenance: "memory", pages: sorted, byID: byID}
 }
 
+// Type reports the collection's backend source type ("local", "gcs",
+// "url", ...), or contentsource.TypeNone when there is no
+// content-source.yaml entry behind it at all — the embedded build, or a
+// --kb-dir directory, neither of which carries a type of its own.
+//
+// Every surface that enumerates collections (`mk list --collections`,
+// GET /collections, mk_list_collections) reports this exact value, so a
+// caller sees the same "type" whichever one it asks.
+func (c *Collection) Type() string {
+	if c.Source.Type != "" {
+		return c.Source.Type
+	}
+	return contentsource.TypeNone
+}
+
 // Pages returns every page in the collection, sorted by ID: the
 // content root's pages with the memory overlay merged in.
 //

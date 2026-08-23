@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/zegit-zoo/meerkat/internal/collections"
-	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 )
 
@@ -155,13 +154,7 @@ func listCollections(cmd *cobra.Command, reg *collections.Registry, asJSON bool)
 	}
 	out := make([]entry, 0, reg.Len())
 	for _, c := range reg.All() {
-		typ := c.Source.Type
-		if typ == "" {
-			// No content-source.yaml entry behind it: the embedded build,
-			// or a --kb-dir directory (which carries no type of its own).
-			typ = contentsource.TypeNone
-		}
-		e := entry{Name: c.Name, Type: typ, Source: c.Provenance}
+		e := entry{Name: c.Name, Type: c.Type(), Source: c.Provenance}
 		pages, err := c.Pages()
 		if err != nil {
 			// One unreadable collection must not hide the others: report

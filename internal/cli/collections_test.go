@@ -138,6 +138,31 @@ func TestCollections_ListCollectionsEnumeratesWhatIsMounted(t *testing.T) {
 	}
 }
 
+// TestCollections_ListCollectionsDefaultTypeIsNone proves `mk list
+// --collections --json` reports "none" (contentsource.TypeNone) for the
+// single default collection when there is no content-source.yaml entry
+// behind it at all — the embedded build here — rather than an empty
+// string. GET /collections (internal/http) and mk_list_collections
+// (internal/mcp) share this same default via collections.Collection.Type.
+func TestCollections_ListCollectionsDefaultTypeIsNone(t *testing.T) {
+	resetKBToEmbedded(t)
+
+	out, err := execRoot(t, "list", "--collections", "--json")
+	if err != nil {
+		t.Fatalf("list --collections --json: %v\n%s", err, out)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(out), &entries); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if len(entries) != 1 || entries[0]["name"] != "default" {
+		t.Fatalf("entries = %v, want exactly one named default", entries)
+	}
+	if entries[0]["type"] != "none" {
+		t.Errorf("type = %v, want %q", entries[0]["type"], "none")
+	}
+}
+
 func TestCollections_SearchSpansAllThenNarrows(t *testing.T) {
 	resetKBToEmbedded(t)
 	cfg := multiCollectionConfig(t)

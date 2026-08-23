@@ -31,6 +31,7 @@ func TestRegisterTools_BuildsCleanly(t *testing.T) {
 	registerSearch(s, reg)
 	registerShow(s, reg)
 	registerList(s, reg)
+	registerListCollections(s, reg)
 
 	// Exercise the public CapabilityRegistry too — confirms the
 	// server has the tool-capability flag set, which is what an
@@ -50,7 +51,7 @@ func TestRegisterTools_BuildsCleanly(t *testing.T) {
 // default shape: read-only, non-destructive, idempotent, closed-world.
 func TestToolAnnotations_ReadOnlyNonDestructive(t *testing.T) {
 	reg := collections.Global("test")
-	for _, tool := range []mcp.Tool{searchTool(reg), showTool(reg), listTool(reg)} {
+	for _, tool := range []mcp.Tool{searchTool(reg), showTool(reg), listTool(reg), listCollectionsTool(reg)} {
 		t.Run(tool.Name, func(t *testing.T) {
 			a := tool.Annotations
 			if a.ReadOnlyHint == nil || !*a.ReadOnlyHint {
