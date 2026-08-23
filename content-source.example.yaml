@@ -162,6 +162,97 @@ content:
   # <store>/_staging/ instead of being refused, and the tool's response says
   # where it landed.
 
+  # --- description + update: what this collection is, and how to contribute --
+  #
+  # Two optional keys that describe the COLLECTION rather than the bytes it
+  # resolves to. Both are surfaced to agents through collection discovery, so
+  # together they are how an agent learns what this knowledge base is for and
+  # how to add to it. See docs/design/update-contract.md.
+  #
+  # description: One or two sentences of context — what's in here, who owns
+  # it, what it's for. A name is an identifier, not an explanation. Max 500
+  # characters: it is rendered into an agent's context every time collections
+  # are listed, so long-form guidance belongs in update.instructions below.
+  #
+  # description: Engineering handbook — conventions, onboarding, how we work.
+  #
+  # update: the SANCTIONED CONTRIBUTION PATH. Absent (the default) means
+  # there is none, and agents are told exactly that instead of guessing —
+  # which is what every configuration written before this existed gets.
+  #
+  # It is DECLARED, never inferred from the type: above. A collection served
+  # from a GCS mirror is very often maintained in a git repository the
+  # serving process cannot even reach: the serving address and the
+  # contribution address are different by design, and only you know which is
+  # which. meerkat reasons about type: in exactly one place — it REFUSES
+  # method: direct at load time on a backend a write cannot land in (type:
+  # url, type: gcs with object:, type: none, type: git/submodule), because
+  # such a write would go nowhere, or into a content-addressed cache that the
+  # next content change replaces.
+  #
+  #   # (a) method: merge-request — a git-authoritative KB, reviewed by a
+  #   #     human. LEGAL ON ANY BACKEND, including the read-only ones.
+  # update:
+  #   method: merge-request
+  #   repo: https://github.com/example-org/handbook.git
+  #                                  # https://, ssh://, or git@host:owner/repo.
+  #                                  # An "owner/repo" slug is refused: it names
+  #                                  # no host, and the contribution repo need
+  #                                  # not be on the host serving the content.
+  #                                  # NEVER embed credentials — the contract is
+  #                                  # rendered to every caller who can see this
+  #                                  # collection, so a token here is a token
+  #                                  # handed to them. Refused at load time.
+  #   host: github                   # github | gitlab | other (default: other).
+  #                                  # Selects the CLI mechanics an AGENT reaches
+  #                                  # for (gh / glab / plain git); meerkat never
+  #                                  # contacts it.
+  #   branch: main                   # the merge request's target (default: main)
+  #   path: wiki                     # where pages live in the CONTRIBUTION repo.
+  #                                  # NOT derived from layout.wiki above, which
+  #                                  # describes the serving mirror — the two
+  #                                  # repos may be laid out differently.
+  #   instructions: |                # free-text, agent-facing: the skill you'd
+  #                                  # otherwise explain to every contributor by
+  #                                  # hand. Fork-vs-branch policy, page format,
+  #                                  # what to run before proposing.
+  #     Fork example-org/handbook to your own account and open the pull
+  #     request from that fork; the upstream repo does not take branches.
+  #     One page per pull request.
+  #
+  #   # (b) method: direct — this collection's own backend IS the source of
+  #   #     truth and may be written to. Valid ONLY for type: local (a
+  #   #     directory) or type: gcs with prefix: (an object prefix) — the
+  #   #     same notion of "writable" the memory: block above uses.
+  #   #     repo/host/branch/path are refused here: there is no contribution
+  #   #     repo to name. instructions: is still allowed.
+  # update:
+  #   method: direct
+  #   instructions: |
+  #     Pages are Markdown with OKF frontmatter, under wiki/.
+  #
+  #   # (c) method: none — identical to omitting the block. Write it to say
+  #   #     "there is deliberately no contribution path here" out loud.
+  # update:
+  #   method: none
+  #
+  # WHAT A CALLER IS ACTUALLY TOLD depends on what that caller may do, so two
+  # people can get two different answers for the same collection (hosted MCP
+  # only — the CLI, stdio MCP and `mk http serve` have no policy in force and
+  # therefore see the declared contract unchanged):
+  #
+  #   declared direct        + global-write or admin  -> direct
+  #   declared direct        + some other write cap   -> propose it with
+  #                                                      mk_save_memory, staged
+  #                                                      for review (needs the
+  #                                                      memory: block above)
+  #   declared direct        + read only              -> none, and why
+  #   declared merge-request + anyone who can see it  -> merge-request
+  #   declared none          + anyone                 -> none
+  #
+  # Capabilities only ever NARROW a declared contract, never widen it: an
+  # admin on a merge-request collection still opens a merge request.
+
 # --- collections: several named sources at once (runtime) --------------------
 #
 # Instead of `content:` above, declare a list of named collections. Each
@@ -190,11 +281,52 @@ content:
 #   - name: runbooks
 #     type: local
 #     path: ../runbooks-kb
+#     description: On-call runbooks — paging, escalation, and incident recovery.
+#     update:
+#       method: direct               # a directory this deployment owns and
+#                                    # keeps writable; the write IS the update
+#       instructions: |
+#         One runbook per page, under wiki/runbooks/. Lead with the symptom,
+#         then the check, then the fix.
 #
 #   - name: architecture
 #     type: gcs
 #     bucket: my-org-knowledge
 #     object: bundles/architecture-v3.tar.gz
+#
+#   # A git-authoritative KB: served from a MIRROR (a bundle a pipeline
+#   # publishes), maintained in a repository that is a different address
+#   # entirely. method: merge-request is legal here precisely because the
+#   # contract is declared rather than inferred from type: gcs.
+#   - name: handbook
+#     type: gcs
+#     bucket: my-org-knowledge
+#     prefix: handbook/live/
+#     description: Engineering handbook — conventions, onboarding, how we work.
+#     update:
+#       method: merge-request
+#       repo: https://github.com/example-org/handbook.git
+#       host: github
+#       branch: main
+#       path: wiki
+#       instructions: |
+#         Fork example-org/handbook to your own account and open the pull
+#         request from that fork. The upstream repo does not accept branches,
+#         so `gh repo fork --remote` first, then push your branch to the fork
+#         and `gh pr create --repo example-org/handbook --base main`.
+#
+#         One page per pull request, and never edit the bucket this
+#         collection is served from: it is a mirror, and the next sync
+#         overwrites anything written there.
+#
+#         Pages are Markdown with OKF frontmatter (id, title, type, category,
+#         status, tags). Copy the closest existing page under wiki/ rather
+#         than inventing a shape, and keep `id` equal to the page's path
+#         under wiki/ without the .md suffix.
+#
+#         Before opening the PR, check the page parses and indexes:
+#           mk list --kb-dir . --prefix <the id you chose>
+#         Fill in `status:` honestly — `draft` is a fine thing to propose.
 #
 #   - name: team-notes
 #     type: gcs
@@ -209,6 +341,10 @@ content:
 #     type: url
 #     url: https://example.com/kb/vendor-v2.tar.gz
 #     sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+#     description: Vendor documentation, mirrored. Read-only.
+#     update:
+#       method: none                 # nothing to contribute to: it's a mirror
+#                                    # of somebody else's documentation
 #     layout:
 #       wiki: docs
 

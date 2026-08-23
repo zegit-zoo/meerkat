@@ -185,6 +185,28 @@ type Source struct {
 	// Layout maps artifacts to their location WITHIN the resolved source.
 	Layout Layout `yaml:"layout,omitempty"`
 
+	// Description is one or two sentences of human/agent context for the
+	// collection: what is in it, who owns it, what it is for. Optional,
+	// and empty for every configuration that predates it.
+	//
+	// It exists because a collection NAME is an identifier, not an
+	// explanation: an agent choosing between "handbook" and "runbooks"
+	// is guessing until somebody says what each one holds. Bounded (see
+	// maxDescriptionLen) because it is rendered into an agent's context
+	// every time collections are listed.
+	Description string `yaml:"description,omitempty"`
+
+	// Update declares how knowledge flows back INTO this collection —
+	// the sanctioned contribution path an agent should take when it has
+	// something to add. Absent (the default) means there is none, and
+	// agents are told exactly that rather than left to guess.
+	//
+	// It is operator-DECLARED and never inferred from the source type
+	// above: a collection served from a GCS mirror is very often
+	// maintained in a git repository that is a different address
+	// entirely. See update.go and docs/design/update-contract.md.
+	Update *UpdateSpec `yaml:"update,omitempty"`
+
 	// Memory declares a WRITABLE memory store for this collection: where
 	// the hosted MCP server's mk_save_memory tool saves personal, team
 	// and global memory documents. Absent (the default, and what every
@@ -251,6 +273,7 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 		cfg.Content.Type = TypeNone
 	}
 	cfg.Content.Layout = MergeLayout(cfg.Content.Layout)
+	cfg.Content.Update.Normalize()
 	// Validate auth: at load time so a policy mistake fails the process
 	// rather than the first request that would have been affected by it
 	// — an unknown capability or a rule with no collections silently
@@ -272,6 +295,7 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 		}
 		for i := range cfg.Collections {
 			cfg.Collections[i].Layout = MergeLayout(cfg.Collections[i].Layout)
+			cfg.Collections[i].Update.Normalize()
 		}
 		// Re-validate now that layouts are defaulted (validateCollections
 		// checked names + type-specific fields; layout.wiki is only
@@ -348,8 +372,13 @@ func (s Source) validate(p string) error {
 		// layout: is meaningless for a source that resolves to the
 		// embedded build, but memory: is not — a deployment can serve
 		// embedded content and still save memories to a durable directory
-		// — so that one block is still validated.
-		return s.Memory.Validate(p+".memory", false)
+		// — so that one block is still validated. The same goes for
+		// description:/update:, which describe the collection rather than
+		// the bytes it resolves to.
+		if err := s.Memory.Validate(p+".memory", false); err != nil {
+			return err
+		}
+		return s.validateContract(p)
 	case TypeLocal:
 		if s.Path == "" {
 			return fmt.Errorf("%s.path is required for type: local", p)
@@ -399,7 +428,10 @@ func (s Source) validate(p string) error {
 	if s.Layout.Wiki == "" {
 		return fmt.Errorf("%s.layout.wiki is required for type: %s", p, s.Type)
 	}
-	return s.Memory.Validate(p+".memory", s.ephemeral())
+	if err := s.Memory.Validate(p+".memory", s.ephemeral()); err != nil {
+		return err
+	}
+	return s.validateContract(p)
 }
 
 // validateGCS checks the type: gcs fields. Exactly one of object (a
