@@ -62,10 +62,22 @@ Examples:
 				return nil
 			}
 
-			// Same version + no --force? bail out.
-			if !force && versionEq(cur.Version, rel.TagName) {
-				fmt.Fprintln(cmd.OutOrStdout(), "already on the target version (use --force to re-install)")
-				return nil
+			// Same version, or an actual downgrade, and no --force?
+			// Bail out. The comparison is pure SemVer (update.IsDowngrade),
+			// so this only blocks a target that is unambiguously older
+			// than the running binary — it never blocks on an unparseable
+			// version on either side, and in particular a client on an
+			// advanced downstream release (e.g. v0.8.6) still accepts a
+			// new upstream v0.9.0+ tag as an upgrade with no --force
+			// needed. See docs/design/upstream-migration.md.
+			if !force {
+				switch {
+				case versionEq(cur.Version, rel.TagName):
+					fmt.Fprintln(cmd.OutOrStdout(), "already on the target version (use --force to re-install)")
+					return nil
+				case update.IsDowngrade(rel.TagName, cur.Version):
+					return fmt.Errorf("target %s is older than the running %s — pass --force to downgrade", rel.TagName, cur.Version)
+				}
 			}
 
 			// Confirm.

@@ -82,62 +82,13 @@ func emitNagIfNewer(w io.Writer, currentVersion, latestTag string) {
 	if latestTag == "" {
 		return
 	}
-	if !isNewer(latestTag, currentVersion) {
+	if !IsUpgrade(latestTag, currentVersion) {
 		return
 	}
 	fmt.Fprintf(w,
 		"\nmk: a newer release is available — %s (you have %s). Run `mk update`.\n",
 		latestTag, currentVersion,
 	)
-}
-
-// isNewer is a deliberately conservative semver-ish compare. We
-// don't pull a full semver lib for one comparison; the tag format
-// we ship is `vX.Y.Z` and we just dot-split + numeric-compare.
-// Any parse failure means "not newer" so we never spam.
-func isNewer(latest, current string) bool {
-	l, ok := splitVersion(latest)
-	if !ok {
-		return false
-	}
-	c, ok := splitVersion(current)
-	if !ok {
-		return false
-	}
-	for i := 0; i < 3; i++ {
-		if l[i] != c[i] {
-			return l[i] > c[i]
-		}
-	}
-	return false
-}
-
-// splitVersion parses "vX.Y.Z" (with optional pre-release suffix
-// like "-dirty" or "-rc1") into [3]int. Returns ok=false on shapes
-// it can't make sense of.
-func splitVersion(v string) ([3]int, bool) {
-	v = strings.TrimPrefix(v, "v")
-	parts := strings.SplitN(v, ".", 4)
-	if len(parts) < 3 {
-		return [3]int{}, false
-	}
-	out := [3]int{}
-	for i := 0; i < 3; i++ {
-		n := 0
-		any := false
-		for _, c := range parts[i] {
-			if c < '0' || c > '9' {
-				break
-			}
-			n = n*10 + int(c-'0')
-			any = true
-		}
-		if !any {
-			return [3]int{}, false
-		}
-		out[i] = n
-	}
-	return out, true
 }
 
 // refreshNotifyCache hits FetchLatest and writes the cache. Best-
