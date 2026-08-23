@@ -298,7 +298,7 @@ func TestOpen_SingleCollectionReadsThroughTheGlobals(t *testing.T) {
 	})
 	t.Cleanup(func() { kb.UseFS(nil) })
 
-	reg, err := Open([]contentsource.ResolvedCollection{
+	reg, err := Open(context.Background(), []contentsource.ResolvedCollection{
 		{Name: DefaultName, Dir: t.TempDir(), Provenance: "disk:x"},
 	})
 	if err != nil {
@@ -323,7 +323,7 @@ func TestOpen_MultiCollectionMountsEachDirectory(t *testing.T) {
 	dirB := t.TempDir()
 	writeTree(t, dirB, map[string]string{"docs/b.md": "---\nid: b\ntitle: B\n---\nbody b\n"})
 
-	reg, err := Open([]contentsource.ResolvedCollection{
+	reg, err := Open(context.Background(), []contentsource.ResolvedCollection{
 		{Name: "a", Dir: dirA, Source: contentsource.Source{Type: "local", Layout: contentsource.MergeLayout(contentsource.Layout{})}},
 		// A per-collection layout override must be honoured.
 		{Name: "b", Dir: dirB, Source: contentsource.Source{Type: "local", Layout: contentsource.MergeLayout(contentsource.Layout{Wiki: "docs"})}},
@@ -352,7 +352,7 @@ func TestOpen_MultiCollectionMountsEachDirectory(t *testing.T) {
 func TestOpen_MultiWithEmbeddedEntry(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{"wiki/a.md": "---\nid: a\ntitle: A\n---\nbody\n"})
-	reg, err := Open([]contentsource.ResolvedCollection{
+	reg, err := Open(context.Background(), []contentsource.ResolvedCollection{
 		{Name: "disk", Dir: dir, Source: contentsource.Source{Type: "local", Layout: contentsource.MergeLayout(contentsource.Layout{})}},
 		{Name: "embedded", Provenance: contentsource.SourceEmbedded},
 	})

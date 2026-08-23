@@ -36,7 +36,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -44,6 +46,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
+	"github.com/zegit-zoo/meerkat/internal/memory"
 	"github.com/zegit-zoo/meerkat/internal/search"
 )
 
@@ -86,6 +89,24 @@ type Collection struct {
 	pages []kb.Page
 	byID  map[string]kb.Page
 
+	// memory is the collection's writable memory store, when one is
+	// configured. nil means the collection is read-only and
+	// mk_save_memory will not name it.
+	memory memory.Store
+	// overlayMu guards overlay.
+	overlayMu sync.RWMutex
+	// overlay holds the memory documents layered over the collection's
+	// content root, by page ID. It is populated from the memory store at
+	// mount time and extended by every successful write — see
+	// SaveMemory.
+	//
+	// An overlay rather than "write into the wiki tree and re-read it"
+	// because the memory store deliberately lives OUTSIDE the served
+	// content root (so a staged, unreviewed document can never be picked
+	// up by kb.ListFS), and because it works identically for a GCS-backed
+	// store, where there is no local tree to write into at all.
+	overlay map[string]kb.Page
+
 	indexOnce sync.Once
 	index     *search.Index
 	indexErr  error
@@ -116,7 +137,8 @@ func FromPages(name string, pages []kb.Page) *Collection {
 	return &Collection{Name: name, Provenance: "memory", pages: sorted, byID: byID}
 }
 
-// Pages returns every page in the collection, sorted by ID.
+// Pages returns every page in the collection, sorted by ID: the
+// content root's pages with the memory overlay merged in.
 //
 // Deliberately not cached: with a runtime content directory the content
 // root is live (an `mk ingest` run, a redeploy writing into a mounted
@@ -124,6 +146,16 @@ func FromPages(name string, pages []kb.Page) *Collection {
 // that immediately. The search index, which is expensive to build, is
 // the thing that's built once — see Index.
 func (c *Collection) Pages() ([]kb.Page, error) {
+	pages, err := c.contentPages()
+	if err != nil {
+		return nil, err
+	}
+	return c.mergeOverlay(pages), nil
+}
+
+// contentPages returns the pages of the content root alone, with no
+// memory overlay.
+func (c *Collection) contentPages() ([]kb.Page, error) {
 	switch {
 	case c.byID != nil:
 		return c.pages, nil
@@ -134,11 +166,40 @@ func (c *Collection) Pages() ([]kb.Page, error) {
 	}
 }
 
-// Load returns one page by its unqualified ID.
+// mergeOverlay layers the memory overlay over a content page list. A
+// memory whose ID collides with a content page WINS: the overlay is the
+// live, just-written state, and a content page that shadowed it would
+// make a save look like it silently did nothing.
+func (c *Collection) mergeOverlay(pages []kb.Page) []kb.Page {
+	c.overlayMu.RLock()
+	defer c.overlayMu.RUnlock()
+	if len(c.overlay) == 0 {
+		return pages
+	}
+	out := make([]kb.Page, 0, len(pages)+len(c.overlay))
+	for _, p := range pages {
+		if _, shadowed := c.overlay[p.ID]; shadowed {
+			continue
+		}
+		out = append(out, p)
+	}
+	for _, p := range c.overlay {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// Load returns one page by its unqualified ID, the memory overlay
+// first.
 func (c *Collection) Load(id string) (kb.Page, error) {
+	norm := strings.TrimSuffix(strings.TrimPrefix(id, "/"), ".md")
+	if p, ok := c.overlayPage(norm); ok {
+		return p, nil
+	}
 	switch {
 	case c.byID != nil:
-		p, ok := c.byID[strings.TrimSuffix(strings.TrimPrefix(id, "/"), ".md")]
+		p, ok := c.byID[norm]
 		if !ok {
 			return kb.Page{}, kb.ErrNotFound
 		}
@@ -148,6 +209,14 @@ func (c *Collection) Load(id string) (kb.Page, error) {
 	default:
 		return kb.LoadFS(c.fsys, id)
 	}
+}
+
+// overlayPage reads one page out of the memory overlay.
+func (c *Collection) overlayPage(id string) (kb.Page, bool) {
+	c.overlayMu.RLock()
+	defer c.overlayMu.RUnlock()
+	p, ok := c.overlay[id]
+	return p, ok
 }
 
 // Index returns the collection's search index, building it on first use
@@ -168,14 +237,132 @@ func (c *Collection) Index() (*search.Index, error) {
 	return c.index, c.indexErr
 }
 
-// Close releases the collection's index, if one was built.
+// Close releases the collection's index, if one was built, and its
+// memory store, if one is attached.
 func (c *Collection) Close() error {
+	var firstErr error
+	c.overlayMu.Lock()
+	store := c.memory
+	c.memory = nil
+	c.overlayMu.Unlock()
+	if closer, ok := store.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			firstErr = err
+		}
+	}
 	if c.index == nil {
-		return nil
+		return firstErr
 	}
 	err := c.index.Close()
 	c.index = nil
+	if firstErr != nil {
+		return firstErr
+	}
 	return err
+}
+
+// --- memory ----------------------------------------------------------
+
+// Memory returns the collection's writable memory store, or nil when
+// none is configured. A nil store is what makes a collection read-only
+// as far as mk_save_memory is concerned.
+//
+// Read under the overlay lock, which also guards the store pointer: it
+// is written once at mount (AttachMemory) and cleared once at shutdown
+// (Close), both potentially concurrent with a request in flight.
+func (c *Collection) Memory() memory.Store {
+	c.overlayMu.RLock()
+	defer c.overlayMu.RUnlock()
+	return c.memory
+}
+
+// AttachMemory wires a memory store to the collection and loads its
+// LIVE documents into the overlay, so memories saved by an earlier
+// process are searchable and showable from this one's first request.
+//
+// It is called once, at mount time, before anything serves. Documents
+// that fail to parse are skipped with a warning rather than failing the
+// mount: one malformed memory must not make a whole collection
+// unserveable.
+func (c *Collection) AttachMemory(ctx context.Context, store memory.Store) error {
+	if store == nil {
+		return nil
+	}
+	records, err := store.Load(ctx)
+	if err != nil {
+		return fmt.Errorf("collection %q: load memory store: %w", c.Name, err)
+	}
+	pages := make(map[string]kb.Page, len(records))
+	for _, rec := range records {
+		page, perr := memory.Page(rec.Key, rec.Body)
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "meerkat: skipping memory %s in collection %q: %v\n", rec.Key, c.Name, perr)
+			continue
+		}
+		pages[page.ID] = page
+	}
+	c.overlayMu.Lock()
+	c.memory = store
+	c.overlay = pages
+	c.overlayMu.Unlock()
+	return nil
+}
+
+// SaveMemory stores one memory document and makes it immediately
+// visible: it lands in the backend under an optimistic-locking
+// precondition, then in the overlay, then in the live search index.
+//
+// Order matters. The durable write comes first, so nothing is
+// searchable that was not stored; the index update comes last, so a
+// conflict costs nothing. The index is FORCED to build if it hasn't
+// yet: a save has to leave the collection in a state where the next
+// search finds the memory, and a lazily-unbuilt index would otherwise
+// be built later from Pages() — which does include the overlay, so
+// either order is correct, but forcing it keeps "saved" and
+// "searchable" one step apart instead of two.
+func (c *Collection) SaveMemory(ctx context.Context, key string, body []byte, pre memory.Precondition) (memory.Version, kb.Page, error) {
+	store := c.Memory()
+	if store == nil {
+		return "", kb.Page{}, fmt.Errorf("collection %q has no memory store configured", c.Name)
+	}
+	version, err := store.Put(ctx, key, body, pre)
+	if err != nil {
+		return "", kb.Page{}, err
+	}
+	page, err := memory.Page(key, body)
+	if err != nil {
+		// Stored but unparseable: report it rather than pretending the
+		// save failed (it did not — the bytes are durable) or pretending
+		// it fully succeeded (it is not searchable).
+		return version, kb.Page{}, fmt.Errorf("memory was stored but could not be indexed: %w", err)
+	}
+	c.overlayMu.Lock()
+	if c.overlay == nil {
+		c.overlay = make(map[string]kb.Page, 1)
+	}
+	c.overlay[page.ID] = page
+	c.overlayMu.Unlock()
+
+	idx, err := c.Index()
+	if err != nil {
+		return version, page, fmt.Errorf("memory was stored but the search index is unavailable: %w", err)
+	}
+	if err := idx.Put(page); err != nil {
+		return version, page, fmt.Errorf("memory was stored but could not be indexed: %w", err)
+	}
+	return version, page, nil
+}
+
+// StageMemory writes a pending review artifact and returns where it
+// landed. It touches neither the overlay nor the index: a staged
+// document is a proposal, and a proposal that turned up in search
+// results would be indistinguishable from an approved one.
+func (c *Collection) StageMemory(ctx context.Context, key string, body []byte) (string, error) {
+	store := c.Memory()
+	if store == nil {
+		return "", fmt.Errorf("collection %q has no memory store configured", c.Name)
+	}
+	return store.Stage(ctx, key, body)
 }
 
 // Registry is an ordered set of mounted collections. Configuration
@@ -241,14 +428,22 @@ func Global(provenance string) *Registry {
 
 // Open mounts every resolved collection, wiring each non-embedded one
 // to its own content-repo-layout filesystem (via internal/kbdir's
-// adapter, honouring that collection's own layout: block).
+// adapter, honouring that collection's own layout: block) and, for a
+// collection with a `memory:` block, opening its writable memory store
+// and loading the memories already in it.
 //
 // The single-collection case deliberately gets a nil filesystem: the
 // caller has already pointed the process globals at that one content
 // root, so the collection reads through them and every pre-existing
 // code path (internal/sources, `mk ingest`, shell completion) keeps
 // seeing exactly what it saw before.
-func Open(resolved []contentsource.ResolvedCollection) (*Registry, error) {
+//
+// ctx bounds the memory stores' startup work (a GCS list + read).
+// Opening them here rather than lazily is the same call the rest of
+// this package makes about indexes on a server: a store that cannot be
+// reached should fail the process at startup, where a deployment's own
+// health gate catches it, not on the first save hours later.
+func Open(ctx context.Context, resolved []contentsource.ResolvedCollection) (*Registry, error) {
 	cols := make([]*Collection, 0, len(resolved))
 	for _, rc := range resolved {
 		c := &Collection{Name: rc.Name, Provenance: rc.Provenance, Source: rc.Source}
@@ -258,6 +453,15 @@ func Open(resolved []contentsource.ResolvedCollection) (*Registry, error) {
 				return nil, fmt.Errorf("collection %q: %w", rc.Name, err)
 			}
 			c.fsys = fsys
+		}
+		if rc.Source.Memory != nil {
+			store, err := rc.Source.Memory.Open(ctx, rc.Dir)
+			if err != nil {
+				return nil, fmt.Errorf("collection %q: memory store: %w", rc.Name, err)
+			}
+			if err := c.AttachMemory(ctx, store); err != nil {
+				return nil, err
+			}
 		}
 		cols = append(cols, c)
 	}
@@ -282,6 +486,25 @@ func (r *Registry) Names() []string {
 	}
 	return out
 }
+
+// WithMemory returns a VIEW holding only the collections that have a
+// writable memory store. Like Restrict it borrows rather than owns, so
+// closing it is a no-op.
+//
+// Composing it with Restrict is what gives the memory tool its own
+// visible set: a caller sees exactly the collections they may reach AND
+// that can be written to. A deployment that configures no memory store
+// at all ends up with an empty view, and the tool is not offered.
+func (r *Registry) WithMemory() *Registry {
+	return r.Restrict(func(name string) bool {
+		c, ok := r.by[name]
+		return ok && c.Memory() != nil
+	})
+}
+
+// MemoryNames returns the names of the collections in this registry
+// that have a memory store, in configuration order.
+func (r *Registry) MemoryNames() []string { return r.WithMemory().Names() }
 
 // Get returns the named collection, or an error wrapping
 // ErrUnknownCollection that names the ones that exist.

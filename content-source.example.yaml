@@ -113,6 +113,55 @@ content:
     prompts:   ingestion/prompts     # per-source prompts -> internal/sources/etc/prompts/
     templates: templates             # page templates    -> internal/sources/etc/templates/
 
+  # --- memory: a WRITABLE store for this collection (runtime, MCP only) ------
+  #
+  # Enables the mk_save_memory MCP tool for this collection: agents save
+  # personal / team / global memory documents, which become searchable
+  # immediately (no restart). See docs/design/memory.md.
+  #
+  # ABSENT (the default) the collection is READ-ONLY and the tool is not
+  # offered at all — which is what every configuration written before this
+  # existed gets.
+  #
+  # The store deliberately sits OUTSIDE the wiki tree above: it holds a
+  # _staging/ area for proposals that are not authorized yet, and anything
+  # under wiki/ would be indexed on the next restart — turning "pending
+  # review" into "published". Nothing here is served except through
+  # meerkat's own overlay, which loads live documents only.
+  #
+  # memory:
+  #   type: local                    # local | gcs
+  #
+  #   # --- type: local ---------------------------------------------------
+  #   path: memory                   # relative to the collection's content
+  #                                  # directory (a SIBLING of wiki/), or
+  #                                  # absolute. Default: "memory".
+  #                                  # MUST be absolute when the content
+  #                                  # source is type: url or type: gcs —
+  #                                  # those resolve to a content-addressed
+  #                                  # cache that is replaced on every content
+  #                                  # change, so a relative path would lose
+  #                                  # the memories. Refused at load time.
+  #                                  # Writes are temp-file + fsync + atomic
+  #                                  # rename; optimistic locking is a mutex,
+  #                                  # so this backend is SINGLE-PROCESS. Two
+  #                                  # replicas sharing a volume want gcs.
+  #
+  #   # --- type: gcs -----------------------------------------------------
+  #   # bucket: my-org-knowledge     # bucket NAME; ADC only, as everywhere
+  #   # prefix: kb/memory/           # required (an empty prefix would name
+  #   #                              # the whole bucket)
+  #   # Writes use generation preconditions (ifGenerationMatch: 0 to create,
+  #   # the matched generation to update), evaluated server-side — so several
+  #   # replicas can share one store and still never lose a write.
+  #   # Grant storage.objects.get/list/create/delete on the prefix.
+  #
+  # Who may write what is the auth: block's business (see the bottom of this
+  # file): personal-write / team-write / global-write, per collection. An
+  # unauthorized team or global write becomes a pending artifact under
+  # <store>/_staging/ instead of being refused, and the tool's response says
+  # where it landed.
+
 # --- collections: several named sources at once (runtime) --------------------
 #
 # Instead of `content:` above, declare a list of named collections. Each
@@ -151,6 +200,10 @@ content:
 #     type: gcs
 #     bucket: my-org-knowledge
 #     prefix: notes/live/
+#     memory:                        # this one accepts saved memories
+#       type: gcs
+#       bucket: my-org-knowledge
+#       prefix: notes/memory/
 #
 #   - name: vendor-docs
 #     type: url
@@ -217,13 +270,21 @@ content:
 #   # selector matches; ALL selectors present must match. A rule with no
 #   # selector matches every authenticated caller.
 #   #
-#   # Capabilities: read | personal-write | team-write | admin.
-#   # Only `read` is enforced today — it is also what decides whether a
-#   # collection is VISIBLE at all: one a caller can't read is absent from
-#   # their tool descriptions, search results, listings, error messages and
-#   # page-ID disambiguation, exactly as if it were never mounted. The
-#   # write capabilities are parsed and evaluated now so a policy written
-#   # today keeps its meaning when the memory toolset consumes them.
+#   # Capabilities: read | personal-write | team-write | global-write | admin.
+#   #
+#   # `read` decides whether a collection is VISIBLE at all: one a caller
+#   # can't read is absent from their tool descriptions, search results,
+#   # listings, error messages and page-ID disambiguation, exactly as if it
+#   # were never mounted.
+#   #
+#   # The three write capabilities gate mk_save_memory, one per scope
+#   # (personal / team / global) — see the memory: block above and
+#   # docs/design/memory.md. They are independent of `read`: a caller with
+#   # only `read` is not offered the memory tool at all, and a caller with
+#   # only `personal-write` is offered the memory tool and nothing else. A
+#   # team or global write by someone who holds a DIFFERENT write
+#   # capability is staged for review rather than refused.
+#   #
 #   # `admin` implies every capability, including ones added later.
 #   rules:
 #     - name: sre
@@ -235,6 +296,16 @@ content:
 #       groups: [people-ops]
 #       collections: [team-notes]
 #       capabilities: [read, team-write]
+#
+#     - name: everyone-remembers
+#       groups: [engineering]
+#       collections: [team-notes]      # may save their own memories, and
+#       capabilities: [read, personal-write]   # PROPOSE team/global ones
+#
+#     - name: knowledge-owners
+#       groups: [knowledge-owners]
+#       collections: [team-notes]
+#       capabilities: [read, team-write, global-write]
 #
 #     - name: platform-admins
 #       groups: [platform-admins]

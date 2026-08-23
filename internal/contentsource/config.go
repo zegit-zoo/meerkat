@@ -27,6 +27,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
+	"github.com/zegit-zoo/meerkat/internal/memory"
 )
 
 // ConfigFile is the repo-root config filename.
@@ -183,7 +184,25 @@ type Source struct {
 
 	// Layout maps artifacts to their location WITHIN the resolved source.
 	Layout Layout `yaml:"layout,omitempty"`
+
+	// Memory declares a WRITABLE memory store for this collection: where
+	// the hosted MCP server's mk_save_memory tool saves personal, team
+	// and global memory documents. Absent (the default, and what every
+	// pre-existing configuration has) the collection is read-only and the
+	// memory tool will not name it.
+	//
+	// The store deliberately lives outside the content root the collection
+	// serves — see internal/memory — so it is declared beside layout:
+	// rather than inside it.
+	Memory *memory.Spec `yaml:"memory,omitempty"`
 }
+
+// ephemeralTypes are the source types whose resolved directory is a
+// content-addressed CACHE that is replaced whenever the content
+// changes. A relative local memory path under one of them would be
+// written into an entry destined to be superseded, so it is refused at
+// load time — see memory.Spec.Validate.
+func (s Source) ephemeral() bool { return s.Type == TypeURL || s.Type == TypeGCS }
 
 // Layout locates each embeddable artifact inside the resolved source root.
 type Layout struct {
@@ -326,7 +345,11 @@ func (s Source) Validate() error { return s.validate("content") }
 func (s Source) validate(p string) error {
 	switch s.Type {
 	case TypeNone:
-		return nil
+		// layout: is meaningless for a source that resolves to the
+		// embedded build, but memory: is not — a deployment can serve
+		// embedded content and still save memories to a durable directory
+		// — so that one block is still validated.
+		return s.Memory.Validate(p+".memory", false)
 	case TypeLocal:
 		if s.Path == "" {
 			return fmt.Errorf("%s.path is required for type: local", p)
@@ -376,7 +399,7 @@ func (s Source) validate(p string) error {
 	if s.Layout.Wiki == "" {
 		return fmt.Errorf("%s.layout.wiki is required for type: %s", p, s.Type)
 	}
-	return nil
+	return s.Memory.Validate(p+".memory", s.ephemeral())
 }
 
 // validateGCS checks the type: gcs fields. Exactly one of object (a

@@ -177,7 +177,7 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 			if _, err := kbdir.ConfigureLayout(primary.Dir, primary.Source.Layout); err != nil {
 				return err
 			}
-			reg, err := collections.Open(resolved)
+			reg, err := collections.Open(cmd.Context(), resolved)
 			if err != nil {
 				return err
 			}

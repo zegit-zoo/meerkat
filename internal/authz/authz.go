@@ -24,11 +24,11 @@
 //
 // # Capabilities
 //
-// read is the only capability enforced today. personal-write,
-// team-write and admin are defined, parsed, evaluated and reported now
-// so the policy documents an operator writes today keep meaning the
-// same thing when the memory toolset starts consuming them; nothing in
-// meerkat currently checks them.
+// read decides visibility. personal-write, team-write and global-write
+// decide what the memory toolset (mk_save_memory) may write, per scope;
+// admin implies all of them. Every capability is enforced: see
+// internal/mcp/memory.go for the write side and docs/design/memory.md
+// for the scope->capability table.
 package authz
 
 import (
@@ -41,20 +41,31 @@ import (
 type Capability string
 
 const (
-	// CapRead permits search/show/list against the collection. It is the
-	// only capability enforced today, and the one that decides whether a
-	// collection is visible at all.
+	// CapRead permits search/show/list against the collection, and is
+	// the capability that decides whether a collection is VISIBLE at all.
+	// It confers nothing on the write side: a reader is not offered the
+	// memory tool.
 	CapRead Capability = "read"
-	// CapPersonalWrite permits writing pages scoped to the caller's own
-	// identity (the memory toolset's "personal" scope). Not yet enforced.
+	// CapPersonalWrite permits writing memory documents scoped to the
+	// caller's own identity (the memory toolset's "personal" scope). The
+	// namespace those documents land in is derived from the verified
+	// token, never from a tool argument — holding this capability lets a
+	// caller write as themselves and as nobody else.
 	CapPersonalWrite Capability = "personal-write"
-	// CapTeamWrite permits writing pages shared with the caller's team
-	// (the memory toolset's "team" scope). Not yet enforced.
+	// CapTeamWrite permits writing memory documents shared with the
+	// caller's team (the memory toolset's "team" scope).
 	CapTeamWrite Capability = "team-write"
+	// CapGlobalWrite permits writing memory documents visible to every
+	// reader of the collection (the memory toolset's "global" scope).
+	//
+	// It is a capability of its own rather than a reuse of CapAdmin
+	// because admin implies capabilities that do not exist yet: folding
+	// global writes into it would retroactively widen every admin rule an
+	// operator has already written. See docs/design/memory.md.
+	CapGlobalWrite Capability = "global-write"
 	// CapAdmin implies every other capability, present and future. Grant
 	// it sparingly: a rule that grants admin today also grants whatever
-	// capability a later meerkat adds. Not yet enforced beyond the
-	// implication.
+	// capability a later meerkat adds.
 	CapAdmin Capability = "admin"
 )
 
@@ -62,7 +73,16 @@ const (
 // Order is least- to most-privileged, which is also the order a human
 // reads them in.
 func AllCapabilities() []Capability {
-	return []Capability{CapRead, CapPersonalWrite, CapTeamWrite, CapAdmin}
+	return []Capability{CapRead, CapPersonalWrite, CapTeamWrite, CapGlobalWrite, CapAdmin}
+}
+
+// WriteCapabilities lists the capabilities that permit writing
+// something, in the same least- to most-privileged order. CapAdmin is
+// excluded: it is an implication, not a grant of its own, and
+// CapabilitySet.Has already answers true for every entry below when it
+// is held.
+func WriteCapabilities() []Capability {
+	return []Capability{CapPersonalWrite, CapTeamWrite, CapGlobalWrite}
 }
 
 // ParseCapability maps a policy document's string to a Capability. The
@@ -214,12 +234,37 @@ func (g *Grants) Can(collection string, c Capability) bool {
 
 // CanRead is Can(collection, CapRead) as a func value, ready to hand to
 // collections.Registry.Restrict. This is *the* authorization filter:
-// every surface inherits it by operating on the restricted registry.
+// every READ surface inherits it by operating on the restricted
+// registry.
 func (g *Grants) CanRead(collection string) bool { return g.Can(collection, CapRead) }
+
+// CanWrite reports whether the caller holds ANY write capability over
+// the collection. It answers "may this caller write here at all", not
+// "may they write at the scope they asked for" — the per-scope check is
+// Can(collection, <the scope's capability>) and happens on top of this.
+//
+// It is the write path's counterpart to CanRead: the memory tool
+// restricts the registry with it, so a collection the caller was not
+// granted a write on is invisible to that tool exactly as an unreadable
+// collection is invisible to search. Being strictly narrower than
+// CanRead's view, it can leak nothing the read path does not already.
+//
+// It is also what decides whether an unauthorized team/global write is
+// STAGED for review or refused outright: staging a memory into a
+// collection is only offered to a principal who is already a writer
+// there in some other scope.
+func (g *Grants) CanWrite(collection string) bool {
+	for _, c := range WriteCapabilities() {
+		if g.Can(collection, c) {
+			return true
+		}
+	}
+	return false
+}
 
 // Capabilities returns the capabilities held over one collection,
 // wildcard grants folded in. Reported by `mk mcp serve-http`'s
-// diagnostics and destined for the memory toolset's scope check.
+// diagnostics and consumed by the memory toolset's scope check.
 func (g *Grants) Capabilities(collection string) CapabilitySet {
 	if g == nil {
 		set := make(CapabilitySet, len(AllCapabilities()))
@@ -234,6 +279,13 @@ func (g *Grants) Capabilities(collection string) CapabilitySet {
 // Empty reports whether the grants confer nothing at all — a caller
 // who authenticated successfully but whom no policy rule matched. A nil
 // *Grants (no policy in force) is never empty.
+//
+// It is capability-AGNOSTIC on purpose: any non-empty capability set,
+// over any collection, makes the grants non-empty. That is what keeps
+// the authentication gate's 403 from refusing a principal who holds
+// only write capabilities — a rule granting `[personal-write]` and no
+// read is unusual, but its holder has business here and must reach the
+// memory tool. See internal/authn.Gate.Middleware.
 func (g *Grants) Empty() bool {
 	if g == nil {
 		return false
