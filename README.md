@@ -109,6 +109,11 @@ mk list --category policies --status placeholder
 mk list --owner team-payments --json
 mk list --type "BigQuery Table"                       # OKF's concept-kind field — see docs/OKF.md
 
+# Multiple collections (when content-source.yaml declares any)
+mk list --collections                                 # what's mounted
+mk search "incident" --collection runbooks            # search one collection
+mk show runbooks:incidents/paging                     # a collection-qualified page ID
+
 # Servers
 mk mcp serve                                          # stdio for OpenCode
 mk http serve --port 4004                             # for OpenWebUI
@@ -238,6 +243,9 @@ Once a step is used, its `content.type` decides the outcome on its own —
 including `type: none`, which resolves to the embedded fallback without
 falling through to a lower step.
 
+Steps 2-4 can also mount **several named collections** at once instead of a
+single source — see [Multiple collections](#multiple-collections).
+
 ### `--kb-dir` / `MEERKAT_KB_DIR`
 
 Points meerkat at a directory on disk instead of the embedded build — `mk
@@ -289,8 +297,8 @@ When `--kb-dir`/`MEERKAT_KB_DIR` is unset, meerkat looks for a
 `content-source.yaml` (steps 2-4 above). An explicit `--content-source`/
 `MEERKAT_CONTENT_SOURCE` path that doesn't exist is a hard error — same
 reasoning as `--kb-dir`: the operator named it, so silently falling through
-would be confusing. Only `content.type: none`, `local`, and `url` are valid
-at runtime:
+would be confusing. Only `content.type: none`, `local`, `url`, and `gcs` are
+valid at runtime:
 
 ```bash
 meerkat --content-source ./content-source.yaml list
@@ -305,14 +313,19 @@ MEERKAT_CONTENT_SOURCE=./content-source.yaml meerkat list
   way. A resolved directory that doesn't exist is a hard error, same as
   `--kb-dir`.
 - **`url`** fetches and caches an HTTPS archive — see below.
+- **`gcs`** loads a Google Cloud Storage `.tar.gz` object or bucket prefix —
+  see below.
 - **`git`** and **`submodule`** are build-time only (they need git and a
   working tree, which a shipped binary can't assume): naming one here fails
   with an explicit error rather than silently serving nothing. Run `make
   sync` to embed it at build time instead, or switch to `type: local`/
-  `type: url` for a runtime-resolved source.
+  `type: url`/`type: gcs` for a runtime-resolved source.
 
-A `layout:` block in this file **is** honoured at runtime for `type: local`
-and `type: url` sources — unlike `--kb-dir`, above.
+A `layout:` block in this file **is** honoured at runtime for `type: local`,
+`type: url` and `type: gcs` sources — unlike `--kb-dir`, above.
+
+The same file can instead declare **several named collections**, mounted at
+once — see [Multiple collections](#multiple-collections) below.
 
 ### `type: url`
 
@@ -354,6 +367,144 @@ schema (including `layout:`), and
 [docs/SECURITY.md](docs/SECURITY.md#kb_commit-vs-kb_source-the-provenance-split)
 for exactly what the digest does and does not guarantee.
 
+### `type: gcs`
+
+Loads content from a Google Cloud Storage bucket, in one of two modes.
+Runtime-only, like `type: url`.
+
+```yaml
+# (a) bundle mode — one .tar.gz object
+content:
+  type: gcs
+  bucket: my-org-knowledge          # bucket NAME, not a gs:// URL
+  object: bundles/kb-v1.2.3.tar.gz
+  # generation: 1748112233445566    # optional: pin one exact generation
+
+# (b) prefix mode — an object prefix served as a directory tree
+content:
+  type: gcs
+  bucket: my-org-knowledge
+  prefix: kb/live/                  # stripped: kb/live/wiki/x.md -> wiki/x.md
+```
+
+**Credentials: Application Default Credentials, and nothing else.** Workload
+Identity Federation, a GKE/Cloud Run/GCE service account, an impersonated
+principal, or `gcloud auth application-default login` for a developer. There
+is deliberately **no key-file field in the schema** — meerkat cannot be asked
+to load a static service-account key. Grant the principal
+`storage.objects.get`, plus `storage.objects.list` for prefix mode.
+
+**Caching is by object generation.** GCS assigns a new generation on every
+write, so `(bucket, object, generation)` names immutable bytes the way a
+`sha256` does for `type: url` — which is why `sha256` is *optional* here
+(and still verified before extraction if you set it):
+
+```
+<user cache dir>/meerkat/content/gcs/<hash(bucket,object)>/<generation>/
+<user cache dir>/meerkat/content/gcs/<hash(bucket,prefix)>/<listing-fingerprint>/
+```
+
+In prefix mode the key is a fingerprint over every listed object's
+`(name, generation)`, so any add, overwrite or delete under the prefix
+invalidates it. Either way a restart on unchanged content is a cache hit;
+overwriting the object publishes new content on the next start, with the
+previous generation's cache entry left intact for a rollback.
+
+Objects are fetched with a conditional read (an explicit generation **and**
+`ifGenerationMatch`), so the bytes in a cache entry named `<generation>`
+cannot be some other generation's. Setting `generation:` explicitly pins the
+deployment — the current generation is then never even looked up, so a later
+overwrite cannot change what this binary serves.
+
+### Multiple collections
+
+Instead of a single `content:` block, a `content-source.yaml` can declare a
+list of **named collections** — separate knowledge bases mounted at once,
+with backends that need not match:
+
+```yaml
+collections:
+  - name: runbooks
+    type: local
+    path: ../runbooks-kb
+
+  - name: architecture
+    type: gcs
+    bucket: my-org-knowledge
+    object: bundles/architecture-v3.tar.gz
+
+  - name: team-notes
+    type: gcs
+    bucket: my-org-knowledge
+    prefix: notes/live/
+
+  - name: vendor-docs
+    type: url
+    url: https://example.com/kb/vendor-v2.tar.gz
+    sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    layout:
+      wiki: docs
+```
+
+Each entry takes exactly the keys `content:` takes (including its own
+`layout:`), plus a `name`. Names must match `[A-Za-z0-9][A-Za-z0-9_-]*` — no
+colon, since a name is also the `<collection>:` prefix of a qualified page
+ID. `content:` and `collections:` are mutually exclusive.
+
+**Order matters.** It is the order collections are searched, listed, and
+disambiguated in.
+
+```bash
+mk list --collections                      # what's mounted
+mk list --collections --json               # name, type, provenance, page count
+
+mk search "incident"                       # every collection, merged by score
+mk search "incident" --collection runbooks # just one
+
+mk list                                    # every collection, IDs qualified
+mk list --collection architecture          # just one
+
+mk show runbooks:incidents/paging          # a page ID qualified by collection
+mk show incidents/paging --collection runbooks   # equivalent
+mk show incidents/paging                   # tried in order (see below)
+```
+
+**Routing rules**, with several collections mounted:
+
+| | `--collection`/`collection` given | omitted |
+|---|---|---|
+| search | that collection | all of them, merged by score, truncated to `--limit` |
+| list | that collection | all of them, in configuration order |
+| show | that collection | all in order — **one** match wins; **several** is an error |
+
+`mk show <bare-id>` for an ID that exists in more than one collection
+**fails**, listing the qualified IDs to choose from. It does not silently
+return whichever collection happens to be configured first: the answer to
+"show me this page" should never depend on file ordering the caller can't
+see. (HTTP returns `409 Conflict` for this; MCP returns a tool-level error
+the model can retry with.)
+
+**Page IDs are never rewritten.** `--json` output, the MCP tools and the
+HTTP endpoints all report the page's own unqualified `id` alongside a
+separate `collection` field, so anything that round-trips an ID keeps
+working. Only human-readable CLI output prints the `<collection>:<page-id>`
+form, and only when more than one collection is mounted.
+
+**MCP and HTTP.** `mk_search`/`mk_show`/`mk_list` take an optional
+`collection` argument, and their descriptions name the mounted collections
+so a client discovers the set from the tool list it already fetches.
+`POST /search`, `/show` and `/list` take an optional `"collection"` field,
+and `GET /collections` (auth-gated) enumerates what's mounted.
+
+**A single collection behaves exactly as before.** Every configuration that
+predates collections — including a plain `content:` block, `--kb-dir`, and
+the embedded fallback — resolves to one collection named `default`, with
+unqualified IDs everywhere and nothing to disambiguate.
+
+**Not yet collection-aware:** `mk ingest`, the ingestion source registry,
+and shell completion read the **first** configured collection. See
+[docs/design/multi-collection.md](docs/design/multi-collection.md).
+
 ### Provenance: `mk version`
 
 `mk version` reports which content is actually being served via the
@@ -364,6 +515,31 @@ for exactly what the digest does and does not guarantee.
 | `embedded` | No runtime content configured — the fallback. |
 | `disk:<path>` | `--kb-dir`/`MEERKAT_KB_DIR`, or a `type: local` `content-source.yaml` source. Unverified — meerkat trusts the directory as-is. |
 | `url:<url>@<digest12>` | A `type: url` `content-source.yaml` source — `<digest12>` is the first 12 hex characters of the verified `sha256` (e.g. `url:https://example.com/kb/v1.2.3.tar.gz@e3b0c44298fc`). |
+| `gcs://<bucket>/<object>@<gen>` | A `type: gcs` bundle source — `<gen>` is the object generation actually fetched. |
+| `gcs://<bucket>/<prefix>*@<fp>` | A `type: gcs` prefix source — `<fp>` fingerprints the listing's `(name, generation)` pairs. |
+| `collections:<n>` | Several collections are mounted; each one's own provenance is reported in the `collections` array (see below). |
+
+Like `url:`, the token after `@` on a `gcs:` line is a *checked* property of
+what's being served — the conditional read cannot return another generation
+— not a label, unlike `disk:`.
+
+With several collections mounted, `mk version --json` also carries a
+`collections` array (`name`, `type`, `source`) in configuration order, and
+the plain-text output itemises them, so a multi-collection deployment
+reports everything it serves:
+
+```json
+{
+  "kb_source": "collections:2",
+  "collections": [
+    {"name": "runbooks", "type": "local", "source": "disk:/srv/runbooks-kb"},
+    {"name": "architecture", "type": "gcs", "source": "gcs://my-org-knowledge/bundles/architecture-v3.tar.gz@1748112233445566"}
+  ]
+}
+```
+
+A single-collection deployment reports one entry named `default`, with
+`kb_source` unchanged from what it always was.
 
 `kb_commit` is unchanged by any of this — it always names the build-time
 embedded content's commit, never a runtime directory's or archive's. See
@@ -523,6 +699,9 @@ cmd/meerkat/main.go         entrypoint
 internal/
   kb/         Page + Frontmatter, //go:embed all:content
   kbdir/      resolves --kb-dir/MEERKAT_KB_DIR, adapts it onto kb/sources
+  contentsource/  content-source.yaml: build-time sync + runtime resolution
+                  (local / git / submodule / url / gcs), collections
+  collections/    named collections + search/show/list routing across them
   search/     Bleve in-memory BM25 index
   sources/    embeds sources.yaml + prompts + templates
   ingest/     Plan(opts) + Run(ctx, tasks) — planner + executor
@@ -537,7 +716,9 @@ docs/
   SECURITY.md threat model + scanner suite + fix workflows
 content-source.yaml   optional, not shipped; tells `make sync` (build) or
                       meerkat itself (runtime) where KB content lives
-                      (local path / git repo / submodule / url archive)
+                      (local path / git repo / submodule / url archive /
+                      GCS object or prefix), as one source or several
+                      named collections
 ```
 
 ## See also
@@ -551,6 +732,9 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
   its frontmatter
 - [docs/design/content-sources.md](docs/design/content-sources.md) — how
   `content-source.yaml` maps a content repo onto the embed dirs
+- [docs/design/multi-collection.md](docs/design/multi-collection.md) —
+  mounting several named collections at once, the routing/disambiguation
+  rules, and the GCS backend's generation-keyed caching
 - [docs/design/ingestion-pipeline.md](docs/design/ingestion-pipeline.md) —
   how `mk ingest` populates placeholder pages from that content repo
 - Your own content repo holds the KB pages and `ingestion/sources.yaml` —

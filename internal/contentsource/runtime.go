@@ -1,6 +1,7 @@
 package contentsource
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -100,46 +101,126 @@ type RuntimeContent struct {
 // only: they need git and a working tree, neither of which a shipped
 // runtime binary can assume.
 func ResolveRuntime(contentSourceFlag string) (RuntimeContent, error) {
-	explicit := ResolveFlag(contentSourceFlag)
-	path, err := LocateRuntime(explicit)
+	cols, err := ResolveRuntimeCollections(context.Background(), contentSourceFlag)
 	if err != nil {
 		return RuntimeContent{}, err
 	}
+	if len(cols) != 1 {
+		return RuntimeContent{}, fmt.Errorf(
+			"content-source.yaml declares %d collections — this deployment surface serves a single content source; "+
+				"use the collection-aware entry point (ResolveRuntimeCollections) or a single-source config", len(cols))
+	}
+	return RuntimeContent{Dir: cols[0].Dir, Source: cols[0].Source}, nil
+}
+
+// ResolvedCollection is one runtime-resolved collection: the name it is
+// mounted under, the local directory serving it (empty means "serve the
+// embedded build"), the source it came from, and the provenance string
+// `mk version` reports for it.
+type ResolvedCollection struct {
+	Name       string
+	Dir        string
+	Source     Source
+	Provenance string
+}
+
+// ResolveRuntimeCollections is ResolveRuntime generalised to a
+// `collections:` config. It follows the identical discovery order (see
+// ResolveRuntime) and returns, in configuration order:
+//
+//   - a single ResolvedCollection named DefaultCollectionName for a
+//     single-source (`content:`) config, for no config at all, and for
+//     type: none — i.e. every configuration that existed before
+//     collections did resolves to exactly one collection, and the
+//     surfaces above treat "one collection" exactly as they did before
+//     collections existed;
+//   - one ResolvedCollection per entry of a `collections:` config,
+//     each resolved by the same per-type rules.
+//
+// ctx bounds the network work (a type: gcs metadata lookup and fetch);
+// type: url's fetch predates it and uses its own client timeout.
+func ResolveRuntimeCollections(ctx context.Context, contentSourceFlag string) ([]ResolvedCollection, error) {
+	explicit := ResolveFlag(contentSourceFlag)
+	path, err := LocateRuntime(explicit)
+	if err != nil {
+		return nil, err
+	}
 	if path == "" {
-		return RuntimeContent{}, nil
+		return []ResolvedCollection{embeddedCollection()}, nil
 	}
 	cfg, err := LoadFile(path)
 	if err != nil {
-		return RuntimeContent{}, fmt.Errorf("content-source.yaml (%s): %w", path, err)
+		return nil, fmt.Errorf("content-source.yaml (%s): %w", path, err)
 	}
-	src := cfg.Content
+	if len(cfg.Collections) == 0 {
+		rc, rerr := resolveSource(ctx, cfg.Content, path)
+		if rerr != nil {
+			return nil, rerr
+		}
+		rc.Name = DefaultCollectionName
+		return []ResolvedCollection{rc}, nil
+	}
+	out := make([]ResolvedCollection, 0, len(cfg.Collections))
+	for _, c := range cfg.Collections {
+		rc, rerr := resolveSource(ctx, c.Source, path)
+		if rerr != nil {
+			return nil, fmt.Errorf("collection %q: %w", c.Name, rerr)
+		}
+		rc.Name = c.Name
+		out = append(out, rc)
+	}
+	return out, nil
+}
+
+// embeddedCollection is the single collection every unconfigured
+// meerkat serves: the content embedded at build time.
+func embeddedCollection() ResolvedCollection {
+	return ResolvedCollection{Name: DefaultCollectionName, Provenance: SourceEmbedded}
+}
+
+// SourceEmbedded is the provenance value for the build-time embedded
+// content. It mirrors internal/kbdir.SourceEmbedded, which this package
+// cannot import (kbdir imports this one).
+const SourceEmbedded = "embedded"
+
+// resolveSource resolves one source — the `content:` block or one
+// `collections:` entry — to a local directory plus its provenance.
+// cfgPath is the content-source.yaml the source was read from; a
+// relative type: local path resolves against its directory.
+func resolveSource(ctx context.Context, src Source, cfgPath string) (ResolvedCollection, error) {
 	switch src.Type {
 	case TypeNone:
-		return RuntimeContent{}, nil
+		return embeddedCollection(), nil
 	case TypeLocal:
 		dir := src.Path
 		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(filepath.Dir(path), dir)
+			dir = filepath.Join(filepath.Dir(cfgPath), dir)
 		}
-		return RuntimeContent{Dir: dir, Source: src}, nil
+		return ResolvedCollection{Dir: dir, Source: src, Provenance: "disk:" + dir}, nil
 	case TypeURL:
 		dir, ferr := FetchURL(src)
 		if ferr != nil {
-			return RuntimeContent{}, fmt.Errorf("content-source.yaml (%s): %w", path, ferr)
+			return ResolvedCollection{}, fmt.Errorf("content-source.yaml (%s): %w", cfgPath, ferr)
 		}
-		return RuntimeContent{Dir: dir, Source: src}, nil
+		return ResolvedCollection{Dir: dir, Source: src, Provenance: URLProvenance(src)}, nil
+	case TypeGCS:
+		dir, version, ferr := FetchGCS(ctx, src)
+		if ferr != nil {
+			return ResolvedCollection{}, fmt.Errorf("content-source.yaml (%s): %w", cfgPath, ferr)
+		}
+		return ResolvedCollection{Dir: dir, Source: src, Provenance: GCSProvenance(src, version)}, nil
 	case TypeGit, TypeSubmodule:
-		return RuntimeContent{}, fmt.Errorf(
+		return ResolvedCollection{}, fmt.Errorf(
 			"content-source.yaml (%s): type %q is build-time only (it needs git and a working tree) — "+
 				"not supported at runtime; use `make sync` to embed it at build time instead, or switch "+
-				"to type: url or type: local for a runtime-resolved source", path, src.Type)
+				"to type: url, type: gcs or type: local for a runtime-resolved source", cfgPath, src.Type)
 	default:
 		// Unreachable: LoadFile's Validate call already rejects any type
-		// not in {none, local, git, submodule, url}. Kept as an explicit
-		// safety net — an unrecognised type must never silently fall
-		// through to the embedded-content default — in case that
+		// not in {none, local, git, submodule, url, gcs}. Kept as an
+		// explicit safety net — an unrecognised type must never silently
+		// fall through to the embedded-content default — in case that
 		// invariant is ever loosened.
-		return RuntimeContent{}, fmt.Errorf("content-source.yaml (%s): unsupported type %q", path, src.Type)
+		return ResolvedCollection{}, fmt.Errorf("content-source.yaml (%s): unsupported type %q", cfgPath, src.Type)
 	}
 }
 

@@ -5,12 +5,18 @@
 // The endpoint surface mirrors the MCP tool set 1:1 so that an
 // OpenWebUI tool definition matches what an MCP client sees:
 //
-//	POST /search        body: {"query":"...", "limit":10}        -> [{id,title,score,snippet,category,status}]
-//	POST /show          body: {"id":"concepts/Rate-Limiting"} -> {id,title,body,front,trust_tier,stale}
-//	POST /list          body: {"prefix":"systems/", "category":"systems", "status":"placeholder", "type":"BigQuery Table"} -> [{id,title,category,status,owner,type,source}]
+//	POST /search        body: {"query":"...", "limit":10, "collection":"..."} -> [{id,collection,title,score,snippet,category,status}]
+//	POST /show          body: {"id":"concepts/Rate-Limiting", "collection":"..."} -> {id,collection,title,body,front,trust_tier,stale}
+//	POST /list          body: {"prefix":"systems/", "category":"systems", "status":"placeholder", "type":"BigQuery Table", "collection":"..."} -> [{id,collection,title,category,status,owner,type,source}]
+//	GET  /collections   the mounted collections
 //	GET  /openapi.json  OpenAPI 3.1 schema
 //	GET  /healthz       liveness probe (always 200)
 //	GET  /              human-readable banner
+//
+// "collection" is optional everywhere: omitted, /search and /list span
+// every mounted collection and /show resolves across them (an ID present
+// in several is a 409, naming the qualified IDs to choose from — an ID
+// may be written "<collection>:<page-id>").
 //
 // Authentication: a single static bearer token is required on all
 // endpoints except /healthz and /openapi.json. The token is supplied
@@ -29,7 +35,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kb"
+	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/search"
 )
 
@@ -59,21 +67,27 @@ type Config struct {
 	// Version is the meerkat version surfaced in /openapi.json and
 	// the root banner. Empty falls back to "dev".
 	Version string
+	// Collections is the set of knowledge-base collections this server
+	// serves. Nil falls back to a single collection over the
+	// process-global KB filesystem (internal/collections.Global), which
+	// is what every caller that predates collections effectively asked
+	// for.
+	Collections *collections.Registry
 }
 
-// Server bundles the HTTP server and its in-memory search index so
-// callers can manage lifecycles together.
+// Server bundles the HTTP server and its collections (each with its own
+// in-memory search index) so callers can manage lifecycles together.
 type Server struct {
 	cfg     Config
 	mux     *http.ServeMux
 	handler http.Handler // authGate(mux) — see routes/Handler
 	srv     *http.Server
-	idx     *search.Index
+	reg     *collections.Registry
 }
 
-// New builds a Server with the search index already populated.
-// Returns an error if APIKey is empty. Caller must call Close to
-// release the index when done.
+// New builds a Server with every collection's search index already
+// populated. Returns an error if APIKey is empty. Caller must call
+// Close to release the indexes when done.
 func New(cfg Config) (*Server, error) {
 	if cfg.APIKey == "" {
 		return nil, errors.New("APIKey is required (set --api-key or MEERKAT_API_KEY)")
@@ -94,12 +108,20 @@ func New(cfg Config) (*Server, error) {
 		cfg.Version = "dev"
 	}
 
-	idx, err := search.New()
-	if err != nil {
-		return nil, fmt.Errorf("build search index: %w", err)
+	reg := cfg.Collections
+	if reg == nil {
+		reg = collections.Global(kbdir.SourceEmbedded)
+	}
+	// Index every collection now rather than on first query: a server
+	// should pay that cost at startup and refuse to start if a
+	// collection can't be indexed, not surface it as a 500 later.
+	for _, c := range reg.All() {
+		if _, err := c.Index(); err != nil {
+			return nil, fmt.Errorf("build search index for collection %q: %w", c.Name, err)
+		}
 	}
 
-	s := &Server{cfg: cfg, idx: idx, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, reg: reg, mux: http.NewServeMux()}
 	s.routes()
 	s.srv = &http.Server{
 		Addr:         cfg.Addr,
@@ -142,13 +164,14 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-// Close releases the search index. Safe to call multiple times.
+// Close releases every collection's search index. Safe to call
+// multiple times.
 func (s *Server) Close() error {
-	if s.idx == nil {
+	if s.reg == nil {
 		return nil
 	}
-	err := s.idx.Close()
-	s.idx = nil
+	err := s.reg.Close()
+	s.reg = nil
 	return err
 }
 
@@ -177,6 +200,10 @@ func (s *Server) routeTable() []route {
 		{pattern: "POST /search", handler: s.handleSearch},
 		{pattern: "POST /show", handler: s.handleShow},
 		{pattern: "POST /list", handler: s.handleList},
+		// Auth-gated like the data endpoints: which collections a
+		// deployment mounts (and where their content comes from) is
+		// itself information an anonymous caller has no business having.
+		{pattern: "GET /collections", handler: s.handleCollections},
 		// Public endpoints — needed by OpenWebUI / health probes.
 		{pattern: "GET /openapi.json", public: true, handler: s.handleOpenAPI},
 		{pattern: "GET /healthz", public: true, handler: s.handleHealthz},
@@ -239,41 +266,64 @@ func (s *Server) authGate(public map[string]bool) http.Handler {
 type searchRequest struct {
 	Query string `json:"query"`
 	Limit int    `json:"limit,omitempty"`
+	// Collection restricts the query to one mounted collection. Empty
+	// (the default, and the only possibility before collections existed)
+	// queries every one.
+	Collection string `json:"collection,omitempty"`
 }
 
+// searchHit carries the page's own unqualified ID plus the collection
+// it came from — the collection is never folded into the ID, so a
+// client that round-trips an id is unaffected by how many collections
+// a deployment mounts.
 type searchHit struct {
-	ID       string  `json:"id"`
-	Title    string  `json:"title"`
-	Category string  `json:"category"`
-	Status   string  `json:"status"`
-	Score    float64 `json:"score"`
-	Snippet  string  `json:"snippet"`
+	ID         string  `json:"id"`
+	Collection string  `json:"collection"`
+	Title      string  `json:"title"`
+	Category   string  `json:"category"`
+	Status     string  `json:"status"`
+	Score      float64 `json:"score"`
+	Snippet    string  `json:"snippet"`
 }
 
 type showRequest struct {
 	ID string `json:"id"`
+	// Collection restricts the lookup to one mounted collection. ID may
+	// also be written "<collection>:<page-id>"; both together must agree.
+	Collection string `json:"collection,omitempty"`
+}
+
+// collectionEntry is one item of GET /collections.
+type collectionEntry struct {
+	Name   string `json:"name"`
+	Type   string `json:"type,omitempty"`
+	Source string `json:"source"`
+	Pages  int    `json:"pages"`
 }
 
 // showResponse is the POST /show wire shape: the page's stored fields
 // (embedded, so id/path/title/body/front are top-level exactly as
-// before this change) plus two OKF-derived advisory signals that are
-// computed rather than stored — see kb.Frontmatter.TrustTier / IsStale.
-// Field names and JSON keys are deliberately identical to showResult
-// (internal/cli/show.go) and showPageOutput (internal/mcp/server.go)
-// so all three surfaces agree on what trust_tier/stale are called.
+// before this change) plus the collection it came from and two
+// OKF-derived advisory signals that are computed rather than stored —
+// see kb.Frontmatter.TrustTier / IsStale. Field names and JSON keys are
+// deliberately identical to showResult (internal/cli/show.go) and
+// showPageOutput (internal/mcp/server.go) so all three surfaces agree
+// on what collection/trust_tier/stale are called.
 type showResponse struct {
 	kb.Page
-	TrustTier string `json:"trust_tier"`
-	Stale     bool   `json:"stale"`
+	Collection string `json:"collection"`
+	TrustTier  string `json:"trust_tier"`
+	Stale      bool   `json:"stale"`
 }
 
-// newShowResponse builds the POST /show payload for page, mirroring
-// internal/cli/show.go's newShowResult.
-func newShowResponse(page kb.Page) showResponse {
+// newShowResponse builds the POST /show payload for a page reference,
+// mirroring internal/cli/show.go's newShowResult.
+func newShowResponse(ref collections.PageRef) showResponse {
 	return showResponse{
-		Page:      page,
-		TrustTier: page.Front.TrustTier(),
-		Stale:     page.Front.IsStale(time.Now().UTC()),
+		Page:       ref.Page,
+		Collection: ref.Collection,
+		TrustTier:  ref.Page.Front.TrustTier(),
+		Stale:      ref.Page.Front.IsStale(time.Now().UTC()),
 	}
 }
 
@@ -286,14 +336,18 @@ type listRequest struct {
 	// SPEC.md §4.1), matching the --type flag (internal/cli/list.go)
 	// and mk_list's "type" argument (internal/mcp/server.go).
 	Type string `json:"type,omitempty"`
+	// Collection restricts the listing to one mounted collection. Empty
+	// lists every one, in configuration order.
+	Collection string `json:"collection,omitempty"`
 }
 
 type listEntry struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Category string `json:"category"`
-	Status   string `json:"status"`
-	Owner    string `json:"owner,omitempty"`
+	ID         string `json:"id"`
+	Collection string `json:"collection"`
+	Title      string `json:"title"`
+	Category   string `json:"category"`
+	Status     string `json:"status"`
+	Owner      string `json:"owner,omitempty"`
 	// Type is frontmatter 'type' (OKF's concept-kind field), matching
 	// the "type" key `mk list --json` and mk_list already emit.
 	Type   string    `json:"type,omitempty"`
@@ -325,12 +379,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.QueryTimeout)
 	defer cancel()
 
-	results, err := s.idx.QueryContext(ctx, req.Query, req.Limit)
+	results, err := s.reg.Search(ctx, req.Collection, req.Query, req.Limit)
 	if err != nil {
 		switch {
-		case errors.Is(err, search.ErrInvalidQuery):
-			// A rejected input (oversized / pathologically nested query),
-			// not an internal failure — see search.validateQuery.
+		case errors.Is(err, search.ErrInvalidQuery), errors.Is(err, collections.ErrUnknownCollection):
+			// A rejected input (oversized / pathologically nested query,
+			// or a collection that isn't mounted), not an internal
+			// failure — see search.validateQuery / Registry.Get.
 			writeError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, context.DeadlineExceeded):
 			writeError(w, http.StatusGatewayTimeout,
@@ -343,12 +398,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	out := make([]searchHit, len(results))
 	for i, r := range results {
 		out[i] = searchHit{
-			ID:       r.Page.ID,
-			Title:    r.Page.Title,
-			Category: r.Page.Front.Category,
-			Status:   r.Page.Front.Status,
-			Score:    r.Score,
-			Snippet:  oneLine(r.Snippet),
+			ID:         r.Page.ID,
+			Collection: r.Collection,
+			Title:      r.Page.Title,
+			Category:   r.Page.Front.Category,
+			Status:     r.Page.Front.Status,
+			Score:      r.Score,
+			Snippet:    oneLine(r.Snippet),
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -364,17 +420,25 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
-	page, err := kb.Load(req.ID)
+	ref, err := s.reg.Show(req.Collection, req.ID)
 	if err != nil {
-		if errors.Is(err, kb.ErrNotFound) {
+		switch {
+		case errors.Is(err, kb.ErrNotFound):
 			writeError(w, http.StatusNotFound,
 				fmt.Sprintf("page %q not found - try POST /list", req.ID))
-			return
+		case errors.Is(err, collections.ErrUnknownCollection):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, collections.ErrAmbiguous):
+			// 409 Conflict, not 404 or 500: the page exists, more than
+			// once, and the error text names the qualified IDs the client
+			// should re-request with.
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, newShowResponse(page))
+	writeJSON(w, http.StatusOK, newShowResponse(ref))
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -385,43 +449,74 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	pages, err := kb.List()
+	refs, err := s.reg.Pages(req.Collection)
 	if err != nil {
+		if errors.Is(err, collections.ErrUnknownCollection) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if f := kb.ByPrefix(req.Prefix); f != nil {
-		pages = kb.Filter(pages, f)
+	keep := func(f kb.FilterFunc) {
+		if f == nil {
+			return
+		}
+		out := refs[:0:0]
+		for _, ref := range refs {
+			if f(ref.Page) {
+				out = append(out, ref)
+			}
+		}
+		refs = out
 	}
+	keep(kb.ByPrefix(req.Prefix))
 	if req.Category != "" {
-		pages = kb.Filter(pages, kb.ByCategory(req.Category))
+		keep(kb.ByCategory(req.Category))
 	}
 	if req.Status != "" {
-		pages = kb.Filter(pages, kb.ByStatus(req.Status))
+		keep(kb.ByStatus(req.Status))
 	}
 	if req.Owner != "" {
-		pages = kb.Filter(pages, kb.ByOwner(req.Owner))
+		keep(kb.ByOwner(req.Owner))
 	}
 	if req.Type != "" {
-		pages = kb.Filter(pages, kb.ByType(req.Type))
+		keep(kb.ByType(req.Type))
 	}
-	out := make([]listEntry, 0, len(pages))
-	for _, p := range pages {
+	out := make([]listEntry, 0, len(refs))
+	for _, ref := range refs {
+		p := ref.Page
 		out = append(out, listEntry{
-			ID:       p.ID,
-			Title:    p.Title,
-			Category: p.Front.Category,
-			Status:   p.Front.Status,
-			Owner:    p.Front.Owner,
-			Type:     p.Front.Type,
-			Source:   p.Front.Source,
+			ID:         p.ID,
+			Collection: ref.Collection,
+			Title:      p.Title,
+			Category:   p.Front.Category,
+			Status:     p.Front.Status,
+			Owner:      p.Front.Owner,
+			Type:       p.Front.Type,
+			Source:     p.Front.Source,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleCollections enumerates what this server mounts — the HTTP
+// counterpart of `mk list --collections`, and the discovery surface for
+// the "collection" field every other endpoint accepts.
+func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
+	out := make([]collectionEntry, 0, s.reg.Len())
+	for _, c := range s.reg.All() {
+		e := collectionEntry{Name: c.Name, Type: c.Source.Type, Source: c.Provenance}
+		if pages, err := c.Pages(); err == nil {
+			e.Pages = len(pages)
+		}
+		out = append(out, e)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, openAPISchema(s.cfg.Version))
+	writeJSON(w, http.StatusOK, openAPISchema(s.cfg.Version, s.reg.Names()))
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -439,6 +534,11 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "  POST /search   body: {\"query\": \"...\", \"limit\": 10}")
 	fmt.Fprintln(w, "  POST /show     body: {\"id\": \"concepts/Rate-Limiting\"}")
 	fmt.Fprintln(w, "  POST /list     body: {\"prefix\": \"systems/\", \"category\": \"...\", \"status\": \"...\"}")
+	fmt.Fprintln(w, "  GET  /collections")
+	if !s.reg.Single() {
+		fmt.Fprintf(w, "\nMounted collections (pass \"collection\" to narrow, omit to span all):\n  %s\n",
+			strings.Join(s.reg.Names(), ", "))
+	}
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Public endpoints (no auth):")
 	fmt.Fprintln(w, "  GET  /openapi.json")

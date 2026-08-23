@@ -8,10 +8,17 @@
 #   - <user config dir>/meerkat/, the working directory, or
 #     --content-source/MEERKAT_CONTENT_SOURCE, read by the meerkat/mk
 #     binary itself at RUNTIME (see the README's resolution order): serves
-#     the source directly, no rebuild. type: none | local | url.
+#     the source directly, no rebuild. type: none | local | url | gcs.
 # git/submodule need git and a working tree, so they're build-time only.
-# url needs no build step, so it's runtime-only (`make sync` won't fetch
-# it). See docs/design/content-sources.md.
+# url and gcs need no build step, so they're runtime-only (`make sync`
+# won't fetch them). See docs/design/content-sources.md and
+# docs/design/multi-collection.md.
+#
+# The file has two shapes, and exactly one of them:
+#   content:      one source (below) — the original schema, unchanged.
+#   collections:  several named sources, all mounted at once (bottom of
+#                 this file). Each entry uses the same keys as `content:`.
+# Setting both is an error, not a merge.
 #
 # Absent file, or type: none -> build (or serve, at runtime) with the
 # committed empty placeholders (the open-source default; the public repo
@@ -25,10 +32,11 @@
 # URL / SSH spec, or rely on your normal git credential configuration
 # (credential helper, SSH agent, etc.) for private access. `url` needs none
 # either — an unauthenticated HTTPS GET, verified by the required sha256
-# instead.
+# instead. `gcs` uses Application Default Credentials (see below): there is
+# no key file to configure, deliberately.
 
 content:
-  # type: none | local | git | submodule | url
+  # type: none | local | git | submodule | url | gcs
   type: local
 
   # --- type: local (build time + runtime) ------------------------------------
@@ -57,6 +65,46 @@ content:
   # url: https://example.com/kb/v1.2.3.tar.gz
   # sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
+  # --- type: gcs (runtime only) -----------------------------------------------
+  # Loads content from a Google Cloud Storage bucket in one of two modes:
+  # a single .tar.gz object, or an object prefix served as a directory
+  # tree. Exactly one of object: / prefix:.
+  #
+  # bucket: my-org-knowledge          # bucket NAME (not a gs:// URL, not a path)
+  #
+  #   # (a) bundle mode — one .tar.gz, the GCS analogue of type: url:
+  # object: bundles/kb-v1.2.3.tar.gz
+  # generation: 1748112233445566      # OPTIONAL: pin one exact object generation.
+  #                                   # Set it and the current generation is never
+  #                                   # consulted — a later overwrite cannot change
+  #                                   # what this deployment serves. Leave it out and
+  #                                   # the object's current generation is resolved
+  #                                   # once at startup.
+  # sha256: "..."                     # OPTIONAL for gcs (the generation already pins
+  #                                   # the bytes); when set it is verified before
+  #                                   # anything is extracted, exactly as for type: url.
+  #
+  #   # (b) prefix mode — every object under a prefix, as a directory tree:
+  # prefix: kb/live/                  # the prefix is stripped; kb/live/wiki/x.md
+  #                                   # is served as wiki/x.md
+  #
+  # Caching: bundle mode caches at
+  #   <user cache dir>/meerkat/content/gcs/<hash(bucket,object)>/<generation>/
+  # and prefix mode at .../<hash(bucket,prefix)>/<listing-fingerprint>/,
+  # where the fingerprint covers every listed object's (name, generation).
+  # Either way the cache key names immutable content: a restart on the same
+  # generation re-uses the cache, and any write under the prefix (add,
+  # overwrite, delete) produces a new key. Objects are fetched with a
+  # conditional read (ifGenerationMatch), so the bytes served can only ever
+  # be the generation the cache entry is named after.
+  #
+  # Credentials: Application Default Credentials only — Workload Identity
+  # Federation, a GKE/Cloud Run/GCE service account, an impersonated
+  # principal, or `gcloud auth application-default login` for a developer.
+  # There is deliberately NO key-file field in this schema: meerkat never
+  # reads or accepts a static service-account key. Grant the principal
+  # storage.objects.get (and storage.objects.list for prefix mode).
+
   # Layout: where each artifact lives WITHIN the resolved source.
   # Defaults shown; override only if your content repo differs.
   layout:
@@ -64,3 +112,49 @@ content:
     sources:   ingestion/sources.yaml # source registry  -> internal/sources/etc/sources.yaml
     prompts:   ingestion/prompts     # per-source prompts -> internal/sources/etc/prompts/
     templates: templates             # page templates    -> internal/sources/etc/templates/
+
+# --- collections: several named sources at once (runtime) --------------------
+#
+# Instead of `content:` above, declare a list of named collections. Each
+# entry takes exactly the keys `content:` takes (type/path/url/bucket/...
+# plus its own layout:), with a `name:` on top. Backends are free to
+# differ per collection.
+#
+# ORDER MATTERS. It is the order collections are listed in, searched in,
+# and — for a page ID present in more than one — disambiguated in.
+#
+# Names must match [A-Za-z0-9][A-Za-z0-9_-]* (no colon: a name is also the
+# "<collection>:" prefix of a qualified page ID).
+#
+# Then:
+#   mk list --collections                  what's mounted
+#   mk search "term"                       every collection, merged by score
+#   mk search "term" --collection runbooks just one
+#   mk show runbooks:incidents/paging      a page ID qualified by collection
+#   mk show incidents/paging               tried in order; ambiguous is an error
+#
+# The FIRST collection additionally backs the surfaces that aren't
+# collection-aware yet: `mk ingest`, the ingestion source registry, and
+# shell completion.
+#
+# collections:
+#   - name: runbooks
+#     type: local
+#     path: ../runbooks-kb
+#
+#   - name: architecture
+#     type: gcs
+#     bucket: my-org-knowledge
+#     object: bundles/architecture-v3.tar.gz
+#
+#   - name: team-notes
+#     type: gcs
+#     bucket: my-org-knowledge
+#     prefix: notes/live/
+#
+#   - name: vendor-docs
+#     type: url
+#     url: https://example.com/kb/vendor-v2.tar.gz
+#     sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+#     layout:
+#       wiki: docs

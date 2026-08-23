@@ -353,9 +353,17 @@ func FS() fs.FS { return loadFS() }
 // than an error, mirroring sources.All's treatment of a missing
 // sources.yaml: a partially-populated runtime directory should serve
 // what it has, not hard-fail.
-func List() ([]Page, error) {
+func List() ([]Page, error) { return ListFS(loadFS()) }
+
+// ListFS is List against an explicit filesystem instead of the
+// process-wide one UseFS sets. It exists for multi-collection serving
+// (internal/collections), where several content roots are mounted at
+// once and there is no single "current" filesystem to be redirected to:
+// each collection holds its own fs.FS and reads through it directly.
+// List is ListFS(the UseFS filesystem).
+func ListFS(fsys fs.FS) ([]Page, error) {
 	var pages []Page
-	err := fs.WalkDir(loadFS(), "content", func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(fsys, "content", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -377,7 +385,7 @@ func List() ([]Page, error) {
 		if isExcluded(p) {
 			return nil
 		}
-		pg, err := loadByPath(p)
+		pg, err := loadByPath(fsys, p)
 		if err != nil {
 			if errors.Is(err, errReservedArtifact) {
 				// An OKF navigation artifact (see isReservedArtifact) —
@@ -410,7 +418,12 @@ func List() ([]Page, error) {
 // Load returns the page for the given ID. ID is the slash-separated
 // path from the wiki root without the .md suffix. Both leading slash
 // and the .md suffix are tolerated.
-func Load(id string) (Page, error) {
+func Load(id string) (Page, error) { return LoadFS(loadFS(), id) }
+
+// LoadFS is Load against an explicit filesystem instead of the
+// process-wide one UseFS sets — the Load counterpart of ListFS, and
+// there for the same reason (see ListFS).
+func LoadFS(fsys fs.FS, id string) (Page, error) {
 	id = normaliseID(id)
 	p := path.Join("content", id+".md")
 	// path.Join cleans "..", so an id of "../etc/prompts/x" collapses to
@@ -424,7 +437,7 @@ func Load(id string) (Page, error) {
 	if isExcluded(p) {
 		return Page{}, ErrNotFound
 	}
-	page, err := loadByPath(p)
+	page, err := loadByPath(fsys, p)
 	if errors.Is(err, errReservedArtifact) {
 		// A reserved OKF navigation artifact (see isReservedArtifact) is
 		// indistinguishable from a missing page to a direct Load caller.
@@ -526,8 +539,8 @@ func isReservedArtifact(p string, hasFrontmatter bool) bool {
 // from a missing page to a direct caller.
 var errReservedArtifact = errors.New("reserved OKF navigation artifact")
 
-func loadByPath(p string) (Page, error) {
-	body, err := readCapped(loadFS(), p)
+func loadByPath(fsys fs.FS, p string) (Page, error) {
+	body, err := readCapped(fsys, p)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return Page{}, ErrNotFound

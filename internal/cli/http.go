@@ -37,8 +37,12 @@ func newHTTPServeCmd() *cobra.Command {
   POST /search        full-text search
   POST /show          retrieve one page (body + frontmatter)
   POST /list          enumerate pages with filters
+  GET  /collections   enumerate the mounted collections
   GET  /openapi.json  schema (no auth)
   GET  /healthz       liveness (no auth)
+
+/search, /show and /list take an optional "collection" field; omitted,
+they span every mounted collection.
 
 Authentication: all data endpoints require an Authorization: Bearer
 header carrying the configured API key. The key is supplied via
@@ -63,9 +67,10 @@ Server.`,
 			}
 
 			cfg := mhttp.Config{
-				Addr:    mhttp.ResolveListenAddr(host, port),
-				APIKey:  apiKey,
-				Version: version,
+				Addr:        mhttp.ResolveListenAddr(host, port),
+				APIKey:      apiKey,
+				Version:     version,
+				Collections: registry(),
 			}
 			srv, err := mhttp.New(cfg)
 			if err != nil {
