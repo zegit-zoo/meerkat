@@ -73,6 +73,30 @@ func TestCollectionsEndpoint_EnumeratesMountedCollections(t *testing.T) {
 	}
 }
 
+// TestCollectionsEndpoint_TypeDefaultsToNoneWithoutASource proves GET
+// /collections reports "type":"none" for a collection with no
+// content-source.yaml entry behind it (here, a FromPages collection, the
+// same shape a --kb-dir or the embedded build produces) rather than
+// omitting the field — the same default `mk list --collections` and
+// mk_list_collections use, so the three surfaces agree on what an
+// absent type means.
+func TestCollectionsEndpoint_TypeDefaultsToNoneWithoutASource(t *testing.T) {
+	srv := newMultiCollectionServer(t)
+	rec := getPath(t, srv, "/collections")
+	if rec.Code != nethttp.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var out []collectionEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, rec.Body.String())
+	}
+	for _, e := range out {
+		if e.Type != "none" {
+			t.Errorf("collection %q type = %q, want %q", e.Name, e.Type, "none")
+		}
+	}
+}
+
 // TestCollectionsEndpoint_RequiresAuth: which collections a deployment
 // mounts is not public information.
 func TestCollectionsEndpoint_RequiresAuth(t *testing.T) {

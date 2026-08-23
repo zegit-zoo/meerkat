@@ -126,6 +126,18 @@ func (cs CapabilitySet) List() []Capability {
 	return out
 }
 
+// Strings renders List as plain strings, in the same order — the
+// JSON-ready form a collection-discovery surface (mk_list_collections)
+// wants for its "capabilities" field.
+func (cs CapabilitySet) Strings() []string {
+	list := cs.List()
+	out := make([]string, len(list))
+	for i, c := range list {
+		out[i] = string(c)
+	}
+	return out
+}
+
 // Identity is a caller, as established by an authenticated token. It is
 // the input to policy evaluation and nothing else: it carries no
 // decisions, only verified assertions about who is asking.

@@ -293,10 +293,17 @@ type showRequest struct {
 	Collection string `json:"collection,omitempty"`
 }
 
-// collectionEntry is one item of GET /collections.
+// collectionEntry is one item of GET /collections: name, backend source
+// type, provenance and page count — the same field names `mk list
+// --collections` (internal/cli/list.go) and the mk_list_collections MCP
+// tool (internal/mcp/server.go) report, so the three surfaces agree on
+// what a collection's "type"/"source"/"pages" mean. Type is never empty:
+// a collection with no content-source.yaml entry behind it (the embedded
+// build, or a --kb-dir directory) reports contentsource.TypeNone via
+// Collection.Type, exactly as the other two surfaces do.
 type collectionEntry struct {
 	Name   string `json:"name"`
-	Type   string `json:"type,omitempty"`
+	Type   string `json:"type"`
 	Source string `json:"source"`
 	Pages  int    `json:"pages"`
 }
@@ -506,7 +513,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
 	out := make([]collectionEntry, 0, s.reg.Len())
 	for _, c := range s.reg.All() {
-		e := collectionEntry{Name: c.Name, Type: c.Source.Type, Source: c.Provenance}
+		e := collectionEntry{Name: c.Name, Type: c.Type(), Source: c.Provenance}
 		if pages, err := c.Pages(); err == nil {
 			e.Pages = len(pages)
 		}
