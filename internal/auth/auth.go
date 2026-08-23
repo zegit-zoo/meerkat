@@ -1,6 +1,10 @@
 // Package auth defines the shared credential contract for reaching git
-// hosts by borrowing the OAuth token cached by the user's host CLI
-// (gh). It never mints or stores its own tokens.
+// hosts by borrowing a token from somewhere the user (or their
+// environment) already put one: primarily the OAuth token cached by
+// the host CLI (gh), with the OS-native credential store (keyring) as
+// a fallback for environments without a working gh CLI. It never
+// mints its own tokens, and it only ever reads from the keyring — it
+// never writes one there itself.
 //
 // This package is intentionally self-contained and dependency-light so
 // it can later be lifted into a shared module.

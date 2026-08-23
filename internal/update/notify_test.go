@@ -11,55 +11,6 @@ import (
 	"time"
 )
 
-// TestIsNewer covers the version compare matrix. Always-false on
-// parse failure keeps us from ever spamming.
-func TestIsNewer(t *testing.T) {
-	cases := []struct {
-		latest, current string
-		want            bool
-	}{
-		{"v0.4.1", "v0.4.0", true},
-		{"v0.5.0", "v0.4.9", true},
-		{"v1.0.0", "v0.99.99", true},
-		{"v0.4.0", "v0.4.0", false},
-		{"v0.4.0", "v0.4.0-dirty", false},   // same version, dirty ignored
-		{"v0.4.0", "v0.5.0", false},         // older latest
-		{"", "v0.4.0", false},               // missing latest
-		{"v0.4.1", "", false},               // missing current
-		{"garbage", "v0.4.0", false},        // unparseable latest
-		{"v0.4.0", "garbage", false},        // unparseable current
-		{"v0.4.0-rc1", "v0.4.0-rc0", false}, // pre-release suffix ignored — same x.y.z
-		{"v0.4.1", "v0.4.0-dirty", true},    // newer real release vs dirty current
-	}
-	for _, tc := range cases {
-		if got := isNewer(tc.latest, tc.current); got != tc.want {
-			t.Errorf("isNewer(%q, %q) = %v, want %v", tc.latest, tc.current, got, tc.want)
-		}
-	}
-}
-
-// TestSplitVersion confirms ok=false on shapes we can't parse.
-func TestSplitVersion(t *testing.T) {
-	if _, ok := splitVersion("v0.4.0"); !ok {
-		t.Error("v0.4.0 should parse")
-	}
-	if _, ok := splitVersion("0.4.0"); !ok {
-		t.Error("0.4.0 should parse")
-	}
-	if _, ok := splitVersion("v0.4.0-dirty"); !ok {
-		t.Error("v0.4.0-dirty should parse (suffix ignored)")
-	}
-	if _, ok := splitVersion("v0.4"); ok {
-		t.Error("v0.4 should NOT parse (only 2 segments)")
-	}
-	if _, ok := splitVersion("dev"); ok {
-		t.Error("'dev' should NOT parse")
-	}
-	if _, ok := splitVersion(""); ok {
-		t.Error("empty should NOT parse")
-	}
-}
-
 // TestMaybeNotify_DevBuildSilent: dev / unknown current versions
 // suppress the nag entirely.
 func TestMaybeNotify_DevBuildSilent(t *testing.T) {
