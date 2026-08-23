@@ -7,9 +7,14 @@ the round-trip.
 
 ## Build and run
 
+If you're not a maintainer, fork the repo on GitHub first and clone
+your fork — see "Pull request flow" for why. Maintainers can clone
+this repo directly.
+
 ```bash
-git clone https://github.com/zegit-zoo/meerkat.git
+git clone https://github.com/<you>/meerkat.git
 cd meerkat
+git remote add upstream https://github.com/zegit-zoo/meerkat.git   # optional, keeps main in sync
 make build       # -> bin/meerkat (+ bin/mk symlink)
 ./bin/mk version
 ```
@@ -130,22 +135,37 @@ The default branch is `main`. (Some older docs in this repo mention
 pushing directly to `master` — that's stale internal convention from
 before the project moved to a PR-gated flow; ignore it.)
 
-1. Fork the repo.
-2. Branch from `main`.
+Write access to this repo is limited to the maintainers (the org's
+default member permission is read). If you're not a maintainer, you
+cannot create a branch in this repo — GitHub rejects the push outright
+— and maintainers won't create one on your behalf. All non-maintainer
+contributions come from a branch in your own fork. Any branch that does
+exist in this repo is a maintainer working branch or a dependabot PR,
+not a landing spot for outside work.
+
+1. Fork the repo (see "Build and run") if you haven't already.
+2. Branch from `main` in your fork.
 3. Make your change, with tests.
 4. Confirm the local gates pass: `make pre-push` (and `make pre-release`
    if you touched anything security-sensitive).
 5. If you changed CLI commands, run `make docs` and commit the updated
    `docs/CLI.md`.
 6. If you changed dependencies, run `go mod tidy` and commit the result.
-7. Open a PR against `main`. Use Conventional Commits for your commit
-   messages (see above) — squash-worthy commit history helps but isn't
-   required; the PR title/commits feed the changelog.
+7. Push to your fork and open a PR against `zegit-zoo/meerkat:main`. Use
+   Conventional Commits for your commit messages (see above) —
+   squash-worthy commit history helps but isn't required; the PR
+   title/commits feed the changelog.
 
 CI must pass (lint, test+coverage, vuln, gitleaks) before a PR is
 merged.
 
 ## Branch and tag protection
+
+Write access to this repo is limited to the maintainers, so branch
+creation here is closed to outside contributors by GitHub's permission
+model, not by a ruleset — there's nothing to bypass because there's no
+access to begin with. The fork-PR route described above is the
+supported path for everyone else.
 
 `main` is protected by a repository ruleset with no bypass, so it applies
 to maintainers too:
