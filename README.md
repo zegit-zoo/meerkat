@@ -54,6 +54,12 @@ limit, `gh auth login` (or `export GH_TOKEN=...`) raises it; see
 [docs/INSTALL.md](docs/INSTALL.md) for a curl/wget alternative and
 signature verification.
 
+On macOS with Homebrew, the `mk` shorthand above can collide with
+`homebrew/core/mk` (the unrelated Plan 9 `mk` build tool) if it's
+also installed — whichever one is first on `$PATH` wins, silently.
+See [Homebrew `mk` collision](docs/INSTALL.md#homebrew-mk-collision)
+for `$PATH` ordering / alias workarounds.
+
 If `~/.local/bin` isn't on your `$PATH`, add it (see [docs/INSTALL.md](docs/INSTALL.md)).
 
 ### From source

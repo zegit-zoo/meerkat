@@ -41,9 +41,15 @@ build: sync ## Build the binary for the current platform
 	@echo "built: bin/$(BINARY) ($(VERSION))"
 
 .PHONY: install
-install: build ## Install the binary into ~/.local/bin
-	cp bin/$(BINARY) $${HOME}/.local/bin/$(BINARY)
-	ln -sf $(BINARY) $${HOME}/.local/bin/mk
+install: build ## Install the binary into ~/.local/bin (atomic: write-then-rename)
+	@mkdir -p $${HOME}/.local/bin
+	@tmp=$$(mktemp $${HOME}/.local/bin/.$(BINARY).tmp.XXXXXX) && \
+	  cp bin/$(BINARY) "$$tmp" && \
+	  chmod +x "$$tmp" && \
+	  mv -f "$$tmp" $${HOME}/.local/bin/$(BINARY)
+	@tmplink=$$(mktemp -u $${HOME}/.local/bin/.mk.tmp.XXXXXX) && \
+	  ln -s $(BINARY) "$$tmplink" && \
+	  mv -f "$$tmplink" $${HOME}/.local/bin/mk
 	@echo "installed: $${HOME}/.local/bin/{$(BINARY),mk}"
 
 .PHONY: completion
