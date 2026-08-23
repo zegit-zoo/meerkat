@@ -14,6 +14,8 @@ authenticated). See [Updating](#updating).
 Jump to:
 
 - [Install on macOS / Linux](#install-on-macos--linux)
+- [Homebrew `mk` collision](#homebrew-mk-collision)
+- [Atomic installs (macOS code signatures)](#atomic-installs-macos-code-signatures)
 - [Install on Windows](#install-on-windows)
 - [Verify the download](#verify-the-download)
 - [From source](#from-source)
@@ -96,6 +98,76 @@ ln -sf meerkat ~/.local/bin/mk
 `mk update` no longer needs to be re-run with `sudo`: it keeps the
 download and signature verification unprivileged, then uses `sudo
 cp`/`sudo mv` only if the install directory requires it.
+
+### Homebrew `mk` collision
+
+`brew` ships a formula called `mk` — the unrelated Plan 9 `mk` build
+tool (`homebrew/core/mk`). If it's installed, it places its own `mk`
+executable in Homebrew's bin directory (`/opt/homebrew/bin` on Apple
+Silicon, `/usr/local/bin` on Intel). Meerkat's `mk` is just a
+convenience symlink to `meerkat`, so if both end up on `$PATH`,
+whichever directory comes first wins — silently, and without an
+error. Which `mk` runs depends entirely on shell startup order, not
+on which one you meant.
+
+Check what actually resolves:
+
+```bash
+which -a mk        # lists every `mk` on $PATH, in resolution order
+type -a mk         # also reports shell aliases/functions named `mk`
+```
+
+To avoid the collision:
+
+- **Prefer explicit `$PATH` ordering.** Keep `~/.local/bin` ahead of
+  Homebrew's bin directory in your shell rc (`~/.zshrc` / `~/.bashrc`)
+  so meerkat's `mk` always wins:
+
+  ```bash
+  export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+  ```
+
+- **Or don't rely on the shorthand at all.** Skip the `mk` symlink
+  and always invoke `meerkat` directly in scripts and mkfiles that
+  also need Plan 9 `mk` on the same machine.
+- **Or alias it per-shell instead of relying on `$PATH`.** A shell
+  alias resolves before `$PATH` lookup, so it wins regardless of
+  directory order:
+
+  ```bash
+  alias mk=meerkat   # add to ~/.zshrc / ~/.bashrc
+  ```
+
+Never install meerkat's `mk` symlink into a directory Homebrew
+manages (e.g. `/opt/homebrew/bin`) by overwriting whatever is already
+there in place — see [Atomic installs](#atomic-installs-macos-code-signatures)
+below for why.
+
+### Atomic installs (macOS code signatures)
+
+`make install` replaces the destination binary and the `mk` symlink
+via a temp-file-then-rename: the new file is written next to the
+target under a throwaway name in the *same* directory, then moved
+into place with `mv -f` (a `rename(2)`, atomic on the same
+filesystem) rather than being copied on top of whatever is already
+there. This matters for two reasons:
+
+1. **Code-signature invalidation.** Overwriting an existing file
+   in place (e.g. `cp new-binary /path/to/existing-binary`) truncates
+   and rewrites the destination's bytes through its existing inode.
+   On macOS this can invalidate the ad-hoc/Developer ID code
+   signature that's checked against that exact file, and can trip
+   Gatekeeper or EDR tooling on next launch. A rename instead swaps
+   in a whole new, already-signed file atomically.
+2. **Symlink safety.** If the destination path is already a symlink
+   (for example, one pointing at a Homebrew-managed `mk`), writing
+   into it in place follows the link and clobbers whatever it points
+   to — not what you intended to install. A `rename(2)` onto that
+   path replaces the symlink entry itself; it never follows it.
+
+If you're scripting your own install/update outside of `make
+install`, use the same pattern: write to a temp file in the
+destination directory, then `mv -f` it over the final path.
 
 ## Install on Windows
 
@@ -300,6 +372,7 @@ a normal update; the `.old` file is removed on the next `mk update`.
 | Binary returns `meerkat (dev)` despite a tagged release | Built outside CI, no `git describe` tag | `git fetch --tags` then `make build` |
 | Running `meerkat` from `~/.local/bin/` exits with code 137 (SIGKILL) and no output | Endpoint Detection & Response (Crowdstrike Falcon, SentinelOne, Defender for Endpoint, etc.) on a managed Mac silently kills exec from non-allowlisted paths | Move the binary to a path the EDR allowlists — typically `/opt/homebrew/bin/` or `/usr/local/bin/`. The binary content + signature is identical; only the path matters to the EDR policy. On a managed fleet, ask whoever owns the EDR policy to allowlist the install path, or to add a rule keyed on the release's cosign signature. |
 | `meerkat` prints "a newer release is available" after every command and you don't want it | The post-run update-check (24h cached) is on by default for tagged builds | Set `MEERKAT_NO_UPDATE_CHECK=1` in your shell rc to silence it permanently. |
+| **macOS:** `mk` runs the wrong tool (Plan 9 `mk` build tool instead of meerkat, or vice versa) | Homebrew's `mk` formula and meerkat's `mk` shorthand are both on `$PATH`; the first directory in `$PATH` wins silently | Run `which -a mk` to see the resolution order, then fix `$PATH` ordering or use `alias mk=meerkat` — see [Homebrew `mk` collision](#homebrew-mk-collision). |
 | **Windows:** `mk update`: `permission denied writing to ...` | Binary installed under `%ProgramFiles%` or another machine-wide path | Re-run from an elevated PowerShell, or move install to `%LOCALAPPDATA%\Programs\meerkat` (see [Why `%LOCALAPPDATA%\Programs\meerkat`](#why-localappdataprograms-meerkat-and-not-programfiles)). |
 | **Windows:** `Expand-Archive` fails with "ZIP archive is not in correct format" | Truncated download | Re-run the install; if it keeps happening you may be hitting the anonymous API rate limit — `gh auth login` in PowerShell for a higher one. |
 | **Windows:** `mk update`: leftover `meerkat.exe.old` in the install dir | Previous update completed normally — the `.old` file is removed on the next `mk update` run | Run `mk update` again, or delete `meerkat.exe.old` manually if you don't plan to update again soon. |
