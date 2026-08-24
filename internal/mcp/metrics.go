@@ -36,6 +36,7 @@ type metrics struct {
 	requests         *prometheus.CounterVec
 	duration         *prometheus.HistogramVec
 	authFailures     *prometheus.CounterVec
+	authAnonymous    prometheus.Counter
 	toolCalls        *prometheus.CounterVec
 	toolDuration     *prometheus.HistogramVec
 	sessions         prometheus.Gauge
@@ -69,6 +70,15 @@ func newMetrics(reg *prometheus.Registry, version string, mounted int) *metrics 
 			Name: "meerkat_auth_failures_total",
 			Help: "Requests refused by the authentication gate, by reason (missing_token, invalid_token, no_grants).",
 		}, []string{"reason"}),
+		// A counter with NO labels, deliberately. The alternative — a
+		// reason="anonymous" value on meerkat_auth_failures_total — would
+		// file an admitted request under failures, and any label naming
+		// what was published would put the public collection set on an
+		// unauthenticated endpoint. One series, forever, is the whole cost.
+		authAnonymous: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "meerkat_auth_anonymous_total",
+			Help: "Requests admitted without a bearer token because the policy publishes collections to anonymous callers.",
+		}),
 		toolCalls: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "meerkat_mcp_tool_calls_total",
 			Help: "MCP tool invocations, by tool name and outcome (ok, tool_error, error).",
@@ -104,7 +114,7 @@ func newMetrics(reg *prometheus.Registry, version string, mounted int) *metrics 
 		}, []string{"version"}),
 	}
 	reg.MustRegister(
-		m.requests, m.duration, m.authFailures, m.toolCalls,
+		m.requests, m.duration, m.authFailures, m.authAnonymous, m.toolCalls,
 		m.toolDuration, m.sessions, m.ready, m.collections,
 		m.collectionsReady, m.collectionsStale, m.buildInfo,
 	)

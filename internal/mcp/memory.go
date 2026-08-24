@@ -59,9 +59,10 @@ type transportOptions struct {
 	// be confused with — refusing personal memories there would make the
 	// feature useless in exactly the setting it is most useful. On the
 	// hosted transport it is false, including when
-	// allow_unauthenticated delegates authentication to a gateway: in
-	// that deployment meerkat genuinely does not know who is calling, and
-	// every caller would otherwise share one namespace.
+	// allow_unauthenticated delegates authentication to a gateway and
+	// including for a caller admitted by an `anonymous: true` policy rule
+	// (#36): in those deployments meerkat genuinely does not know who is
+	// calling, and every caller would otherwise share one namespace.
 	AllowAnonymousPersonal bool
 }
 
@@ -82,7 +83,8 @@ type transportOptions struct {
 //	                              anyone
 //
 // The last row is the one worth arguing. A hosted server with no
-// providers (or with allow_unauthenticated) cannot tell its callers
+// providers (or with allow_unauthenticated, or serving a caller admitted
+// by an `anonymous: true` rule) cannot tell those callers
 // apart, so it cannot tell which of them a personal memory belongs to
 // — and it already refuses to let them WRITE one for exactly that
 // reason. Handing every such caller the `local` namespace would give

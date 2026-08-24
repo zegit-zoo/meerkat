@@ -148,7 +148,7 @@ present on the other.
 | transport | stdio | Streamable HTTP |
 | sessions | one, implicit | many, concurrent |
 | auth | none (the user started the process) | OIDC bearer, or none if unconfigured |
-| collections visible | all | the caller's |
+| collections visible | all | the caller's — including, since #36, the ones explicitly published to callers with no token |
 
 Defaults: `/mcp` on `127.0.0.1:4005`, stateless session IDs (any
 well-formed ID is accepted, so replicas need no sticky routing —
@@ -217,10 +217,13 @@ bare one, because clients guess the bare one.
 | --- | --- |
 | no `auth:` block | request proceeds, no policy in force |
 | `allow_unauthenticated: true` | as above, explicitly (for a gateway that authenticates first) |
-| no token | 401 + challenge |
-| token fails signature / issuer / audience / expiry / tenant | 401 + challenge, `error="invalid_token"` |
-| token verifies, no rule matches | 403, naming nothing |
-| token verifies, rules match | proceed with grants in context |
+| no `Authorization` header, an `anonymous:` rule publishes something | proceed with the **anonymous grants** in context (#36) |
+| no `Authorization` header, nothing published | 401 + challenge |
+| `Authorization` present but unusable (`Bearer` with no value, another scheme) | 401 + challenge — an *attempted* credential is not an absent one |
+| token fails signature / issuer / audience / expiry / tenant | 401 + challenge, `error="invalid_token"` — **never** a downgrade to anonymous |
+| token verifies, no rule matches, nothing published | 403, naming nothing |
+| token verifies, no rule matches, something published | proceed with the published set |
+| token verifies, rules match | proceed with grants in context (own rules ∪ anonymous rules) |
 
 ## Configuration schema
 
@@ -258,12 +261,17 @@ auth:
 
     - name: everyone
       collections: [public]            # no selector: every authenticated caller
+
+    - name: public-handbook
+      anonymous: true                  # no token at all (#36)
+      collections: [handbook]
+      capabilities: [read]             # the only capability an anonymous rule may hold
 ```
 
 **Selectors** are `subjects` (exact), `emails` (case-insensitive),
-`groups` (any-of, case-insensitive), `tenant` and `issuer`. Within a
-selector, any value matches; **across** selectors, all must match. A
-rule with no selector matches every authenticated caller.
+`groups` (any-of, case-insensitive), `tenant`, `issuer` and `anonymous`.
+Within a selector, any value matches; **across** selectors, all must
+match. A rule with no selector matches every authenticated caller.
 
 **Evaluation is union-only.** Every matching rule contributes; there is
 no ordering, no first-match-wins, and no deny rule. That means a
@@ -274,10 +282,174 @@ to get wrong.
 
 Validation runs at **load** time, not at first request: an unknown
 capability, a rule with no `collections`, a non-https issuer, a duplicate
-issuer, `rules:` with no `providers:`, or `allow_unauthenticated`
-combined with `providers` all fail the process. The class of error this
+issuer, `rules:` with no `providers:`, `allow_unauthenticated` combined
+with `providers`, and — since #36 — an `anonymous:` rule carrying a claim
+selector, carrying a write capability, or combined with
+`allow_unauthenticated` all fail the process. The class of error this
 prevents is the quiet one — a policy that looks configured and grants
-nothing, discovered weeks later as "why can't this user see anything".
+nothing (or everything), discovered weeks later as "why can't this user
+see anything".
+
+## Explicit anonymous access to selected collections (#36)
+
+A hosted meerkat served nothing without a token, or — via
+`allow_unauthenticated` — everything without one. The middle ground
+operators actually want is a *published* collection: a handbook, a
+policy set, a public API guide, readable by anyone, while every other
+collection keeps requiring a token on the same endpoint.
+
+### The shape: a rule selector, not a second mechanism
+
+```yaml
+auth:
+  resource: https://mcp.example.com/mcp
+  providers:
+    - issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+      audience: api://meerkat
+
+  rules:
+    - name: public-handbook
+      anonymous: true                  # matches the caller with NO token
+      collections: [handbook, published-policies]
+      capabilities: [read]             # anonymous rules are read-only
+
+    - name: sre
+      groups: [sre]
+      collections: [runbooks]
+```
+
+The alternative considered was a separate top-level block —
+`auth.anonymous: {collections: [...]}` — and it was rejected for three
+reasons.
+
+1. **It would have forked the schema.** A block needs its own
+   collections list, its own capability list, its own wildcard
+   handling, its own validation and its own documentation, all of it a
+   near-copy of `rules:`. A selector reuses every one of them, so
+   `collections: ["*"]` and `capabilities:` mean exactly what they mean
+   everywhere else, and a future capability is covered by existing code.
+2. **Union-only evaluation stays readable.** meerkat's policy has one
+   list, no ordering and no deny rule, precisely so a rule's effect can
+   be read off that rule. A second block would be a second place to
+   look before you know what a caller can see.
+3. **It puts the fact in the diff.** `anonymous: true` on a line next to
+   `groups: [sre]` is a review artifact. A block somewhere else in the
+   file is one an eye slides past.
+
+The selector is **mutually exclusive** with `subjects`, `emails`,
+`groups`, `tenant` and `issuer`, and validation refuses the combination
+rather than ignoring it: those select on claims of a verified token,
+there is no token here, and a rule that reads as a narrowing while acting
+as none is the exact failure this file's validation exists to prevent.
+
+### Grant synthesis, and the absence of a second path
+
+There is no anonymous *code path*. The gate calls
+`Policy.EvaluateAnonymous()`, which runs the same rule loop
+`Policy.Evaluate` runs with one bit flipped, and installs the resulting
+ordinary `*authz.Grants` — over an `Identity{}` with no subject — in the
+request context. Everything downstream is the code that was already
+there:
+
+| surface | why it is already correct |
+| --- | --- |
+| `Registry.Restrict(g.CanRead)` | the anonymous caller is a restricted caller; the published set is their whole registry |
+| `WithToolFilter` | rebuilds descriptions against that registry, so tools name the published set and nothing else |
+| `mk_list_collections` | `g.Capabilities(name)` reports `["read"]`, because that is what the rule granted |
+| update contracts | `EffectiveContract(g)` demotes on the caller's capabilities exactly as for a read-only authenticated caller |
+| memory reads | `memory.Anonymous(id)` is true for a subjectless identity, so the viewer owns nothing (#27) |
+| memory writes | anonymous grants hold no write capability, so `Restrict(CanWrite)` is empty and the tool is filtered out |
+
+The one asymmetry is in which rules are *eligible*, and it runs both
+ways on purpose:
+
+- an `anonymous: true` rule contributes to **every** caller. Public means
+  public: an operator who publishes a collection should not also have to
+  add it to every other rule, and the day they forget, the people who
+  lose access are their own staff while the internet keeps reading it.
+- **every other rule** contributes to no anonymous caller — including a
+  rule with no selector, which means "every *authenticated* caller".
+  This is the whole of authenticated-by-default, and it is why an
+  existing policy full of selector-less rules publishes nothing by
+  upgrading.
+
+### Anonymous grants are read-only
+
+Validation refuses `personal-write`, `team-write`, `global-write` and
+`admin` on an anonymous rule. A write by a caller nobody can name has no
+owner, no audit trail and no reviewer; a personal memory would have no
+namespace to land in (`internal/memory.Authorize` refuses it
+independently, and both refusals are tested); and `admin` would confer
+whatever capability a later meerkat adds — to the internet.
+
+### Reconciliation with `allow_unauthenticated`: refused, not ranked
+
+`allow_unauthenticated` already publishes **everything** and exists to
+delegate authentication to a gateway. Combining it with an
+`anonymous: true` rule is refused at load time.
+
+Defining a precedence was the alternative, and either direction is
+worse. If the flag wins, the rule is decorative — an operator reads a
+carefully scoped list and gets their whole knowledge base. If the rule
+wins, a flag documented as "no token is checked, nothing is filtered"
+silently starts filtering, and the gateway deployment it exists for
+breaks. Neither is discoverable from the config file, which is exactly
+the class of quiet misconfiguration validation runs at load time to
+catch. Refusing states the contradiction where it can be fixed.
+
+An anonymous rule also requires `providers:`. Anonymous access is a
+carve-out from an authenticated server; with no provider configured
+there is nothing to carve out of, because every collection is already
+readable without a token.
+
+### The gate, precisely
+
+The security-critical property is that **a present-but-invalid token is
+never downgraded to anonymous**. The anonymous branch is reachable only
+when the request carried no `Authorization` header at all — not when it
+carried an expired one, a forged one, one for another audience, a
+malformed one, `Bearer` with an empty value, or a scheme meerkat does
+not accept. All of those keep their 401 and their `WWW-Authenticate`
+challenge, whatever the policy publishes.
+
+Two reasons, and both are worth the inconvenience of a client that has
+to notice its own expiry:
+
+- an expiry that silently degrades into partial data is an outage nobody
+  sees. The client keeps working, keeps getting answers, and the answers
+  keep quietly missing the collections the caller is entitled to.
+- the 401 challenge is the *only* thing that tells a client to refresh.
+  Answering 200 removes the signal that would have fixed the problem.
+
+One pre-existing status code changes, deliberately: a verified token
+matched by no rule used to get **403**, and now gets the published set
+when there is one. Refusing that caller would be strictly stranger than
+admitting them — they can read exactly the same bytes by dropping their
+token. With nothing published, the 403 is unchanged.
+
+### Telemetry and logs
+
+| surface | what it says |
+| --- | --- |
+| `meerkat.authn.result` span attribute | `anonymous` — a sixth value in a closed set of six, no new key, no new dimension |
+| `meerkat.authz.decide` span | the same `granted` boolean and `collections` **count** an authenticated decision carries |
+| `meerkat_auth_anonymous_total` | a counter with **no labels**. Not a `reason="anonymous"` value on `meerkat_auth_failures_total`, because an admitted request is not a failure; and no label naming what was published, because /metrics is unauthenticated |
+| access log | `"auth":"anonymous"` and **no** `sub`, `issuer` or `tenant` — not even empty ones. There is no principal, and a log line that printed `"sub":""` would invent one |
+| `mcp.auth_anonymous` log line | Debug, not Warn: on a server that publishes a collection, anonymous traffic is the intended traffic |
+
+`GET /` states the posture ("except for selected collections published
+to unauthenticated callers") and names nothing — that page is
+unauthenticated, and the mounted set is not public information. Which
+collections are published is `mk_list_collections`'s answer, and it
+answers each caller with their own set.
+
+### Zero behaviour change without the feature
+
+A policy with no `anonymous:` rule produces empty anonymous grants,
+which the gate reads as "nothing to admit an anonymous caller to" and
+401s exactly as before. `meerkat_auth_anonymous_total` is registered and
+reads 0; the access log gains no field; the banner is unchanged. This is
+asserted, not assumed — see `TestHostedAnonymous_NoAnonymousRuleChangesNothing`.
 
 ## Capability model
 
@@ -371,6 +543,7 @@ current, and then the ordinary not-ready path produces the 503. See
 meerkat_http_requests_total{route,method,status}
 meerkat_http_request_duration_seconds{route,method}
 meerkat_auth_failures_total{reason}          # missing_token | invalid_token | no_grants
+meerkat_auth_anonymous_total                 # admitted without a token (#36); no labels
 meerkat_mcp_tool_calls_total{tool,outcome}   # ok | tool_error | error
 meerkat_mcp_tool_duration_seconds{tool}
 meerkat_mcp_sessions_active
@@ -440,6 +613,7 @@ out of the process and the log is not. See
 | `mk mcp serve` (stdio) | byte-identical; no grants ever enter the context, `visible()` returns the registry unchanged |
 | `mk http serve` | unchanged; static bearer token, all collections |
 | `content-source.yaml` with no `auth:` | unchanged everywhere; `mk mcp serve-http` serves every collection to any caller and says so in its banner |
+| an `auth:` block with no `anonymous:` rule | unchanged: 401 for a token-less request, challenge included; the new counter reads 0 and the access log gains no field (#36) |
 | `--kb-dir` | suppresses `auth:` discovery, exactly as it suppresses content discovery |
 
 `Grants.Can` on a **nil** `*Grants` returns true — "no policy in force"
@@ -475,6 +649,18 @@ reachable only where it is correct.
   wrong answer, not merely as a race.
 - **Metrics and logs**: labels asserted present, and page IDs, subjects,
   collection names and scanned paths asserted absent.
+- **Anonymous access** (#36, `internal/authz/anonymous_test.go`,
+  `internal/authn/anonymous_test.go`, `internal/mcp/anonymous_test.go`):
+  the config-validation matrix (selector exclusivity per selector, one
+  refusal per write capability, the `allow_unauthenticated` and
+  no-`providers` combinations); the gate matrix (no header / valid /
+  expired / forged / wrong-audience / wrong-issuer / subjectless /
+  malformed / empty-`Bearer` / non-Bearer scheme × published or not);
+  the invisibility oracles re-run for the anonymous caller, including
+  "hidden and absent differ by nothing but the name the caller typed";
+  union semantics for authenticated callers; anonymous memory refusal at
+  both the tool filter and `memory.Authorize`; and a
+  zero-behaviour-change test for a policy that writes no anonymous rule.
 
 ## Follow-ups
 

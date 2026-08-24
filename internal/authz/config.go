@@ -26,6 +26,10 @@ import (
 //	      groups: [platform-admins]
 //	      collections: ["*"]
 //	      capabilities: [admin]
+//	    - name: public-handbook
+//	      anonymous: true              # no token at all
+//	      collections: [handbook]
+//	      capabilities: [read]         # the only one an anonymous rule may hold
 //
 // The zero Config means "no auth configured", which is what keeps every
 // pre-existing deployment — stdio MCP, the static-token HTTP server, a
@@ -56,6 +60,14 @@ type Config struct {
 	// filter on, so EVERY mounted collection is visible to every caller
 	// — which is why it is off by default and refuses to combine with
 	// any providers: entry.
+	//
+	// It is also refused alongside an `anonymous: true` rule. The two say
+	// contradictory things about the same deployment — "everything is
+	// public, somebody upstream authenticates" versus "these named
+	// collections are public and the rest still needs a token here" — and
+	// the coarse one wins silently, which would leave an operator reading
+	// a carefully scoped anonymous rule that grants nothing it does not
+	// already have. See Validate.
 	AllowUnauthenticated bool `yaml:"allow_unauthenticated,omitempty"`
 }
 
@@ -128,11 +140,39 @@ func (cm ClaimMapping) Defaulted() ClaimMapping {
 // `groups:` and `tenant:` needs both). A rule with no selector at all
 // matches every authenticated caller — the way to express "everyone who
 // can get a token may read the public collection".
+//
+// `anonymous: true` is the one selector that is not about a claim, and
+// it is exclusive with all the others: see the field.
 type Rule struct {
 	// Name is a label for the rule, used in error messages and access
 	// logs. Optional but strongly encouraged: it is what an operator
 	// reads when asking why a caller got what they got.
 	Name string `yaml:"name,omitempty"`
+
+	// Anonymous publishes this rule's collections to the caller who
+	// presented NO bearer token at all, and — because public means
+	// public — to every authenticated caller as well, so a collection
+	// does not have to be restated in every other rule to stay readable
+	// once it is published.
+	//
+	// It is the ONLY way an unauthenticated caller acquires any grant:
+	// every other rule, including a selector-less one, describes "every
+	// AUTHENTICATED caller" and contributes nothing to the anonymous
+	// principal. Authenticated-by-default therefore survives; a
+	// deployment that writes no anonymous rule behaves exactly as it did.
+	//
+	// Two things are refused at load time (Rule.validate):
+	//
+	//   - combining it with subjects/emails/groups/tenant/issuer. Those
+	//     select on claims of a verified token, and there is no token
+	//     here; a rule carrying both would read as a narrowing and act as
+	//     none.
+	//   - any capability but `read`. An anonymous grant is read-only,
+	//     structurally: nobody can be held to an anonymous write, an
+	//     anonymous personal memory has no owner (see
+	//     internal/memory.Authorize), and `admin` would confer whatever
+	//     capability a later meerkat adds — on the internet.
+	Anonymous bool `yaml:"anonymous,omitempty"`
 
 	// Subjects matches the token's `sub` exactly (case-sensitive: a
 	// subject is an opaque identifier).
@@ -173,6 +213,25 @@ func (c *Config) Validate() error {
 	if c == nil || (!c.Enabled() && len(c.Rules) == 0) {
 		return nil
 	}
+	// The anonymous-rule checks come FIRST, ahead of the two general ones
+	// below that would otherwise catch the same configurations with a
+	// vaguer sentence. An operator who wrote `anonymous: true` should be
+	// told what is wrong with that rule, not handed a generic complaint
+	// about rules and providers that does not mention the line they just
+	// added.
+	if i, r, ok := c.firstAnonymousRule(); ok {
+		if c.AllowUnauthenticated {
+			return fmt.Errorf("%s sets anonymous: true, which cannot be combined with auth.allow_unauthenticated — "+
+				"allow_unauthenticated already publishes EVERY mounted collection to every caller, so the rule's "+
+				"collections list would be silently widened to all of them; keep the rule and drop the flag to publish "+
+				"only what it names", ruleLabel(i, r))
+		}
+		if len(c.Providers) == 0 {
+			return fmt.Errorf("%s sets anonymous: true but no auth.providers are configured — anonymous access is a "+
+				"carve-out from an authenticated server, and with no provider there is nothing it carves out of: every "+
+				"collection is already readable without a token", ruleLabel(i, r))
+		}
+	}
 	if len(c.Rules) > 0 && !c.Enabled() {
 		return fmt.Errorf("auth.rules is set but no auth.providers are configured — rules can only be evaluated against a verified identity")
 	}
@@ -209,10 +268,7 @@ func (c *Config) Validate() error {
 }
 
 func (r Rule) validate(i int) error {
-	label := fmt.Sprintf("auth.rules[%d]", i)
-	if r.Name != "" {
-		label = fmt.Sprintf("auth.rules[%s]", r.Name)
-	}
+	label := ruleLabel(i, r)
 	if len(r.Collections) == 0 {
 		return fmt.Errorf("%s.collections is required — a rule that names no collection grants nothing", label)
 	}
@@ -227,7 +283,82 @@ func (r Rule) validate(i int) error {
 				label, capName, strings.Join(capabilityNames(), ", "))
 		}
 	}
+	if !r.Anonymous {
+		return nil
+	}
+	// An anonymous rule selects on the ABSENCE of a token, so every
+	// claim selector beside it is unsatisfiable. Refusing rather than
+	// ignoring: a rule that reads as narrow and acts as wide is the
+	// failure mode this whole file exists to prevent.
+	if sel := r.claimSelectors(); len(sel) > 0 {
+		return fmt.Errorf("%s sets anonymous: true together with %s — an anonymous caller presents no token, "+
+			"so there are no claims to select on; use one or the other",
+			label, strings.Join(sel, ", "))
+	}
+	for _, capName := range r.Capabilities {
+		c, _ := ParseCapability(capName)
+		if c != CapRead {
+			return fmt.Errorf("%s grants %q to anonymous callers — an anonymous rule is read-only, because a write "+
+				"by a caller nobody can name has no owner, no audit trail and no reviewer (and %q would confer "+
+				"whatever capability a later meerkat adds); use capabilities: [read]",
+				label, c, CapAdmin)
+		}
+	}
 	return nil
+}
+
+// claimSelectors names the token-claim selectors the rule sets, for the
+// exclusivity error above.
+func (r Rule) claimSelectors() []string {
+	var out []string
+	if len(r.Subjects) > 0 {
+		out = append(out, "subjects")
+	}
+	if len(r.Emails) > 0 {
+		out = append(out, "emails")
+	}
+	if len(r.Groups) > 0 {
+		out = append(out, "groups")
+	}
+	if r.Tenant != "" {
+		out = append(out, "tenant")
+	}
+	if r.Issuer != "" {
+		out = append(out, "issuer")
+	}
+	return out
+}
+
+// ruleLabel names a rule in an error message: by its `name` when it has
+// one, by its index otherwise.
+func ruleLabel(i int, r Rule) string {
+	if r.Name != "" {
+		return fmt.Sprintf("auth.rules[%s]", r.Name)
+	}
+	return fmt.Sprintf("auth.rules[%d]", i)
+}
+
+// firstAnonymousRule returns the first rule that publishes to anonymous
+// callers, for the config-level checks that need to name one.
+func (c *Config) firstAnonymousRule() (int, Rule, bool) {
+	if c == nil {
+		return 0, Rule{}, false
+	}
+	for i, r := range c.Rules {
+		if r.Anonymous {
+			return i, r, true
+		}
+	}
+	return 0, Rule{}, false
+}
+
+// HasAnonymousRules reports whether any rule publishes collections to
+// unauthenticated callers. It is what a server's banner and its
+// diagnostics ask; the grants themselves come from
+// Policy.EvaluateAnonymous.
+func (c *Config) HasAnonymousRules() bool {
+	_, _, ok := c.firstAnonymousRule()
+	return ok
 }
 
 func capabilityNames() []string {
@@ -300,9 +431,16 @@ func (p *Policy) Len() int {
 	return len(p.cfg.Rules)
 }
 
-// Evaluate returns the grants an identity holds. Every matching rule
-// contributes its capabilities over its collections; a caller matched
-// by three rules holds the union.
+// Evaluate returns the grants an AUTHENTICATED identity holds. Every
+// matching rule contributes its capabilities over its collections; a
+// caller matched by three rules holds the union.
+//
+// Rules published to anonymous callers (`anonymous: true`) contribute
+// here too, unconditionally. Public means public: a collection an
+// operator put on the internet is not one an employee has to be granted
+// separately, and requiring the restatement would be a standing
+// invitation to publish something and forget to re-grant it — with the
+// failure landing on the people who are supposed to have it.
 //
 // There is deliberately no deny rule and no rule ordering. Union-only
 // evaluation means a policy's effect can be read off any single rule
@@ -314,12 +452,37 @@ func (p *Policy) Len() int {
 // A caller matched by no rule at all gets empty, non-nil Grants: they
 // authenticated, and they may read nothing.
 func (p *Policy) Evaluate(id Identity) *Grants {
+	return p.evaluate(id, false)
+}
+
+// EvaluateAnonymous returns the grants a caller who presented NO token
+// holds: the union of the `anonymous: true` rules, and nothing else.
+//
+// It is the whole of the anonymous authorization path. There is no
+// second evaluator, no bypass and no "public" flag threaded through the
+// registry — the result is an ordinary *Grants over an ordinary
+// Identity{} (no subject, no issuer), so every surface downstream
+// filters, rebuilds tool descriptions, reports capabilities and refuses
+// memory writes by the code it already had. The one thing that is new
+// is which rules were allowed to contribute.
+//
+// The grants are EMPTY when no rule publishes anything, which is what
+// the authentication gate reads as "there is nothing to admit an
+// anonymous caller to" — see internal/authn.Gate.Middleware.
+func (p *Policy) EvaluateAnonymous() *Grants {
+	return p.evaluate(Identity{}, true)
+}
+
+// evaluate is the single rule loop both entry points share. anon says
+// the caller presented no token, which is the only thing that changes
+// which rules are eligible.
+func (p *Policy) evaluate(id Identity, anon bool) *Grants {
 	if p == nil {
 		return nil
 	}
 	g := &Grants{byCollection: map[string]CapabilitySet{}, identity: id}
 	for _, r := range p.cfg.Rules {
-		if !r.matches(id) {
+		if !r.applies(id, anon) {
 			continue
 		}
 		caps := ruleCapabilities(r)
@@ -334,6 +497,15 @@ func (p *Policy) Evaluate(id Identity) *Grants {
 	return g
 }
 
+// Anonymous reports whether the policy publishes anything to
+// unauthenticated callers. Nil-safe: no policy publishes nothing.
+func (p *Policy) Anonymous() bool {
+	if p == nil || p.cfg == nil {
+		return false
+	}
+	return p.cfg.HasAnonymousRules()
+}
+
 // ruleCapabilities is the rule's capability set, defaulting to read.
 func ruleCapabilities(r Rule) CapabilitySet {
 	if len(r.Capabilities) == 0 {
@@ -346,6 +518,33 @@ func ruleCapabilities(r Rule) CapabilitySet {
 		}
 	}
 	return set
+}
+
+// applies reports whether the rule contributes to a caller. anon says
+// the caller presented no bearer token.
+//
+// The two branches above the claim check are the entire anonymous
+// authorization model, and they are asymmetric on purpose:
+//
+//	anonymous rule, any caller  -> applies. The rule is a statement
+//	                               about the COLLECTION ("this is
+//	                               published"), not about who is asking.
+//	other rule, anonymous caller-> never applies. Every claim selector
+//	                               needs a verified token, and a rule
+//	                               with NO selector means "every
+//	                               authenticated caller" — which an
+//	                               unauthenticated one is not. This is
+//	                               what keeps authenticated-by-default
+//	                               true for the selector-less rule that
+//	                               every existing policy is full of.
+func (r Rule) applies(id Identity, anon bool) bool {
+	if r.Anonymous {
+		return true
+	}
+	if anon {
+		return false
+	}
+	return r.matches(id)
 }
 
 // matches reports whether id satisfies every selector the rule sets.

@@ -512,9 +512,19 @@ content:
 #   # your head. Narrowing access = deleting a rule.
 #   #
 #   # Selectors: subjects (exact), emails (case-insensitive), groups
-#   # (any-of, case-insensitive), tenant, issuer. Any value WITHIN a
-#   # selector matches; ALL selectors present must match. A rule with no
-#   # selector matches every authenticated caller.
+#   # (any-of, case-insensitive), tenant, issuer, anonymous. Any value
+#   # WITHIN a selector matches; ALL selectors present must match. A rule
+#   # with no selector matches every AUTHENTICATED caller.
+#   #
+#   # `anonymous: true` is the one selector that is not about a claim: it
+#   # publishes the rule's collections to callers with NO bearer token at
+#   # all, and (because public means public) to every authenticated caller
+#   # too, so a published collection never has to be restated in another
+#   # rule. It is EXCLUSIVE with subjects/emails/groups/tenant/issuer —
+#   # there are no claims to select on — and it is READ-ONLY: any write
+#   # capability on an anonymous rule fails the process at load time.
+#   # Everything not named by an anonymous rule still requires a token.
+#   # See the public-handbook rule below.
 #   #
 #   # Capabilities: read | personal-write | team-write | global-write | admin.
 #   #
@@ -564,10 +574,27 @@ content:
 #     - name: everyone-authenticated
 #       collections: [vendor-docs]     # no selector: anyone with a valid token
 #
+#     # PUBLISHED TO THE INTERNET. Anyone who can reach /mcp reads these
+#     # collections with no token: every page, every title and ID, the
+#     # frontmatter, the page count — and the update: contract, so a
+#     # `method: merge-request` repo URL on a published collection is
+#     # public too. Check `mk list --collection handbook` before adding a
+#     # name here; that is what an anonymous caller will see.
+#     #
+#     # Everything NOT named here still requires a verified token, and
+#     # stays invisible to anonymous callers rather than merely denied. A
+#     # token that is present but expired/forged/malformed is still 401 —
+#     # it is never downgraded to this. See docs/SECURITY.md.
+#     - name: public-handbook
+#       anonymous: true
+#       collections: [handbook, published-policies]
+#       capabilities: [read]           # the only capability permitted here
+#
 #   # Delegate authentication to a gateway that has already established
 #   # identity. No token is checked and NOTHING is filtered — every mounted
 #   # collection is readable by any caller that reaches the process. Cannot
-#   # be combined with providers: above.
+#   # be combined with providers: above, nor with an `anonymous: true` rule
+#   # (which it would silently widen to every mounted collection).
 #   # allow_unauthenticated: false
 
 # --- observability: traces, OTLP export, domain metrics (runtime, hosted) ----

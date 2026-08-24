@@ -123,9 +123,12 @@ in the order they run:
 
 ### Anonymous callers
 
-Two deployments have no verified subject: **stdio** (spawned by the one
-user it serves, over a pipe) and **`allow_unauthenticated`** (a gateway
-authenticated, meerkat did not). They are not the same case:
+Three deployments have no verified subject: **stdio** (spawned by the one
+user it serves, over a pipe), **`allow_unauthenticated`** (a gateway
+authenticated, meerkat did not), and — since #36 — a caller admitted by
+an **`anonymous: true` policy rule** (the hosted server published a
+collection to callers with no token). The last two are the same case as
+each other, and neither is the first:
 
 | transport | anonymous personal write | anonymous personal read |
 | --- | --- | --- |
@@ -292,7 +295,7 @@ else. `transportOptions.viewer` is the whole derivation:
 | --- | --- |
 | verified OIDC identity | `AsOwner(memory.Namespace(id))` — their own personal memories, plus everything public |
 | anonymous, **stdio** | `AsOwner("local")` — the namespace this user's own memories are written into |
-| anonymous, **hosted** (no `auth:` block, or `allow_unauthenticated`) | `AsOwner("")` — every public page and **no** personal memory belonging to anyone |
+| anonymous, **hosted** (no `auth:` block, `allow_unauthenticated`, or an `anonymous: true` rule) | `AsOwner("")` — every public page and **no** personal memory belonging to anyone |
 | no MCP transport at all (`mk search/list/show`, `mk http serve`) | `Unfiltered()` — one principal in front of it, who owns everything |
 
 The third row is the one worth arguing. A hosted server with no
