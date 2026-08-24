@@ -28,6 +28,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/memory"
+	"github.com/zegit-zoo/meerkat/internal/refresh"
 )
 
 // ConfigFile is the repo-root config filename.
@@ -181,6 +182,20 @@ type Source struct {
 	// ignores it (a prefix spans many objects, each with its own
 	// generation).
 	Generation int64 `yaml:"generation,omitempty"`
+
+	// Refresh opts this source into RUNTIME RECONCILIATION: a periodic,
+	// metadata-only probe of the backing object storage that swaps a new
+	// snapshot in when — and only when — the bytes actually changed.
+	//
+	// Absent (the default, and what every configuration written before it
+	// existed has) the source is resolved once at startup and never
+	// re-checked. That is the immutable-deployment behaviour, and it stays
+	// the default because "what is this replica serving?" should have a
+	// boring answer unless an operator asked for a moving one.
+	//
+	// It applies to type: gcs only, and never together with a pinned
+	// Generation — see validateRefresh, and docs/design/hot-reload.md.
+	Refresh *refresh.Spec `yaml:"refresh,omitempty"`
 
 	// Layout maps artifacts to their location WITHIN the resolved source.
 	Layout Layout `yaml:"layout,omitempty"`
@@ -378,6 +393,9 @@ func (s Source) validate(p string) error {
 		if err := s.Memory.Validate(p+".memory", false); err != nil {
 			return err
 		}
+		if err := s.validateRefresh(p); err != nil {
+			return err
+		}
 		return s.validateContract(p)
 	case TypeLocal:
 		if s.Path == "" {
@@ -431,7 +449,46 @@ func (s Source) validate(p string) error {
 	if err := s.Memory.Validate(p+".memory", s.ephemeral()); err != nil {
 		return err
 	}
+	if err := s.validateRefresh(p); err != nil {
+		return err
+	}
 	return s.validateContract(p)
+}
+
+// validateRefresh checks a `refresh:` block against the source it sits
+// on. Two rules, both of them refusals rather than warnings.
+//
+// 1. Refresh applies to type: gcs ONLY. type: local is already live (its
+// pages are enumerated per request), type: url is content-addressed by a
+// mandatory digest that cannot change without the config changing, and
+// watching arbitrary local filesystems is an explicit non-goal. A
+// refresh: block on any of them is a misunderstanding worth naming, not
+// a line to ignore.
+//
+// 2. A pinned `generation:` and a `refresh:` block are MUTUALLY
+// EXCLUSIVE, and this is the security-relevant half. Pinning means
+// "serve exactly these bytes until the configuration changes" — it is
+// how a deployment becomes reproducible and how an operator guarantees a
+// later bucket write cannot alter what is served. Accepting a refresh
+// block alongside it would leave two readings of the same file ("the pin
+// wins, refresh is dead config" vs "refresh wins, the pin is advisory")
+// and one of those silently revokes the guarantee. Refusing the
+// combination outright means a pinned source can never start moving by
+// accident.
+func (s Source) validateRefresh(p string) error {
+	if s.Refresh == nil {
+		return nil
+	}
+	if s.Type != TypeGCS {
+		return fmt.Errorf("%s.refresh applies to type: %s only, but this source is type: %s — "+
+			"a local source is already re-read per request, and a url source is pinned by its mandatory sha256", p, TypeGCS, s.Type)
+	}
+	if s.Generation != 0 {
+		return fmt.Errorf("%s: generation: %d pins this source to one immutable object generation, so refresh: can never do anything — "+
+			"remove generation: to follow the object, or remove refresh: to keep serving exactly the pinned bytes",
+			p, s.Generation)
+	}
+	return s.Refresh.Validate(p + ".refresh")
 }
 
 // validateGCS checks the type: gcs fields. Exactly one of object (a

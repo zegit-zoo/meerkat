@@ -686,6 +686,20 @@ type collectionSummary struct {
 	Capabilities []string         `json:"capabilities"`
 	Description  string           `json:"description,omitempty"`
 	Contract     *contractSummary `json:"contract,omitempty"`
+	// Refresh reports runtime reconciliation for this collection, one
+	// entry per configured target, and is absent for a collection that
+	// is resolved once at startup — which is every collection that has
+	// not opted in.
+	//
+	// This is where the detailed freshness provenance lives: which
+	// generation is applied, when the last cycle succeeded, and whether
+	// the collection is currently degraded. It is HERE rather than in
+	// /readyz or a metric label because this surface is authenticated
+	// and already scoped to the collections this caller may read — the
+	// unauthenticated endpoints get counts, and a metric labelled with a
+	// generation would mint a series per publication. See
+	// docs/design/hot-reload.md.
+	Refresh []collections.ReloadStatus `json:"refresh,omitempty"`
 }
 
 // contractSummary is the wire shape of the caller-effective
@@ -729,9 +743,10 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry) (strin
 		entry := collectionSummary{
 			Name:         c.Name,
 			Type:         c.Type(),
-			Source:       c.Provenance,
+			Source:       c.Provenance(),
 			Capabilities: g.Capabilities(c.Name).Strings(),
 			Description:  c.Description(),
+			Refresh:      c.ReloadStatuses(),
 		}
 		// view.Pages, not c.Pages: a page count is a count, and a count
 		// that included other principals' personal memories would say how

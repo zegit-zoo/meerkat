@@ -532,6 +532,17 @@ With NO auth: block configured the server is unauthenticated and every
 mounted collection is readable by any caller — the same posture as
 'mcp serve'. Bind loopback (the default) or put a gateway in front.
 
+A collection whose content-source.yaml entry carries a "refresh:" block
+is re-checked while the server runs: a metadata-only probe every
+interval, and — only when the GCS object generation or prefix
+fingerprint actually moved — a re-resolve, an off-request-path index
+rebuild and an atomic swap. Queries keep being served throughout, from
+the previous snapshot until the new one is complete. A "refresh:" block
+under a collection's "memory:" is the same thing for a shared GCS memory
+store, and is what makes several replicas converge on each other's
+writes. SIGHUP runs every configured refresh immediately. See
+docs/design/hot-reload.md.
+
 The server has no TLS of its own; terminate TLS at a reverse proxy.
 
 **Usage**

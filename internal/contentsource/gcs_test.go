@@ -53,6 +53,13 @@ func (f *fakeGCS) put(name string, content []byte) int64 {
 	return gen
 }
 
+// remove deletes an object's live generation, the way a delete under a
+// prefix looks to a reader: the name disappears from the listing while
+// the historical generations stay addressable.
+func (f *fakeGCS) remove(name string) {
+	delete(f.live, name)
+}
+
 func (f *fakeGCS) Attrs(_ context.Context, _, object string) (gcsObject, error) {
 	f.attrCalls++
 	gen, ok := f.live[object]

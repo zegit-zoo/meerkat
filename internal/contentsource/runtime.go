@@ -122,6 +122,17 @@ type ResolvedCollection struct {
 	Dir        string
 	Source     Source
 	Provenance string
+	// Version is the source VERSION TOKEN the directory was resolved at:
+	// a GCS object generation, or a prefix listing fingerprint. Empty for
+	// every source type that has no such token (local, url, none) —
+	// type: url is already pinned by its mandatory digest, and a local
+	// directory has nothing to compare.
+	//
+	// It exists so that runtime reconciliation's first probe has
+	// something to compare against: a replica that started on the current
+	// generation must recognise it as current and do no work, rather than
+	// re-resolving once on principle.
+	Version string
 }
 
 // ResolveRuntimeCollections is ResolveRuntime generalised to a
@@ -214,7 +225,7 @@ func resolveSource(ctx context.Context, src Source, cfgPath string) (ResolvedCol
 		if ferr != nil {
 			return ResolvedCollection{}, fmt.Errorf("content-source.yaml (%s): %w", cfgPath, ferr)
 		}
-		return ResolvedCollection{Dir: dir, Source: src, Provenance: GCSProvenance(src, version)}, nil
+		return ResolvedCollection{Dir: dir, Source: src, Provenance: GCSProvenance(src, version), Version: version}, nil
 	case TypeGit, TypeSubmodule:
 		return ResolvedCollection{}, fmt.Errorf(
 			"content-source.yaml (%s): type %q is build-time only (it needs git and a working tree) — "+

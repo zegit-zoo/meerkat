@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -150,18 +152,11 @@ func (s *GCSStore) Load(ctx context.Context) ([]Record, error) {
 
 	out := make([]Record, 0, len(objs))
 	for _, o := range objs {
-		key := strings.TrimPrefix(o.Name, s.prefix)
-		if key == "" || !strings.HasSuffix(key, ".md") {
-			continue
-		}
-		// Staged artifacts are excluded here exactly as they are in the
-		// local backend: a pending proposal must never be loaded into a
-		// collection, whichever backend it is sitting in.
-		if Staged(key) {
-			continue
-		}
-		if err := checkKey(key); err != nil {
-			fmt.Fprintf(os.Stderr, "meerkat: skipping memory object %q: %v\n", o.Name, err)
+		key, kerr := s.liveDocumentKey(o.Name)
+		if kerr != nil {
+			if !errors.Is(kerr, errNotAMemoryDocument) {
+				fmt.Fprintf(os.Stderr, "meerkat: skipping memory object %q: %v\n", o.Name, kerr)
+			}
 			continue
 		}
 		// Read the exact generation the listing named, not "whatever is
@@ -180,6 +175,74 @@ func (s *GCSStore) Load(ctx context.Context) ([]Record, error) {
 		out = append(out, Record{Key: key, Body: body, Version: generationVersion(gen)})
 	}
 	return out, nil
+}
+
+// errNotAMemoryDocument marks an object under the store prefix that is
+// not a live memory document at all — a staged proposal, a stray
+// non-markdown file, the prefix placeholder. Distinguished from an
+// unsafe key so that Load can warn about the second and stay silent
+// about the first.
+var errNotAMemoryDocument = errors.New("not a live memory document")
+
+// liveDocumentKey maps a full object name to the store-relative key of a
+// LIVE memory document.
+//
+// It is shared by Load and Fingerprint, and sharing it is the point: the
+// fingerprint's contract is that it changes if and only if what Load
+// returns would change (see Fingerprinter), and two independent copies
+// of "which objects count" is exactly how that stops being true. A
+// staged proposal excluded here is excluded from both — so writing one
+// neither publishes it nor triggers a fleet-wide reload.
+func (s *GCSStore) liveDocumentKey(name string) (string, error) {
+	key := strings.TrimPrefix(name, s.prefix)
+	if key == "" || !strings.HasSuffix(key, ".md") {
+		return "", errNotAMemoryDocument
+	}
+	// Staged artifacts are excluded here exactly as they are in the local
+	// backend: a pending proposal must never be loaded into a collection,
+	// whichever backend it is sitting in.
+	if Staged(key) {
+		return "", errNotAMemoryDocument
+	}
+	if err := checkKey(key); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+// Fingerprint implements Fingerprinter: a sha256 over the sorted
+// (object name, generation) pairs of every LIVE document in the store.
+//
+// One list call, no reads. Every write to a live document assigns a new
+// generation, and every create or delete changes the set, so the digest
+// changes on exactly the events a reader needs to reload for — and on no
+// others. It is the same construction internal/contentsource uses to key
+// a prefix-mode content cache, for the same reason: a listing's
+// generations are the cheapest honest summary object storage offers.
+//
+// Truncated to 32 hex characters. It is a change detector compared
+// against a value this process itself recorded, not a security token:
+// there is no second party to forge one, and the full digest would only
+// make log lines longer.
+func (s *GCSStore) Fingerprint(ctx context.Context) (string, error) {
+	objs, err := s.api.List(ctx, s.bucket, s.prefix)
+	if err != nil {
+		return "", fmt.Errorf("list %s: %w", s.Describe(), err)
+	}
+	live := make([]gcsObject, 0, len(objs))
+	for _, o := range objs {
+		if _, kerr := s.liveDocumentKey(o.Name); kerr != nil {
+			continue
+		}
+		live = append(live, o)
+	}
+	sort.Slice(live, func(i, j int) bool { return live[i].Name < live[j].Name })
+
+	h := sha256.New()
+	for _, o := range live {
+		fmt.Fprintf(h, "%s\x00%d\n", o.Name, o.Generation)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:32], nil
 }
 
 // Stat implements Store.

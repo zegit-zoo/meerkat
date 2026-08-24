@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -141,6 +142,17 @@ With NO auth: block configured the server is unauthenticated and every
 mounted collection is readable by any caller — the same posture as
 'mcp serve'. Bind loopback (the default) or put a gateway in front.
 
+A collection whose content-source.yaml entry carries a "refresh:" block
+is re-checked while the server runs: a metadata-only probe every
+interval, and — only when the GCS object generation or prefix
+fingerprint actually moved — a re-resolve, an off-request-path index
+rebuild and an atomic swap. Queries keep being served throughout, from
+the previous snapshot until the new one is complete. A "refresh:" block
+under a collection's "memory:" is the same thing for a shared GCS memory
+store, and is what makes several replicas converge on each other's
+writes. SIGHUP runs every configured refresh immediately. See
+docs/design/hot-reload.md.
+
 The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -178,6 +190,7 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				fmt.Fprintf(cmd.ErrOrStderr(),
 					"meerkat hosted MCP serving on %s%s (auth: %s)\n",
 					s.Addr(), s.EndpointPath(), mode)
+				go watchReloadSignal(ctx, s, cmd.ErrOrStderr())
 			})
 			if err != nil && !errors.Is(err, context.Canceled) {
 				return fmt.Errorf("mcp serve-http: %w", err)
@@ -199,4 +212,42 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 			"a localhost value). Only for a same-host reverse proxy that preserves the original Host "+
 			"header; prefer rewriting Host at the proxy instead.")
 	return cmd
+}
+
+// watchReloadSignal turns SIGHUP into an immediate reconciliation cycle
+// for every collection with a `refresh:` block.
+//
+// SIGHUP rather than an admin HTTP endpoint, deliberately. An endpoint
+// would be a new mutating surface that has to be authenticated (the
+// operational endpoints beside it are all unauthenticated by design, and
+// a reload trigger emphatically cannot join them), rate-limited (it can
+// be made to hammer a bucket), and reasoned about for every deployment
+// topology. A signal is authorized by the operating system: you can send
+// it if you can already signal the process, which is strictly less
+// access than being able to restart it — the thing this feature exists
+// to avoid needing.
+//
+// It reaches the SAME code the scheduled loops use (HostedServer.Reload
+// -> Controller.ReloadNow -> Target.Reconcile), so a manual reload
+// cannot skip the staging discipline, the generation preconditions or
+// the atomic swap, and cannot run concurrently with a scheduled cycle:
+// the collection's reload slot refuses the second caller.
+func watchReloadSignal(ctx context.Context, s *mcp.HostedServer, w io.Writer) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGHUP)
+	defer signal.Stop(ch)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+			if err := s.Reload(ctx); err != nil {
+				// Not fatal: a failed reload leaves the last known-good
+				// content serving, which is the whole contract.
+				fmt.Fprintf(w, "meerkat: reload failed (still serving the last known-good content): %v\n", err)
+				continue
+			}
+			fmt.Fprintln(w, "meerkat: reload complete")
+		}
+	}
 }

@@ -154,7 +154,7 @@ func listCollections(cmd *cobra.Command, reg *collections.Registry, asJSON bool)
 	}
 	out := make([]entry, 0, reg.Len())
 	for _, c := range reg.All() {
-		e := entry{Name: c.Name, Type: c.Type(), Source: c.Provenance}
+		e := entry{Name: c.Name, Type: c.Type(), Source: c.Provenance()}
 		pages, err := c.Pages()
 		if err != nil {
 			// One unreadable collection must not hide the others: report
