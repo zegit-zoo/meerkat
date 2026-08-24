@@ -10,8 +10,11 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/zegit-zoo/meerkat/internal/collections"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // metrics is the hosted server's Prometheus instrumentation.
@@ -124,8 +127,12 @@ func (m *metrics) setReady(ready bool) {
 // is the one thing /readyz's body is careful not to do. The refresh
 // metrics carry per-target detail keyed by configuration ordinal (see
 // internal/refresh), and the log carries the names.
-func (m *metrics) setCollectionStates(health []collections.Health) {
-	ready, degraded := 0, 0
+// It also returns the two counts and the total enumerated page count, so
+// the caller can put the same numbers on a readiness span without
+// re-walking the slice. The page total is a TOTAL, deliberately: a
+// per-collection gauge would name the mounted set on an unauthenticated
+// endpoint, which is the one thing /readyz's body is careful not to do.
+func (m *metrics) setCollectionStates(health []collections.Health) (ready, degraded, pages int) {
 	for _, h := range health {
 		if h.Ready {
 			ready++
@@ -133,9 +140,11 @@ func (m *metrics) setCollectionStates(health []collections.Health) {
 		if h.Degraded {
 			degraded++
 		}
+		pages += h.Pages
 	}
 	m.collectionsReady.Set(float64(ready))
 	m.collectionsStale.Set(float64(degraded))
+	return ready, degraded, pages
 }
 
 // instrumentHTTP wraps the mux, counting and timing every request under
@@ -167,27 +176,61 @@ func (m *metrics) instrumentHTTP(mux *http.ServeMux) http.Handler {
 	})
 }
 
-// instrumentTool counts and times tool handler invocations.
+// instrumentTool counts and times tool handler invocations, and — when
+// tracing is on — wraps each one in the MCP tool span.
 //
 // The outcome label distinguishes a tool-level error (a bad query, an
 // unknown collection — the model's problem, handed back as a normal
 // result) from a transport-level error (meerkat's problem). Conflating
 // them would make a dashboard read as broken every time a model
-// mistyped a page ID.
+// mistyped a page ID. The span uses the same three-value vocabulary, so
+// a metric and a trace group the same way.
+//
+// The span is created here rather than in each handler for the same
+// reason the counter is: one place, so a tool added later is instrumented
+// by existing. It is a CHILD of the root HTTP span — mcp-go threads the
+// request context through to the handler — which is what makes a search
+// call one trace from the wire down to the bleve query.
 func (m *metrics) instrumentTool(next mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		name := req.Params.Name
+		tel := telemetry.FromContext(ctx)
+		ctx, span := tel.Start(ctx, telemetry.SpanMCPTool,
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(toolSpanAttrs(req)...))
+
 		timer := prometheus.NewTimer(m.toolDuration.WithLabelValues(name))
 		res, err := next(ctx, req)
 		timer.ObserveDuration()
+
+		outcome := telemetry.OutcomeOK
 		switch {
 		case err != nil:
-			m.toolCalls.WithLabelValues(name, "error").Inc()
+			outcome = telemetry.OutcomeError
 		case res != nil && res.IsError:
-			m.toolCalls.WithLabelValues(name, "tool_error").Inc()
-		default:
-			m.toolCalls.WithLabelValues(name, "ok").Inc()
+			outcome = telemetry.OutcomeToolError
 		}
+		m.toolCalls.WithLabelValues(name, outcome).Inc()
+
+		if tel.Tracing() {
+			bounded := telemetry.BoundedTool(name)
+			size := resultBytes(res)
+			span.SetAttributes(
+				telemetry.Outcome(outcome),
+				telemetry.KeyMCPResponseBytes.Int(size),
+			)
+			if outcome == telemetry.OutcomeError {
+				// The error object is deliberately NOT recorded: a
+				// transport-level failure's message can quote a page ID or a
+				// collection name, and neither may leave the process on a
+				// span. The bounded outcome is what a consumer groups by
+				// anyway, and the full text is already in the structured log.
+				span.SetStatus(codes.Error, telemetry.OutcomeError)
+			}
+			tel.Metrics().ToolPayload(bounded, "request", payloadBytes(req.Params.Arguments))
+			tel.Metrics().ToolPayload(bounded, "response", size)
+		}
+		span.End()
 		return res, err
 	}
 }

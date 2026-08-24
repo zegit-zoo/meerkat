@@ -15,6 +15,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/memory"
 	"github.com/zegit-zoo/meerkat/internal/refresh"
 	"github.com/zegit-zoo/meerkat/internal/search"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // reload.go is runtime reconciliation's business end: how a collection
@@ -100,6 +101,11 @@ type snapshot struct {
 	// refs counts the collection's own reference plus one per in-flight
 	// reader. The index is closed when it reaches zero.
 	refs atomic.Int64
+	// indexed reports that the once has run, for instrumentation only
+	// (see built). It is separate from `index` because reading that field
+	// outside the once is a data race, and a telemetry decision must not
+	// be the thing that introduces one.
+	indexed atomic.Bool
 }
 
 // acquire returns the snapshot serving right now, with a reference held
@@ -156,10 +162,20 @@ func (s *snapshot) discard() {
 	}
 }
 
+// built reports whether s's index already exists, so instrumentation can
+// tell a real build from a lazy no-op without forcing one.
+//
+// It reads an atomic flag rather than s.index, which is written under
+// the once and would be a data race to read beside it. Racing with a
+// concurrent first build is harmless either way — the answer only
+// decides whether a span is worth emitting.
+func (s *snapshot) built() bool { return s.indexed.Load() }
+
 // indexOf returns s's index, building it on first use from the pages s
 // resolves to.
 func (c *Collection) indexOf(s *snapshot) (*search.Index, error) {
 	s.once.Do(func() {
+		defer s.indexed.Store(true)
 		// Unfiltered, and unfiltered on purpose: the index must contain
 		// EVERY document, including private personal memories. Visibility
 		// is a clause in the query, applied at read time (see
@@ -182,13 +198,25 @@ func (c *Collection) indexOf(s *snapshot) (*search.Index, error) {
 // before anything is published, which is what keeps it off the request
 // path. Consuming the once means indexOf will hand out this index rather
 // than lazily building a second one.
-func newBuiltSnapshot(fsys fs.FS, provenance, version string, pages []kb.Page) (*snapshot, error) {
+func newBuiltSnapshot(ctx context.Context, fsys fs.FS, provenance, version string, pages []kb.Page) (*snapshot, error) {
+	ctx, span := telemetry.Span(ctx, telemetry.SpanIndexBuild,
+		telemetry.KeyIndexPages.Int(len(pages)))
+	started := time.Now()
 	idx, err := search.NewFromPages(pages)
+	outcome := telemetry.OutcomeOK
 	if err != nil {
+		outcome = telemetry.OutcomeError
+	}
+	telemetry.Record(ctx).IndexBuilt(outcome, time.Since(started).Seconds())
+	if err != nil {
+		telemetry.End(span, err)
 		return nil, fmt.Errorf("build search index: %w", err)
 	}
+	span.SetAttributes(telemetry.Outcome(outcome))
+	span.End()
 	s := &snapshot{fsys: fsys, provenance: provenance, version: version, index: idx}
 	s.once.Do(func() {})
+	s.indexed.Store(true)
 	return s, nil
 }
 
@@ -535,7 +563,15 @@ func (c *Collection) ReloadContent(ctx context.Context) (refresh.Outcome, error)
 		return refresh.Outcome{}, fmt.Errorf("collection %q is not configured for content refresh", c.Name)
 	}
 
-	version, err := probeVersion(ctx, src)
+	// Each of the six steps below gets a phase span, so a slow
+	// reconciliation is attributable to the probe, the download, the
+	// parse, the index build or the swap rather than to "the cycle". The
+	// spans carry durations and counts; the bucket, the object name and
+	// the error text stay out, exactly as they stay out of the refresh
+	// metric labels (internal/refresh/metrics.go).
+	version, err := phase(ctx, telemetry.PhaseProbe, func(ctx context.Context) (string, error) {
+		return probeVersion(ctx, src)
+	})
 	if err != nil {
 		return refresh.Outcome{}, c.contentFailed(fmt.Errorf("probe %s: %w", src.Bucket, err))
 	}
@@ -557,33 +593,77 @@ func (c *Collection) ReloadContent(ctx context.Context) (refresh.Outcome, error)
 	// two is then simply resolved as the newer generation — coherently,
 	// with its own conditional reads — instead of being fetched under a
 	// version token that no longer describes it.
-	dir, resolved, err := resolveContent(ctx, src)
+	//
+	// This one step is spanned by hand rather than through phase(): it
+	// returns two values, and a generic wrapper would need a struct to
+	// carry them. resolveCtx is deliberately a NEW variable — assigning
+	// back over ctx would parent every later phase to this one, and a
+	// trace that reads "mount happened inside resolve" is worse than no
+	// trace.
+	resolveCtx, resolveSpan := telemetry.Span(ctx, telemetry.PhaseResolve)
+	dir, resolved, err := resolveContent(resolveCtx, src)
 	if err != nil {
+		telemetry.Fail(resolveSpan, telemetry.OutcomeError)
 		return refresh.Outcome{}, c.contentFailed(fmt.Errorf("resolve: %w", err))
 	}
-	fsys, err := kbdir.FSLayout(dir, src.Layout)
+	resolveSpan.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
+	resolveSpan.End()
+
+	fsys, err := phase(ctx, telemetry.PhaseMount, func(context.Context) (fs.FS, error) {
+		return kbdir.FSLayout(dir, src.Layout)
+	})
 	if err != nil {
 		return refresh.Outcome{}, c.contentFailed(fmt.Errorf("mount: %w", err))
 	}
-	pages, err := c.contentPagesFrom(fsys)
+	pages, err := phase(ctx, telemetry.PhaseEnumerate, func(context.Context) ([]kb.Page, error) {
+		return c.contentPagesFrom(fsys)
+	})
 	if err != nil {
 		return refresh.Outcome{}, c.contentFailed(fmt.Errorf("enumerate pages: %w", err))
 	}
 	// The memory overlay is not touched by a content refresh, so it is
 	// merged from the live one — unfiltered, so every document is in the
 	// index and visibility stays a query-time decision.
-	next, err := newBuiltSnapshot(fsys, contentsource.GCSProvenance(src, resolved), resolved,
+	next, err := newBuiltSnapshot(ctx, fsys, contentsource.GCSProvenance(src, resolved), resolved,
 		c.mergeOverlay(pages, kb.Unfiltered()))
 	if err != nil {
 		return refresh.Outcome{}, c.contentFailed(err)
 	}
-	if err := c.commit(next, nil); err != nil {
+	if err := c.commitPhase(ctx, next, nil); err != nil {
 		next.discard()
 		return refresh.Outcome{}, c.contentFailed(err)
 	}
 	committed = true
 	c.status.succeeded(refresh.KindContent, resolved)
 	return refresh.Outcome{Changed: true, Version: resolved}, nil
+}
+
+// phase wraps one reconciliation step in a span.
+//
+// The step's error is classified rather than recorded: a probe or mount
+// failure quotes a bucket, an object name or a filesystem path, and none
+// of the three may be exported. The caller wraps the same error with the
+// full text for the log, where it belongs.
+func phase[T any](ctx context.Context, name string, fn func(context.Context) (T, error)) (T, error) {
+	ctx, span := telemetry.Span(ctx, name)
+	v, err := fn(ctx)
+	if err != nil {
+		telemetry.Fail(span, telemetry.OutcomeError)
+		return v, err
+	}
+	span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
+	span.End()
+	return v, nil
+}
+
+// commitPhase is commit under a span. The swap is the one step that
+// holds the write lock, so its duration is the answer to "did a reload
+// stall a save".
+func (c *Collection) commitPhase(ctx context.Context, s *snapshot, overlay map[string]kb.Page) error {
+	_, err := phase(ctx, telemetry.PhaseCommit, func(context.Context) (struct{}, error) {
+		return struct{}{}, c.commit(s, overlay)
+	})
+	return err
 }
 
 // contentFailed records a failed content cycle and returns the error to
@@ -627,7 +707,12 @@ func (c *Collection) ReloadMemory(ctx context.Context) (refresh.Outcome, error) 
 		return refresh.Outcome{}, fmt.Errorf("collection %q: memory store %s cannot be probed cheaply", c.Name, store.Describe())
 	}
 
-	sum, err := fp.Fingerprint(ctx)
+	backend := memory.Backend(store)
+	sum, err := phase(ctx, telemetry.PhaseProbe, func(ctx context.Context) (string, error) {
+		return timedMemory(ctx, backend, telemetry.MemoryFingerprint, func() (string, error) {
+			return fp.Fingerprint(ctx)
+		})
+	})
 	if err != nil {
 		return refresh.Outcome{}, c.memoryFailed(fmt.Errorf("probe memory store: %w", err))
 	}
@@ -644,7 +729,11 @@ func (c *Collection) ReloadMemory(ctx context.Context) (refresh.Outcome, error) 
 		}
 	}()
 
-	records, err := store.Load(ctx)
+	records, err := phase(ctx, telemetry.PhaseResolve, func(ctx context.Context) ([]memory.Record, error) {
+		return timedMemory(ctx, backend, telemetry.MemoryLoad, func() ([]memory.Record, error) {
+			return store.Load(ctx)
+		})
+	})
 	if err != nil {
 		return refresh.Outcome{}, c.memoryFailed(fmt.Errorf("load memory store: %w", err))
 	}
@@ -666,18 +755,20 @@ func (c *Collection) ReloadMemory(ctx context.Context) (refresh.Outcome, error) 
 	// filesystem and provenance so a concurrent content refresh cannot
 	// make this one publish a stale root.
 	cur := c.acquire()
-	pages, perr := c.contentPagesFrom(cur.fsys)
+	pages, perr := phase(ctx, telemetry.PhaseEnumerate, func(context.Context) ([]kb.Page, error) {
+		return c.contentPagesFrom(cur.fsys)
+	})
 	if perr != nil {
 		cur.release()
 		return refresh.Outcome{}, c.memoryFailed(fmt.Errorf("enumerate pages: %w", perr))
 	}
-	next, berr := newBuiltSnapshot(cur.fsys, cur.provenance, cur.version,
+	next, berr := newBuiltSnapshot(ctx, cur.fsys, cur.provenance, cur.version,
 		mergeOverlayMap(pages, overlay, kb.Unfiltered()))
 	cur.release()
 	if berr != nil {
 		return refresh.Outcome{}, c.memoryFailed(berr)
 	}
-	if err := c.commit(next, overlay); err != nil {
+	if err := c.commitPhase(ctx, next, overlay); err != nil {
 		next.discard()
 		return refresh.Outcome{}, c.memoryFailed(err)
 	}

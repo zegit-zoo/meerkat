@@ -29,6 +29,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/memory"
 	"github.com/zegit-zoo/meerkat/internal/refresh"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // ConfigFile is the repo-root config filename.
@@ -86,10 +87,17 @@ const (
 // is read only by `mk mcp serve-http`; every other surface ignores it,
 // so adding one cannot change what the CLI, stdio MCP or the
 // static-token HTTP server do. See internal/authz.
+// The optional `observability:` block is orthogonal to all three, in
+// exactly the way `auth:` is: it declares OpenTelemetry tracing and OTLP
+// export for the hosted MCP server, is read only by `mk mcp serve-http`,
+// and — absent, which is what every configuration written before it
+// existed has — changes nothing anywhere. See internal/telemetry and
+// docs/design/observability.md.
 type Config struct {
-	Content     Source        `yaml:"content"`
-	Collections []Collection  `yaml:"collections,omitempty"`
-	Auth        *authz.Config `yaml:"auth,omitempty"`
+	Content       Source            `yaml:"content"`
+	Collections   []Collection      `yaml:"collections,omitempty"`
+	Auth          *authz.Config     `yaml:"auth,omitempty"`
+	Observability *telemetry.Config `yaml:"observability,omitempty"`
 }
 
 // Collection is one named entry of a `collections:` list — a Source
@@ -295,6 +303,15 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 	// granting nothing is exactly the class of error that only shows up
 	// as "why can't this user see anything" weeks later.
 	if err := cfg.Auth.Validate(); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
+	}
+	// Same rule, same reason, for observability:. A plaintext collector
+	// endpoint with no explicit `insecure: true`, an unsupported
+	// protocol, a sample ratio outside [0,1] or a headers_env that is not
+	// an environment variable name all fail HERE — at load, where an
+	// operator is looking at the file — rather than silently producing a
+	// server that exports nothing and says so nowhere.
+	if _, err := telemetry.Resolve(cfg.Observability); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
 	}
 	if len(cfg.Collections) > 0 {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // collections.go holds the CLI's collection plumbing: the registry the
@@ -29,6 +30,13 @@ var activeRegistry *collections.Registry
 // (which is every deployment that hasn't opted in). Only `mk mcp
 // serve-http` reads it; see internal/authz.
 var activeAuth *authz.Config
+
+// activeObservability is the `observability:` block of the same
+// content-source.yaml, or nil when there is none — which is every
+// deployment that has not opted in, and the state in which no
+// OpenTelemetry SDK is constructed anywhere. Only `mk mcp serve-http`
+// reads it; see internal/telemetry.
+var activeObservability *telemetry.Config
 
 // registry returns the collections this invocation serves, falling back
 // to a single collection over the process-global KB filesystem.

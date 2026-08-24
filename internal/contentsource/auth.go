@@ -7,6 +7,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // auth.go resolves the `auth:` block — the OIDC providers and
@@ -67,4 +68,26 @@ func LoadRuntimeAuth(contentSourceFlag string) (*authz.Config, error) {
 		return nil, fmt.Errorf("content-source.yaml (%s): %w", path, err)
 	}
 	return cfg.Auth, nil
+}
+
+// LoadRuntimeObservability returns the observability: block of whichever
+// content-source.yaml runtime resolution would use, following the same
+// discovery order LoadRuntimeAuth does.
+//
+// A missing file, or a file with no observability: block, returns
+// (nil, nil). That is the back-compat state and the overwhelmingly
+// common one: no block means no OpenTelemetry SDK is constructed at all.
+// It sits beside LoadRuntimeAuth rather than inside it because the two
+// answer different questions for different subcommands, and a caller
+// that wants one should not be made to think about the other.
+func LoadRuntimeObservability(contentSourceFlag string) (*telemetry.Config, error) {
+	path, err := LocateRuntime(ResolveFlag(contentSourceFlag))
+	if err != nil || path == "" {
+		return nil, err
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("content-source.yaml (%s): %w", path, err)
+	}
+	return cfg.Observability, nil
 }

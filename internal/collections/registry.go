@@ -61,12 +61,14 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/memory"
 	"github.com/zegit-zoo/meerkat/internal/search"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // DefaultName is the name of the single collection a single-source
@@ -461,6 +463,55 @@ func (c *Collection) Index() (*search.Index, error) {
 	return c.indexOf(snap)
 }
 
+// IndexContext is Index with a context, so a build that actually happens
+// is traced and timed.
+//
+// The context is used for instrumentation and nothing else — a bleve
+// build is not cancellable and pretending otherwise would be a lie in
+// the signature. It exists because the startup build (internal/mcp's
+// indexAll) is often the slowest thing a hosted server does, and it was
+// the one part of startup a trace could not see.
+//
+// The span records how many documents were indexed and nothing about
+// them.
+func (c *Collection) IndexContext(ctx context.Context) (*search.Index, error) {
+	snap := c.acquire()
+	defer snap.release()
+	if snap.built() {
+		// Already built: nothing to time, and emitting a zero-duration
+		// span per call would bury the one build that mattered.
+		return c.indexOf(snap)
+	}
+	ctx, span := telemetry.Span(ctx, telemetry.SpanIndexBuild)
+	started := time.Now()
+	idx, err := c.indexOf(snap)
+	outcome := telemetry.OutcomeOK
+	if err != nil {
+		outcome = telemetry.OutcomeError
+	}
+	telemetry.Record(ctx).IndexBuilt(outcome, time.Since(started).Seconds())
+	if err != nil {
+		// The error names the collection ("collection %q: ..."), so it is
+		// classified rather than recorded.
+		telemetry.Fail(span, outcome)
+		return nil, err
+	}
+	span.SetAttributes(telemetry.Outcome(outcome), telemetry.KeyIndexPages.Int(c.snapshotPages(snap)))
+	span.End()
+	return idx, nil
+}
+
+// snapshotPages counts what went into a snapshot's index, for the build
+// span. Best-effort: a snapshot whose enumeration failed reports zero
+// rather than propagating an error into instrumentation.
+func (c *Collection) snapshotPages(s *snapshot) int {
+	pages, err := c.pagesOf(s, kb.Unfiltered())
+	if err != nil {
+		return 0
+	}
+	return len(pages)
+}
+
 // Close releases the collection's index, if one was built, and its
 // memory store, if one is attached.
 //
@@ -566,7 +617,9 @@ func (c *Collection) SaveMemory(ctx context.Context, key string, body []byte, pr
 	if store == nil {
 		return "", kb.Page{}, fmt.Errorf("collection %q has no memory store configured", c.Name)
 	}
-	version, err := store.Put(ctx, key, body, pre)
+	version, err := timedMemory(ctx, memory.Backend(store), telemetry.MemorySave, func() (memory.Version, error) {
+		return store.Put(ctx, key, body, pre)
+	})
 	if err != nil {
 		return "", kb.Page{}, err
 	}
@@ -592,7 +645,37 @@ func (c *Collection) StageMemory(ctx context.Context, key string, body []byte) (
 	if store == nil {
 		return "", fmt.Errorf("collection %q has no memory store configured", c.Name)
 	}
-	return store.Stage(ctx, key, body)
+	return timedMemory(ctx, memory.Backend(store), telemetry.MemoryStage, func() (string, error) {
+		return store.Stage(ctx, key, body)
+	})
+}
+
+// timedMemory times one memory-store operation and records it under the
+// two bounded labels the backend metrics carry.
+//
+// It records a SPAN as well as the metric, so a slow save is
+// attributable to the object store rather than to meerkat, and the span
+// says which backend and which operation and nothing else — not the key,
+// not the bucket, not the object name. `backend` comes from
+// memory.Backend and `operation` from internal/telemetry's closed set;
+// there is no path by which either could become caller text.
+func timedMemory[T any](ctx context.Context, backend, operation string, fn func() (T, error)) (T, error) {
+	_, span := telemetry.Span(ctx, telemetry.SpanMemoryStore,
+		telemetry.KeyMemoryBackend.String(backend),
+		telemetry.KeyMemoryOperation.String(operation),
+	)
+	started := time.Now()
+	v, err := fn()
+	telemetry.Record(ctx).MemoryBackend(backend, operation, time.Since(started).Seconds(), err != nil)
+	if err != nil {
+		// Classified, not recorded: a GCS error can quote the object path
+		// and a local one the filesystem path.
+		telemetry.Fail(span, telemetry.OutcomeError)
+		return v, err
+	}
+	span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
+	span.End()
+	return v, nil
 }
 
 // Registry is an ordered set of mounted collections. Configuration
@@ -1079,6 +1162,10 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 		order[c.Name] = i
 	}
 	v := r.viewerOf()
+	ctx, span := telemetry.Span(ctx, telemetry.SpanSearchCollection,
+		telemetry.KeySearchLimit.Int(limit),
+		telemetry.KeySearchFiltered.Bool(!v.IsUnfiltered()),
+	)
 	var out []Hit
 	for _, c := range targets {
 		// The viewer goes INTO the query, not over its results. Each
@@ -1089,12 +1176,26 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 		// per-collection top-N would do, and it would do it invisibly.
 		results, err := c.searchAs(ctx, v, query, limit)
 		if err != nil {
+			// Classified rather than recorded: the error wraps bleve's own
+			// `search %q: ...`, which quotes the caller's query verbatim.
+			telemetry.Fail(span, telemetry.OutcomeError)
 			return nil, err
 		}
 		for _, res := range results {
 			out = append(out, Hit{Collection: c.Name, Result: res})
 		}
 	}
+	// One span per fan-out, not per collection: the per-collection detail
+	// a span could carry is the collection's NAME, which is exactly what
+	// may not be exported, so it would be a span that says nothing the
+	// parent does not. What is worth recording is the shape of the
+	// fan-out — how many indexes were queried, whether a visibility
+	// clause was in force — and that is one attribute set.
+	span.SetAttributes(
+		telemetry.KeyCollectionCount.Int(len(targets)),
+		telemetry.KeySearchResults.Int(len(out)),
+	)
+	span.End()
 	sort.SliceStable(out, func(a, b int) bool {
 		if out[a].Score != out[b].Score {
 			return out[a].Score > out[b].Score

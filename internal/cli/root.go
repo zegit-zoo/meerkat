@@ -148,6 +148,11 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 				// --kb-dir X` gets its policy from --auth-config or runs
 				// unauthenticated — the same rule as for content.
 				activeAuth = nil
+				// Same rule for observability:. A --kb-dir deployment that
+				// wants tracing turns it on through the standard OTEL_*
+				// environment (and MEERKAT_TRACES_ENABLED), which is how a
+				// container with no config file was always going to do it.
+				activeObservability = nil
 				return nil
 			}
 			resolved, err := contentsource.ResolveRuntimeCollections(cmd.Context(), contentSourceFlag)
@@ -164,6 +169,11 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 				return err
 			}
 			activeAuth = auth
+			obs, err := contentsource.LoadRuntimeObservability(contentSourceFlag)
+			if err != nil {
+				return err
+			}
+			activeObservability = obs
 			// Point the process-global KB filesystem at the FIRST resolved
 			// collection. For every single-collection configuration (which
 			// is every configuration that predates collections) that is

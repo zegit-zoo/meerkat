@@ -392,6 +392,14 @@ meerkat_refresh_last_success_timestamp_seconds{collection,kind}
 meerkat_refresh_degraded{collection,kind}
 ```
 
+Since #30 an opt-in `observability:` block adds bounded domain series
+beside these — index build, source resolution by bounded type, content
+cache hit/miss, search duration and result-count, memory outcomes by
+scope, coarse tool payload sizes, and the exporter's own health — all
+under the same label discipline. Nothing above is removed or renamed,
+and with no `observability:` block none of it is registered at all. See
+[observability.md](observability.md).
+
 `tool_error` (a bad query, an unknown collection — the model's problem,
 handed back as a normal result) is kept apart from `error` (a transport
 failure — meerkat's problem). Conflating them would make a dashboard
@@ -418,6 +426,12 @@ The access log sits *above* the authentication gate so that 401s are
 logged too, which is the line an operator most wants; the identity
 travels back up through a small holder in the request context, since the
 gate installs grants on a derived request the outer frame never sees.
+
+Since #30 the line additionally carries `trace_id` and `span_id` when
+tracing is on. The bridge is two IDs wide and goes one way: identity
+stays in the log and never reaches a span, because a span is exported
+out of the process and the log is not. See
+[observability.md](observability.md).
 
 ## Back-compat
 

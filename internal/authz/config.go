@@ -287,6 +287,19 @@ func (p *Policy) Config() *Config {
 	return p.cfg
 }
 
+// Len reports how many rules the policy evaluates. It exists for
+// telemetry: a decision span records how many rules were considered,
+// which is a bounded number an operator can act on, where the rules
+// themselves (names, group selectors, collection lists) are exactly what
+// must not leave the process. Nil-safe — an unconfigured policy has no
+// rules.
+func (p *Policy) Len() int {
+	if p == nil || p.cfg == nil {
+		return 0
+	}
+	return len(p.cfg.Rules)
+}
+
 // Evaluate returns the grants an identity holds. Every matching rule
 // contributes its capabilities over its collections; a caller matched
 // by three rules holds the union.

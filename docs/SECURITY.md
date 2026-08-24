@@ -171,6 +171,7 @@ is small but worth being explicit about:
 | `mk mcp serve-http` — who may read another principal's PERSONAL memory | A caller reading, enumerating or inferring the existence of a memory somebody else saved for themselves | A personal memory is readable only by the principal whose namespace it is in — the verified `(iss, sub)` pair, never a tool argument, and never a mutable claim like email/groups/tenant. Enforcement is by *narrowing the per-request registry view* once (`Registry.ViewedBy`), exactly as collection authorization narrows it, so search, list, show, page counts, snippets and `mk_show`'s ambiguity count all inherit it rather than each checking. In search the filter is a **mandatory clause inside the bleve query**, boosted to zero, so ineligible documents are excluded before ranking and before the `limit` truncation — a post-filter over the top N would both leak metadata and silently return an empty result when the limit was consumed by hidden documents. An unauthorized read answers `not found`, byte-identical to a page that was never written, for bare and qualified IDs alike. `admin` does not confer it: capabilities are held over a collection, and ownership is not a capability. An operator may opt a collection back into the old collection-wide behaviour with `memory.personal_visibility: collection`, which logs a startup warning under OIDC. See [design/memory.md](design/memory.md#private-personal-reads-27). |
 | `mk mcp serve-http` unauthenticated endpoints (`/livez`, `/readyz`, `/metrics`, `/.well-known/oauth-protected-resource`) | Enumeration of the deployment by an unauthenticated caller | Probes and metrics are deliberately unauthenticated (an orchestrator and a scrape job have no OIDC token, and a probe that can fail for auth reasons restarts healthy pods), so they are written to carry nothing: `/readyz` reports **counts and state, never collection names** — ready/degraded/total, with the names, bucket, generation and error text behind a failure going to the structured log instead; no metric carries a collection name, bucket, object path, memory key, page ID, query or caller subject as a label; the `route` label is the server's own matched mux pattern from a closed set, never `r.URL.Path`, so a scanner can't add time series. The refresh series (`meerkat_refresh_*`) are labelled by the collection's configuration **ordinal** and a two-value kind, and deliberately **not** by the source generation or fingerprint — that increments forever, so one series per publication would be an unbounded cardinality leak as well as a disclosure; the version travels in the log and in authenticated collection discovery. The RFC 9728 metadata is public by definition — its job is to be readable by a client that has no token yet — and contains only the resource identifier and the configured issuers. `GET /` names no collection. |
 | `mk mcp serve-http` access logs | Credential or membership disclosure via logging | The `Authorization` header, the raw token, group membership and request bodies are never logged. Logged: method, path, status, duration, bytes, peer, user agent, MCP session ID, and (authenticated only) `sub`/`issuer`/`tenant` — an audit trail without a directory dump. `X-Forwarded-For` is deliberately **not** consulted: it is client-controlled unless a trusted proxy rewrites it, and meerkat has no way to know that. **The server has no TLS of its own**; default bind is loopback. Exposed beyond one host without a TLS-terminating proxy, bearer tokens and every response body cross the network in plaintext. |
+| `mk mcp serve-http` **telemetry export** (`observability:`) | Request metadata leaving the process to a collector — frequently a shared one, frequently a third party's — and carrying more than the operator realised; a plaintext export across a cluster network; a collector credential ending up in a committed config file; an exporter outage becoming an availability incident | **Opt-in and off by default.** With no `observability:` block and no `OTEL_*` variable no SDK is constructed at all — no spans, no exporter, no goroutine, no socket — and `/metrics` and the JSON logs are byte-identical to what they were (pinned by `TestObservability_ZeroConfigurationChangesNothing`). **Data classification:** a span is exported OUT of the trust boundary, so it is held to a stricter rule than the access log beside it. Spans and the new metrics carry only counts, durations, booleans, outcomes from a closed set, the server's own matched route pattern, and a collection's configuration ORDINAL. Never: query text, page IDs, page or memory content, tags, memory keys, collection names, bucket/object/prefix names, bearer tokens, any OAuth claim, the OIDC subject/email/groups/tenant, MCP session IDs, or `r.URL.Path`. The access log deliberately still carries `sub`/`issuer`/`tenant` — it stays on the operator's stderr; identity is **not** on a default span, and correlating a trace to a principal is a separate decision that has not been made. Error TEXT is never recorded on a span either (meerkat's messages quote queries, collection names, buckets); spans get a classified outcome and the log gets the sentence. `TestObservability_NoSpanOrMetricCarriesAForbiddenValue` drives every read surface and walks every recorded span and metric label asserting each of those classes is absent. **TLS on by default:** a plaintext `http://` collector endpoint is refused at config load unless `otlp.insecure: true` is written out, and `OTEL_EXPORTER_OTLP_INSECURE` cannot revoke a posture the file stated. **No credentials in `content-source.yaml`:** there is no `headers:` field, only `headers_env:`, which names an environment variable read at startup — the same reasoning that gives `type: gcs` no key-file field, and a test asserts the schema marshals no `headers:`/`token:`/`api_key:`/`password:` key. **No inbound surface:** the collector endpoint comes from configuration/environment only; no MCP request, header or tool argument can name an endpoint or add a header. Trace context is correlation data, never authorization data, and W3C baggage is not propagated in either direction. **Never an availability dependency:** the span queue is bounded and drops rather than growing (`meerkat_otel_spans_dropped_total`), export failures are counted (`meerkat_otel_export_failures_total`) and log-rate-limited, and the shutdown flush is bounded, so a dead collector cannot fail `/readyz`, fail a search or hold a pod in Terminating. See [design/observability.md](design/observability.md). |
 | `mk http serve` API key, and the traffic it guards | Disclosure — in code/logs, or on the wire | Key comparison is constant-time (`subtle.ConstantTimeCompare`), the key is never echoed, and the server refuses to start without one. **The server has no TLS of its own** (`ListenAndServe`, never `ListenAndServeTLS`) — default bind is loopback (`127.0.0.1`). Exposed beyond one host without a TLS-terminating reverse proxy in front, the bearer token and every response body cross the network in plaintext. See `docs/INTEGRATION-OPENWEBUI.md` for the reverse-proxy pattern. |
 | `mk ingest --execute` spawns an agent CLI (`opencode` or `claude`) | Prompt injection: `Task.Prompt` is rendered from `ingestion/prompts/*.md` in the ingested content source, so a malicious prompt file in any source repo in `sources.yaml` is an arbitrary-action path, running with `cmd.Dir`/`--dir` set to a working copy that holds push credentials, at the operator's full privilege. The generated instruction itself includes a `git push` recipe. | Ingested content is treated as **trusted input** to the agent — meerkat does not sandbox or vet it. The real control is permission prompts: by default the agent CLI runs *with* its normal permission prompts, so an injected instruction still has to get past those before it acts. `--trust-sources` disables the prompts (passes `--dangerously-skip-permissions` to the agent CLI) for unattended/CI runs; it prints a stderr warning before executing. Operators who enable `--trust-sources` must trust every source repo listed in `sources.yaml` — as much as they trust code they'd merge unreviewed. |
 | Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk. **When served from a runtime content source instead** (`--kb-dir`/`MEERKAT_KB_DIR`, or a `content-source.yaml` `type: local`/`type: url`/`type: gcs` source), the three rows above apply here too: unverified for `disk:<path>`, digest-verified (with the same caveats) for `url:<url>@...`, generation-pinned for `gcs://...` — either way, outside the gosec walk and the cosign-signed release. |
@@ -270,6 +271,52 @@ all rather than defaulting them into a shared namespace, matching the
 fact that it already refuses to let them write one. Local and stdio
 usage serve one principal, who owns the `local` namespace their own
 memories are written into, and are unaffected.
+
+### Telemetry: two surfaces, two standards
+
+`observability:` introduces the first thing meerkat sends OUT of the
+process about the requests it serves. That makes the distinction between
+the access log and a span a security boundary rather than a style
+preference, and it is worth stating on its own.
+
+**The access log is inside the trust boundary. A span is not.**
+
+The log is written to this process's stderr, collected by whatever the
+operator already collects stderr with, inside their own infrastructure.
+It carries `sub`, `issuer` and `tenant` because an audit trail needs to
+name the caller.
+
+A span is handed to an OpenTelemetry collector — routinely a shared one,
+routinely a vendor's, routinely with a longer retention and a wider
+readership than the log. So the same request produces two records with
+deliberately different contents:
+
+| | access log | span |
+| --- | --- | --- |
+| method, status, duration, bytes | yes | yes (route pattern, not path) |
+| peer IP, User-Agent, MCP session ID | yes | **no** |
+| `sub` / `issuer` / `tenant` | yes | **no** |
+| request path as sent | yes | **no** (matched route only) |
+| collection name, bucket, object | log only | **no** |
+| error text | yes | **no** (classified outcome only) |
+| trace_id / span_id | yes (added by this change) | — |
+
+The bridge between them is two IDs wide and goes one way: IDs come into
+the log, and nothing goes from the log into the span.
+
+Three consequences worth being explicit about:
+
+- **Enabling tracing does not widen what an unauthenticated caller can
+  learn.** `/metrics` gains series, all of them labelled from closed
+  sets; `/readyz` and `GET /` are untouched.
+- **Enabling tracing does change your data-classification story**, and
+  that is the point of this section: request metadata now leaves the
+  process. What leaves is bounded by the table above and by a test, but
+  the decision to send it anywhere is the operator's.
+- **A collector credential is not expressible in `content-source.yaml`.**
+  `headers_env:` names an environment variable; there is no field the
+  value could be written into. Treat a `content-source.yaml` that
+  mentions a collector as ordinary configuration, not as a secret.
 
 ### `kb_commit` vs. `kb_source`: the provenance split
 
