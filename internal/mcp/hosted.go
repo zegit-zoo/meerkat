@@ -21,6 +21,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/memory"
+	"github.com/zegit-zoo/meerkat/internal/refresh"
 )
 
 // hosted.go is the Streamable HTTP transport: `mk mcp serve-http`.
@@ -135,6 +136,11 @@ type HostedServer struct {
 	metrics *metrics
 	gate    *authn.Gate
 	auth    *authz.Config
+	// refresh reconciles mutable GCS sources and GCS memory stores on
+	// their configured schedules. nil when nothing opted in, which is
+	// every deployment that has not written a `refresh:` block; every
+	// call site tolerates a nil controller.
+	refresh *refresh.Controller
 
 	ready readinessCache
 }
@@ -169,6 +175,17 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	}
 	s.metrics = newMetrics(cfg.Metrics, cfg.Version, reg.Len())
 	s.warnCollectionWidePersonalMemories()
+
+	// Runtime reconciliation is opt-in and configuration-driven: the
+	// targets come from the collections' own `refresh:` blocks, so there
+	// is no server-level switch that could turn it on for a deployment
+	// that did not ask, and none that could turn it off for one that did.
+	// The loops do not start here — see ListenAndServe.
+	s.refresh = refresh.New(refresh.Options{
+		Targets:  reg.RefreshTargets(),
+		Logger:   s.log,
+		Registry: s.metrics.reg,
+	})
 
 	verifier, err := authn.NewVerifier(ctx, authn.Options{
 		Config:     cfg.Auth,
@@ -411,6 +428,13 @@ func ServeStreamableHTTP(ctx context.Context, cfg HostedConfig, ready func(*Host
 // so SSE streams end cleanly rather than being severed by the listener
 // going away.
 func (s *HostedServer) ListenAndServe(ctx context.Context) error {
+	// Reconciliation runs for exactly as long as the server does. Starting
+	// it here rather than in NewHosted means a caller that builds a server
+	// to inspect its handler (a test, an embedding host) never acquires a
+	// background poller it did not ask for.
+	s.refresh.Start(ctx)
+	defer func() { _ = s.refresh.Close() }()
+
 	errCh := make(chan error, 1)
 	go func() {
 		err := s.srv.ListenAndServe()
@@ -433,14 +457,36 @@ func (s *HostedServer) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-// Close releases every collection's search index.
+// Close stops reconciliation and releases every collection's search
+// index.
+//
+// The refresh controller is stopped FIRST, and Close waits for any
+// in-flight cycle: a cycle that is mid-swap is about to install a
+// snapshot into a registry we are about to tear down.
 func (s *HostedServer) Close() error {
+	_ = s.refresh.Close()
 	if s.reg == nil {
 		return nil
 	}
 	err := s.reg.Close()
 	s.reg = nil
 	return err
+}
+
+// Reload runs one reconciliation cycle for every configured refresh
+// target, right now, and reports what failed.
+//
+// It is the ADMIN RELOAD TRIGGER — `mk mcp serve-http` wires SIGHUP to
+// it — and it deliberately calls the very same Reconcile path the
+// scheduled loops use. A second update path would be a second place to
+// get the staging discipline, the generation preconditions and the
+// atomic swap wrong.
+//
+// A deployment with no `refresh:` block anywhere has nothing to reload,
+// and this is a no-op rather than an error: an operator sending SIGHUP
+// to the wrong process should not get a failure they have to interpret.
+func (s *HostedServer) Reload(ctx context.Context) error {
+	return s.refresh.ReloadNow(ctx)
 }
 
 // --- probes ----------------------------------------------------------
@@ -468,16 +514,37 @@ func (s *HostedServer) handleLivez(w http.ResponseWriter, _ *http.Request) {
 // index. That is exactly the set of things a search/show/list request
 // depends on, so a green /readyz means those requests can be served.
 //
-// The response body carries COUNTS, never collection names — /readyz is
+// The response body carries COUNTS AND STATE, never collection names,
+// never a bucket, never a generation, never an error string — /readyz is
 // unauthenticated, and the mounted set is not public information (see
-// routes). The names behind a failure go to the structured log.
+// routes). Everything behind a number here goes to the structured log
+// and to authenticated collection discovery instead.
+//
+// Two axes, deliberately separate:
+//
+//	ready     the collection enumerates and holds a built index, so it
+//	          is answering queries. Drives the HTTP status.
+//	degraded  its most recent refresh FAILED and it is serving the last
+//	          known-good snapshot. Reported, but does not by itself fail
+//	          the probe.
+//
+// A degraded collection answering correct, slightly older content is not
+// an availability failure, and 503-ing on one would drain a healthy
+// replica over a publication-pipeline mistake — usually every replica at
+// once, since they all read the same bucket. An operator who wants the
+// opposite trade asks for it per collection with `failure_policy:
+// unready`, which makes the collection not-ready and shows up here as a
+// 503 through the normal path.
 func (s *HostedServer) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	ready, health := s.readiness()
 	total := len(health)
-	nReady := 0
+	nReady, nDegraded := 0, 0
 	for _, h := range health {
 		if h.Ready {
 			nReady++
+		}
+		if h.Degraded {
+			nDegraded++
 		}
 	}
 	status := http.StatusOK
@@ -485,12 +552,17 @@ func (s *HostedServer) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	if !ready {
 		status = http.StatusServiceUnavailable
 		state = "degraded"
+	} else if nDegraded > 0 {
+		// Serving, but not current. Worth a word an alert can match on,
+		// and not worth taking the replica out of rotation for.
+		state = "degraded"
 	}
 	writeJSON(w, status, map[string]any{
 		"status": state,
 		"collections": map[string]int{
-			"ready": nReady,
-			"total": total,
+			"ready":    nReady,
+			"degraded": nDegraded,
+			"total":    total,
 		},
 	})
 }
@@ -515,6 +587,7 @@ func (s *HostedServer) readiness() (bool, []collections.Health) {
 	}
 	s.ready.ready, s.ready.health, s.ready.at, s.ready.computed = ready, health, time.Now(), true
 	s.metrics.setReady(ready)
+	s.metrics.setCollectionStates(health)
 	return ready, health
 }
 

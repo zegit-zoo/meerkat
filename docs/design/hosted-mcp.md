@@ -318,14 +318,19 @@ scrape job have no OIDC token and shouldn't need one — a probe that can
 fail for auth reasons is a probe that restarts healthy pods. The cost is
 bounded by making them say nothing worth having:
 
-- **`/readyz` reports counts, never names** (`{"status":"ready",
-  "collections":{"ready":3,"total":3}}`). The mounted set is not public
-  information; the names behind a failure go to the structured log.
-- **No metric carries a collection name, a page ID, a query or a caller
-  subject as a label.** The `route` label is the server's own matched
-  mux pattern from a closed set, never `r.URL.Path` — so a scanner
-  probing `/wp-admin` collapses to `route="other"` instead of adding a
-  time series.
+- **`/readyz` reports counts and state, never names** (`{"status":"ready",
+  "collections":{"ready":3,"degraded":0,"total":3}}`). The mounted set is
+  not public information; the names, and the bucket/generation/error text
+  behind a failure, go to the structured log.
+- **No metric carries a collection name, a bucket, an object path, a page
+  ID, a query or a caller subject as a label.** The `route` label is the
+  server's own matched mux pattern from a closed set, never `r.URL.Path`
+  — so a scanner probing `/wp-admin` collapses to `route="other"` instead
+  of adding a time series. Since #28 the same rule excludes a *source
+  generation or fingerprint*, for a second reason: it increments forever,
+  so one series per publication would be an unbounded cardinality leak.
+  The refresh series are keyed by the collection's configuration ordinal
+  instead.
 
 ### What readiness actually checks
 
@@ -347,6 +352,19 @@ Liveness never touches content. Restarting the process does not remount
 a volume, so a content failure that failed liveness would produce a
 crash loop instead of a diagnosis.
 
+**Ready and degraded are different axes (#28).** A collection whose last
+runtime refresh failed is *degraded*: it is serving the last known-good
+snapshot, answering every query correctly, with content that is merely
+older than the bucket's. That is a staleness problem, not an availability
+one, so under the default `failure_policy: serve-last-good` it stays
+**ready** and `/readyz` answers 200 with `"status":"degraded"` and a
+non-zero `degraded` count — something worth looking at, nothing that
+should drain the replica. (It would usually drain *every* replica: they
+all read the same bucket and would fail together.) `failure_policy:
+unready` couples the two for a collection whose whole value is being
+current, and then the ordinary not-ready path produces the 503. See
+[hot-reload.md](hot-reload.md).
+
 ### Metrics
 
 ```
@@ -357,8 +375,21 @@ meerkat_mcp_tool_calls_total{tool,outcome}   # ok | tool_error | error
 meerkat_mcp_tool_duration_seconds{tool}
 meerkat_mcp_sessions_active
 meerkat_collections_mounted
+meerkat_collections_ready
+meerkat_collections_degraded
 meerkat_ready
 meerkat_build_info{version}
+
+# only when a collection opts into runtime reconciliation (#28).
+# `collection` is the configuration ORDINAL, never a name;
+# `kind` is content | memory.
+meerkat_refresh_attempts_total{collection,kind}
+meerkat_refresh_changes_total{collection,kind}
+meerkat_refresh_failures_total{collection,kind}
+meerkat_refresh_skipped_total{collection,kind}
+meerkat_refresh_duration_seconds{collection,kind}
+meerkat_refresh_last_success_timestamp_seconds{collection,kind}
+meerkat_refresh_degraded{collection,kind}
 ```
 
 `tool_error` (a bad query, an unknown collection — the model's problem,

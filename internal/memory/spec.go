@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/zegit-zoo/meerkat/internal/refresh"
 )
 
 // Backend type values for a `memory:` block.
@@ -90,6 +92,20 @@ type Spec struct {
 	// private, so the secure answer is what a configuration that says
 	// nothing gets. Read it through Visibility().
 	PersonalVisibility string `yaml:"personal_visibility,omitempty"`
+
+	// Refresh opts this store into RUNTIME RECONCILIATION: a periodic,
+	// metadata-only probe of the store's object listing that reloads the
+	// collection's memory overlay and rebuilds its index when another
+	// writer has changed something.
+	//
+	// It is what makes several replicas sharing one GCS memory store
+	// converge. Replica A indexes its own writes immediately (see
+	// collections.Collection.SaveMemory); without this, a memory written
+	// through A stays invisible to B until B restarts.
+	//
+	// type: gcs only — see Validate. A local store has no other writer to
+	// converge with: it is a directory belonging to one process.
+	Refresh *refresh.Spec `yaml:"refresh,omitempty"`
 }
 
 // Visibility returns the effective personal-memory read policy: the
@@ -158,7 +174,17 @@ func (s *Spec) Validate(label string, contentIsEphemeral bool) error {
 	default:
 		return fmt.Errorf("%s.type must be %s or %s, got %q", label, BackendLocal, BackendGCS, s.Type)
 	}
-	return nil
+	if s.Refresh != nil && s.Type != BackendGCS {
+		// A local store is a directory this process owns; there is no
+		// second writer to converge with, so a refresh block on one is a
+		// misunderstanding of what reconciliation is for. Refusing it is
+		// better than accepting a poll loop that can only ever re-read what
+		// this process itself wrote.
+		return fmt.Errorf("%s.refresh applies to type: %s only (this store is type: %s) — "+
+			"reconciliation exists so replicas sharing one object store converge, and a local store has no other writer",
+			label, BackendGCS, s.Type)
+	}
+	return s.Refresh.Validate(label + ".refresh")
 }
 
 // Open builds the store a Spec describes. contentDir is the

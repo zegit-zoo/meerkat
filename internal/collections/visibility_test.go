@@ -542,39 +542,91 @@ func TestPagesFor_ReservedPrefixAppliesToContentPagesToo(t *testing.T) {
 // re-read from its store into a fresh overlay is still private to the
 // same principal.
 //
-// This is the path issue #28's hot reload will take — rebuild the
-// overlay and the index from the store — so it is pinned here rather
-// than left implicit. (Whether the two BACKENDS agree about the key a
-// document comes back under is pinned one layer down, in
-// internal/memory's visibility_test.go, where the GCS fake lives.)
+// This is the path issue #28's hot reload takes — rebuild the overlay
+// and the index from the store — so it is pinned here rather than left
+// implicit. (Whether the two BACKENDS agree about the key a document
+// comes back under is pinned one layer down, in internal/memory's
+// visibility_test.go, where the GCS fake lives.)
+//
+// Since #28 it runs the property twice: once over a fresh mount (a
+// restart), and once over a LIVE collection that reconciled its memory
+// store while serving (ReloadMemory). The second is the one that
+// matters now — a reload rebuilds the overlay and swaps a whole new
+// index in, and if either half derived the owner from anything other
+// than the store key, every personal memory in the fleet would become
+// public one poll interval after it was written.
 func TestViewedBy_SurvivesARemount(t *testing.T) {
 	ctx := context.Background()
-	c := memCollWithStore(t, "notes", []kb.Page{page("handbook/onboarding", "Onboarding", "the axolotl handbook")})
-	save(t, c, personalKey(aliceNS, "salary"), "Salary", "the axolotl detail")
-	id := personalID(aliceNS, "salary")
 
-	remounted := FromPages("notes", []kb.Page{page("handbook/onboarding", "Onboarding", "the axolotl handbook")})
-	if err := remounted.AttachMemory(ctx, c.Memory()); err != nil {
-		t.Fatalf("remount: %v", err)
-	}
-	reg, err := New(remounted)
-	if err != nil {
-		t.Fatal(err)
+	assertStillPrivate := func(t *testing.T, reg *Registry, id, label string) {
+		t.Helper()
+		if _, err := reg.ViewedBy(kb.AsOwner(aliceNS)).Show("", id); err != nil {
+			t.Errorf("after %s the owner cannot read their memory: %v", label, err)
+		}
+		if _, err := reg.ViewedBy(kb.AsOwner(bobNS)).Show("", id); !errors.Is(err, kb.ErrNotFound) {
+			t.Errorf("after %s the memory became readable by another principal: %v", label, err)
+		}
+		hits, err := reg.ViewedBy(kb.AsOwner(bobNS)).Search(ctx, "", "axolotl", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(hits) != 1 || hits[0].Page.ID != "handbook/onboarding" {
+			t.Errorf("after %s bob's search = %+v, want only the public page", label, hits)
+		}
+		pages, err := reg.ViewedBy(kb.AsOwner(bobNS)).Pages("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hasID(pages, id) {
+			t.Errorf("after %s bob can list alice's memory: %v", label, ids(pages))
+		}
 	}
 
-	if _, err := reg.ViewedBy(kb.AsOwner(aliceNS)).Show("", id); err != nil {
-		t.Errorf("after a remount the owner cannot read their memory: %v", err)
-	}
-	if _, err := reg.ViewedBy(kb.AsOwner(bobNS)).Show("", id); !errors.Is(err, kb.ErrNotFound) {
-		t.Errorf("after a remount the memory became readable by another principal: %v", err)
-	}
-	hits, err := reg.ViewedBy(kb.AsOwner(bobNS)).Search(ctx, "", "axolotl", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hits) != 1 || hits[0].Page.ID != "handbook/onboarding" {
-		t.Errorf("after a remount bob's search = %+v, want only the public page", hits)
-	}
+	t.Run("fresh mount", func(t *testing.T) {
+		c := memCollWithStore(t, "notes", []kb.Page{page("handbook/onboarding", "Onboarding", "the axolotl handbook")})
+		save(t, c, personalKey(aliceNS, "salary"), "Salary", "the axolotl detail")
+
+		remounted := FromPages("notes", []kb.Page{page("handbook/onboarding", "Onboarding", "the axolotl handbook")})
+		if err := remounted.AttachMemory(ctx, c.Memory()); err != nil {
+			t.Fatalf("remount: %v", err)
+		}
+		reg, err := New(remounted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertStillPrivate(t, reg, personalID(aliceNS, "salary"), "a remount")
+	})
+
+	t.Run("live reload of a serving collection", func(t *testing.T) {
+		// A shared store, so the memory arrives the way another replica's
+		// write does: written elsewhere, discovered by reconciling.
+		bucket := newFakeMemoryBucket()
+		c := FromPages("notes", []kb.Page{page("handbook/onboarding", "Onboarding", "the axolotl handbook")})
+		c.Source = memoryRefreshSource()
+		c.status.configure(c.Source)
+		if err := c.AttachMemory(ctx, bucket.store()); err != nil {
+			t.Fatal(err)
+		}
+		reg, err := New(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Build the index BEFORE the reload, so the swap really does
+		// replace a live one.
+		if _, err := c.Index(); err != nil {
+			t.Fatal(err)
+		}
+
+		writer := bucket.store()
+		if _, err := writer.Put(ctx, personalKey(aliceNS, "salary"),
+			memoryDoc(t, "Salary", "the axolotl detail"), memory.CreateOnly()); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := c.ReloadMemory(ctx); err != nil || !out.Changed {
+			t.Fatalf("ReloadMemory = %+v, %v", out, err)
+		}
+		assertStillPrivate(t, reg, personalID(aliceNS, "salary"), "a live reload")
+	})
 }
 
 // --- concurrency -------------------------------------------------------

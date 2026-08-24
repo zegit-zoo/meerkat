@@ -105,6 +105,67 @@ content:
   # reads or accepts a static service-account key. Grant the principal
   # storage.objects.get (and storage.objects.list for prefix mode).
 
+  # --- refresh: follow the bucket while running (runtime, type: gcs only) ----
+  #
+  # ABSENT (the default, and what every configuration written before this
+  # existed gets): the source is resolved ONCE at startup and never
+  # re-checked. Publishing a new generation needs a restart or a rollout.
+  # That is the right posture for a pinned, reproducible deployment, and it
+  # stays the default — "what is this replica serving?" should have a boring
+  # answer unless you asked for a moving one.
+  #
+  # PRESENT: a metadata-only probe every interval and, only when the object
+  # generation (or the prefix listing fingerprint) actually moved, a
+  # re-resolve, an index rebuild off the request path, and an atomic swap.
+  # Queries are served throughout — from the previous snapshot until the new
+  # one is complete, never from a half-built one. See docs/design/hot-reload.md.
+  #
+  # refresh:
+  #   interval: 60s                # REQUIRED. Minimum 5s. Must carry a UNIT:
+  #                                # `60` is refused rather than guessed at.
+  #                                # The floor is about the bucket's metadata
+  #                                # quota, not meerkat's cost; for "live now",
+  #                                # use SIGHUP (below).
+  #   jitter: 10s                  # OPTIONAL, must be < interval. A random
+  #                                # extra delay in [0, jitter) per cycle.
+  #                                # Replicas start together, so without it
+  #                                # they all probe on the same tick AND all
+  #                                # download the same new generation at the
+  #                                # same instant.
+  #   failure_policy: serve-last-good
+  #                                # serve-last-good (DEFAULT) | unready
+  #                                #
+  #                                # serve-last-good: a failed probe or fetch
+  #                                # leaves the last known-good content
+  #                                # serving and marks the collection
+  #                                # DEGRADED — /readyz still answers 200 with
+  #                                # status "degraded" and a degraded count,
+  #                                # and meerkat_refresh_degraded goes to 1.
+  #                                # A broken generation or a transient 503
+  #                                # must not drain a whole fleet, which reads
+  #                                # the same bucket and would fail together.
+  #                                #
+  #                                # unready: additionally fail the readiness
+  #                                # probe (503), so an orchestrator drains
+  #                                # this replica or halts a rollout. The
+  #                                # collection still ANSWERS queries from the
+  #                                # last known-good snapshot — draining is
+  #                                # not refusing. Choose it when stale
+  #                                # content is a correctness problem.
+  #
+  # MUTUALLY EXCLUSIVE WITH generation: above, and refused at load time if
+  # both are set. A pin means "serve exactly these bytes until the config
+  # changes"; a file carrying both has two contradictory readings, and one of
+  # them silently revokes that guarantee.
+  #
+  # Only type: gcs takes a refresh block. type: local is already re-read per
+  # request, and type: url is pinned by its mandatory sha256.
+  #
+  # A running `mk mcp serve-http` also reloads every configured target
+  # immediately on SIGHUP, through the same code path. There is deliberately
+  # no HTTP reload endpoint: a signal is authorized by the OS, and needs no
+  # new mutating surface to authenticate and rate-limit.
+
   # Layout: where each artifact lives WITHIN the resolved source.
   # Defaults shown; override only if your content repo differs.
   layout:
@@ -155,6 +216,27 @@ content:
   #   # the matched generation to update), evaluated server-side — so several
   #   # replicas can share one store and still never lose a write.
   #   # Grant storage.objects.get/list/create/delete on the prefix.
+  #
+  #   # --- refresh: converge with the other replicas (type: gcs only) -----
+  #   refresh:
+  #     interval: 15s              # same block, same rules as the content
+  #                                # refresh above (unit required, 5s floor,
+  #                                # optional jitter and failure_policy).
+  #   #
+  #   # Without it, a memory written through replica A is indexed by A
+  #   # IMMEDIATELY and stays invisible through replica B until B restarts:
+  #   # each process loads the store once, at mount. With it, B probes the
+  #   # store's listing every interval and — only when the digest moved —
+  #   # rebuilds its overlay and index and swaps both in atomically.
+  #   #
+  #   # A personal memory stays private to the principal who wrote it across
+  #   # that reload: the owner is derived from the STORE KEY, not from any
+  #   # frontmatter the document's own bytes could claim. Staged proposals
+  #   # under _staging/ are excluded from the probe as well as from the load,
+  #   # so writing one neither publishes it nor makes the fleet reload.
+  #   #
+  #   # type: gcs only. A local store is a directory one process owns; there
+  #   # is no other writer to converge with.
   #
   #   # --- who may READ a personal memory ---------------------------------
   #   personal_visibility: private   # private (DEFAULT) | collection

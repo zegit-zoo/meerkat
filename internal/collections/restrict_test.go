@@ -260,7 +260,7 @@ func TestRestrict_ViewSharesIndexesAndDoesNotOwnThem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if built.index == nil {
+	if built.builtIndex() == nil {
 		t.Fatal("a search through the view should have populated the shared collection's index")
 	}
 
@@ -269,7 +269,7 @@ func TestRestrict_ViewSharesIndexesAndDoesNotOwnThem(t *testing.T) {
 	if err := view.Close(); err != nil {
 		t.Fatalf("view.Close(): %v", err)
 	}
-	if built.index == nil {
+	if built.builtIndex() == nil {
 		t.Fatal("closing a derived registry must not release the parent's index")
 	}
 	if _, err := view.Search(context.Background(), "", "paging", 5); err != nil {

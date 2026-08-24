@@ -609,6 +609,68 @@ cannot be some other generation's. Setting `generation:` explicitly pins the
 deployment — the current generation is then never even looked up, so a later
 overwrite cannot change what this binary serves.
 
+#### `refresh:` — follow the bucket without a restart
+
+By default a GCS source is resolved **once**, at startup: publishing a new
+generation needs a restart or a rollout. Add a `refresh:` block and a running
+`mk mcp serve-http` follows the bucket instead.
+
+```yaml
+collections:
+  - name: handbook
+    type: gcs
+    bucket: my-org-knowledge
+    prefix: handbook/live/
+    refresh:
+      interval: 60s               # required, >= 5s, unit mandatory
+      jitter: 10s                 # optional, < interval
+      failure_policy: serve-last-good   # or: unready
+    memory:
+      type: gcs
+      bucket: my-org-knowledge
+      prefix: handbook/memory/
+      refresh:
+        interval: 15s             # replicas converge on each other's writes
+```
+
+Each interval, meerkat reads **metadata only** — the object's generation, or
+the fingerprint over the prefix listing. Unchanged (the usual answer) costs
+one call and nothing else. Changed, and it re-resolves through the same
+hardened, generation-preconditioned path startup uses, rebuilds the index off
+the request path, and swaps the whole snapshot in atomically. Queries are
+served the entire time: in-flight ones finish against the generation they
+started on, new ones get the new generation, and nobody ever sees a mixture.
+
+If a refresh fails, the **last known-good content keeps serving** and the
+collection is marked degraded — visible in `/readyz`'s counts and in
+`meerkat_refresh_degraded`. `failure_policy: unready` additionally fails the
+readiness probe, for a collection where stale content is a correctness
+problem rather than an inconvenience. The detail behind it (which
+generation is applied, when the last cycle succeeded, what failed) is on the
+authenticated discovery surfaces — `mk_list_collections` and
+`GET /collections` — not on the unauthenticated probes.
+
+`refresh:` under a `memory:` block is what makes **several replicas sharing
+one GCS memory store converge**: without it, a memory saved through one
+replica stays invisible to the others until they restart.
+
+`SIGHUP` runs every configured refresh immediately, through the same code
+path. There is deliberately no HTTP reload endpoint.
+
+`generation:` and `refresh:` are **mutually exclusive** and refused together
+at load time: pinning means "serve exactly these bytes until the config
+changes", and a file that also asks to follow the object has two
+contradictory readings. Pick the posture you want:
+
+| | `generation:` (pinned) | `refresh:` |
+| --- | --- | --- |
+| serves | exactly that generation, forever | whatever the bucket holds now |
+| to change it | edit config, redeploy | publish to the bucket |
+| reproducible | yes, indefinitely | eventually consistent within one interval |
+
+Details, including the snapshot-swap and degradation model:
+[docs/design/hot-reload.md](docs/design/hot-reload.md).
+
 ### Multiple collections
 
 Instead of a single `content:` block, a `content-source.yaml` can declare a
@@ -984,6 +1046,11 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
 - [docs/design/multi-collection.md](docs/design/multi-collection.md) —
   mounting several named collections at once, the routing/disambiguation
   rules, and the GCS backend's generation-keyed caching
+- [docs/design/hot-reload.md](docs/design/hot-reload.md) — `refresh:`:
+  the metadata-probe/atomic-snapshot-swap model that lets a running
+  server pick up a new GCS generation and lets replicas converge on a
+  shared memory store, why a pinned `generation:` refuses it, and what a
+  failed refresh leaves serving
 - [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md) — the hosted
   Streamable HTTP MCP server: OIDC, the capability model, and why an
   unauthorized collection is made invisible rather than denied

@@ -86,21 +86,25 @@ type Collection struct {
 	// Name addresses the collection (--collection, the MCP tools'
 	// collection argument, the "<name>:" qualified-ID prefix).
 	Name string
-	// Provenance is what `mk version` reports for this collection:
-	// "embedded", "disk:<path>", "url:<url>@<digest>", or
-	// "gcs://<bucket>/<object>@<generation>".
-	Provenance string
 	// Source is the resolved content-source.yaml entry, mainly for its
-	// Type (surfaced by `mk list --collections`).
+	// Type (surfaced by `mk list --collections`) and — since runtime
+	// reconciliation — for the refresh policy and the coordinates a
+	// re-resolve needs. See reload.go.
 	Source contentsource.Source
 
-	// fsys is the filesystem this collection reads through, in the
-	// embed-style layout kb expects. nil means "read through the
-	// process-global kb filesystem" (kb.List/kb.Load) — the state a
-	// single-collection deployment is in, where internal/kbdir has
-	// already pointed the globals at the right place and there is
-	// nothing to be gained from a second, parallel handle on it.
-	fsys fs.FS
+	// snapMu guards snap. A read lock is taken for exactly as long as it
+	// takes to read the pointer and add a reference; the write lock only
+	// by a snapshot swap. See acquire/install in reload.go.
+	snapMu sync.RWMutex
+	// snap is the CONTENT SNAPSHOT currently serving: the filesystem
+	// pages are read from, the provenance naming exactly which bytes
+	// those are, and the search index built over them, as one coherent
+	// unit that is replaced whole or not at all.
+	//
+	// Never nil after construction. Every read acquires it once, so a
+	// single operation can never see one half of an old generation and
+	// one half of a new one.
+	snap *snapshot
 
 	// pages/byID back a FromPages collection: a fixed, in-memory page
 	// set with no filesystem behind it at all. Non-nil byID is what
@@ -124,8 +128,16 @@ type Collection struct {
 	//
 	// Written once at mount (Open -> SetPersonalVisibility), before
 	// anything serves, and read-only thereafter — the same lifecycle as
-	// Name, Provenance and fsys, and the reason it needs no lock while
-	// overlay and memory (which requests mutate) do.
+	// Name, and the reason it needs no lock while overlay, memory and
+	// the content snapshot (which requests and refreshes mutate) do.
+	//
+	// Runtime reconciliation does NOT touch it, and that is deliberate:
+	// a refresh swaps the snapshot INSIDE this *Collection rather than
+	// replacing the *Collection, so every field outside the snapshot —
+	// this one above all — keeps its mount-time value. Nothing carries
+	// it across a rebuild, because nothing has to. If it ever does become
+	// mutable at runtime, it needs a lock or an atomic; see
+	// docs/design/hot-reload.md.
 	personalReadsAreCollectionWide bool
 	// overlayMu guards overlay.
 	overlayMu sync.RWMutex
@@ -141,9 +153,22 @@ type Collection struct {
 	// store, where there is no local tree to write into at all.
 	overlay map[string]kb.Page
 
-	indexOnce sync.Once
-	index     *search.Index
-	indexErr  error
+	// writeMu serialises a LIVE index write (SaveMemory) against a
+	// snapshot swap, and pending records the writes that happened while a
+	// replacement index was being built off the request path. Both exist
+	// only because of runtime reconciliation; see reload.go, where the
+	// lost-write race they close is spelled out.
+	writeMu sync.Mutex
+	pending map[string]kb.Page
+
+	// reloadMu is the collection's single reload slot. Held for the whole
+	// of one reconciliation cycle — content or memory — so two cycles can
+	// never stage against the same collection at once.
+	reloadMu sync.Mutex
+
+	// status is the reconciliation state reported through readiness,
+	// metrics and `mk list --collections`.
+	status reloadState
 
 	// rootOnce/rootSeen latch whether the collection's content root was
 	// reachable the first time its health was checked — at startup, for
@@ -168,7 +193,39 @@ func FromPages(name string, pages []kb.Page) *Collection {
 	sorted := make([]kb.Page, len(pages))
 	copy(sorted, pages)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
-	return &Collection{Name: name, Provenance: "memory", pages: sorted, byID: byID}
+	c := newCollection(name, "memory", "", nil)
+	c.pages, c.byID = sorted, byID
+	return c
+}
+
+// newCollection builds a collection with its first content snapshot
+// installed. Every construction path goes through it, so there is no way
+// to end up with a collection whose snapshot pointer is nil.
+//
+// version is the source version token the snapshot was resolved at (an
+// object generation, a prefix listing fingerprint), or "" for a source
+// that has none. It is what the first reconciliation probe compares
+// against, so a replica that started on the current generation does no
+// work at all on its first tick.
+func newCollection(name, provenance, version string, fsys fs.FS) *Collection {
+	c := &Collection{Name: name}
+	c.install(&snapshot{fsys: fsys, provenance: provenance, version: version})
+	return c
+}
+
+// Provenance is what `mk version` reports for this collection:
+// "embedded", "disk:<path>", "url:<url>@<digest>", or
+// "gcs://<bucket>/<object>@<generation>".
+//
+// It is read from the CURRENT snapshot rather than latched at mount,
+// because a refreshable collection's provenance is the whole point of
+// the string: after a reconciliation swapped a new GCS generation in,
+// "which bytes is this replica serving?" must answer the new generation,
+// not the one the process happened to start on.
+func (c *Collection) Provenance() string {
+	c.snapMu.RLock()
+	defer c.snapMu.RUnlock()
+	return c.snap.provenance
 }
 
 // Type reports the collection's backend source type ("local", "gcs",
@@ -208,7 +265,16 @@ func (c *Collection) Pages() ([]kb.Page, error) { return c.PagesFor(kb.Unfiltere
 // PagesFor is Pages as seen by v: the same list with every page v may
 // not see removed, before any caller has had a chance to count them.
 func (c *Collection) PagesFor(v kb.Viewer) ([]kb.Page, error) {
-	pages, err := c.contentPages()
+	snap := c.acquire()
+	defer snap.release()
+	return c.pagesOf(snap, v)
+}
+
+// pagesOf is PagesFor against one already-acquired snapshot, so a caller
+// that needs the pages AND the index sees one coherent generation of
+// both.
+func (c *Collection) pagesOf(s *snapshot, v kb.Viewer) ([]kb.Page, error) {
+	pages, err := c.contentPagesFrom(s.fsys)
 	if err != nil {
 		return nil, err
 	}
@@ -247,16 +313,18 @@ func (c *Collection) SetPersonalVisibility(v string) {
 	c.personalReadsAreCollectionWide = v == memory.VisibilityCollection
 }
 
-// contentPages returns the pages of the content root alone, with no
-// memory overlay.
-func (c *Collection) contentPages() ([]kb.Page, error) {
+// contentPagesFrom returns the pages of one content root, with no memory
+// overlay. fsys is a snapshot's filesystem: nil means "read through the
+// process-global kb filesystem", the state a single-collection
+// deployment starts in.
+func (c *Collection) contentPagesFrom(fsys fs.FS) ([]kb.Page, error) {
 	switch {
 	case c.byID != nil:
 		return c.pages, nil
-	case c.fsys == nil:
+	case fsys == nil:
 		return kb.List()
 	default:
-		return kb.ListFS(c.fsys)
+		return kb.ListFS(fsys)
 	}
 }
 
@@ -273,12 +341,25 @@ func (c *Collection) contentPages() ([]kb.Page, error) {
 func (c *Collection) mergeOverlay(pages []kb.Page, v kb.Viewer) []kb.Page {
 	c.overlayMu.RLock()
 	defer c.overlayMu.RUnlock()
-	if len(c.overlay) == 0 {
+	return mergeOverlayMap(pages, c.overlay, v)
+}
+
+// mergeOverlayMap is mergeOverlay over an EXPLICIT overlay map rather
+// than the collection's live one.
+//
+// It exists for memory reconciliation, which has to build a replacement
+// index over an overlay it has loaded but not yet installed — see
+// reload.go. Factoring it out rather than duplicating the merge is the
+// point: the shadowing and visibility rules above are the ones #27
+// established, and a second copy of them is a second place for them to
+// drift.
+func mergeOverlayMap(pages []kb.Page, overlay map[string]kb.Page, v kb.Viewer) []kb.Page {
+	if len(overlay) == 0 {
 		return v.VisiblePages(pages)
 	}
-	out := make([]kb.Page, 0, len(pages)+len(c.overlay))
+	out := make([]kb.Page, 0, len(pages)+len(overlay))
 	for _, p := range pages {
-		if op, shadowed := c.overlay[p.ID]; shadowed && v.CanSee(op) {
+		if op, shadowed := overlay[p.ID]; shadowed && v.CanSee(op) {
 			continue
 		}
 		if !v.CanSee(p) {
@@ -286,7 +367,7 @@ func (c *Collection) mergeOverlay(pages []kb.Page, v kb.Viewer) []kb.Page {
 		}
 		out = append(out, p)
 	}
-	for _, p := range c.overlay {
+	for _, p := range overlay {
 		if !v.CanSee(p) {
 			continue
 		}
@@ -335,18 +416,19 @@ func (c *Collection) Load(id string) (kb.Page, error) {
 	if p, ok := c.overlayPage(norm); ok {
 		return p, nil
 	}
-	switch {
-	case c.byID != nil:
+	if c.byID != nil {
 		p, ok := c.byID[norm]
 		if !ok {
 			return kb.Page{}, kb.ErrNotFound
 		}
 		return p, nil
-	case c.fsys == nil:
-		return kb.Load(id)
-	default:
-		return kb.LoadFS(c.fsys, id)
 	}
+	snap := c.acquire()
+	defer snap.release()
+	if snap.fsys == nil {
+		return kb.Load(id)
+	}
+	return kb.LoadFS(snap.fsys, id)
 }
 
 // overlayPage reads one page out of the memory overlay.
@@ -363,20 +445,32 @@ func (c *Collection) overlayPage(id string) (kb.Page, bool) {
 // deployments: `mk list` and `mk show` must not pay to index every
 // mounted collection, and `mk search --collection x` must not pay to
 // index the others.
+//
+// It returns the index of the snapshot serving RIGHT NOW, and holds no
+// reference to it: a reconciliation that swaps a new snapshot in may
+// close the returned index once its last in-flight reader is done. That
+// is safe for the two things this method is for — warming an index at
+// startup (internal/mcp's indexAll) and asking whether one builds at all
+// (health) — and it is not safe for running a query.
+//
+// Anything that actually USES an index must go through searchAs or
+// publishMemory, which hold a reference for the duration. See reload.go.
 func (c *Collection) Index() (*search.Index, error) {
-	c.indexOnce.Do(func() {
-		pages, err := c.Pages()
-		if err != nil {
-			c.indexErr = fmt.Errorf("list pages: %w", err)
-			return
-		}
-		c.index, c.indexErr = search.NewFromPages(pages)
-	})
-	return c.index, c.indexErr
+	snap := c.acquire()
+	defer snap.release()
+	return c.indexOf(snap)
 }
 
 // Close releases the collection's index, if one was built, and its
 // memory store, if one is attached.
+//
+// The snapshot is REPLACED rather than cleared: a collection whose
+// pointer went nil would panic on the next read, and Close is reachable
+// while a request is in flight (a derived registry's Close is a no-op,
+// but the owning registry's is not). The replacement carries the same
+// filesystem and provenance with an unbuilt index, which is exactly the
+// state this method used to leave behind when the index was a plain
+// field.
 func (c *Collection) Close() error {
 	var firstErr error
 	c.overlayMu.Lock()
@@ -388,15 +482,19 @@ func (c *Collection) Close() error {
 			firstErr = err
 		}
 	}
-	if c.index == nil {
-		return firstErr
+
+	c.snapMu.Lock()
+	old := c.snap
+	c.snap = &snapshot{fsys: old.fsys, provenance: old.provenance, version: old.version}
+	c.snap.refs.Store(1)
+	c.snapMu.Unlock()
+	// Drops the collection's own reference; the index closes once the
+	// last in-flight reader releases it, and its error surfaces here when
+	// that reader is us (the usual case at shutdown).
+	if err := old.releaseErr(); err != nil && firstErr == nil {
+		firstErr = err
 	}
-	err := c.index.Close()
-	c.index = nil
-	if firstErr != nil {
-		return firstErr
-	}
-	return err
+	return firstErr
 }
 
 // --- memory ----------------------------------------------------------
@@ -448,16 +546,21 @@ func (c *Collection) AttachMemory(ctx context.Context, store memory.Store) error
 
 // SaveMemory stores one memory document and makes it immediately
 // visible: it lands in the backend under an optimistic-locking
-// precondition, then in the overlay, then in the live search index.
+// precondition, then — as one step — in the overlay and in the live
+// search index.
 //
 // Order matters. The durable write comes first, so nothing is
-// searchable that was not stored; the index update comes last, so a
-// conflict costs nothing. The index is FORCED to build if it hasn't
-// yet: a save has to leave the collection in a state where the next
-// search finds the memory, and a lazily-unbuilt index would otherwise
-// be built later from Pages() — which does include the overlay, so
-// either order is correct, but forcing it keeps "saved" and
-// "searchable" one step apart instead of two.
+// searchable that was not stored; the publish comes last, so a conflict
+// costs nothing. The index is FORCED to build if it hasn't yet: a save
+// has to leave the collection in a state where the next search finds the
+// memory, and a lazily-unbuilt index would otherwise be built later from
+// Pages() — which does include the overlay, so either order is correct,
+// but forcing it keeps "saved" and "searchable" one step apart instead
+// of two.
+//
+// The overlay and the index are updated together, under one lock, so a
+// concurrent reconciliation swap cannot land between them — see
+// publishMemory.
 func (c *Collection) SaveMemory(ctx context.Context, key string, body []byte, pre memory.Precondition) (memory.Version, kb.Page, error) {
 	store := c.Memory()
 	if store == nil {
@@ -474,19 +577,8 @@ func (c *Collection) SaveMemory(ctx context.Context, key string, body []byte, pr
 		// it fully succeeded (it is not searchable).
 		return version, kb.Page{}, fmt.Errorf("memory was stored but could not be indexed: %w", err)
 	}
-	c.overlayMu.Lock()
-	if c.overlay == nil {
-		c.overlay = make(map[string]kb.Page, 1)
-	}
-	c.overlay[page.ID] = page
-	c.overlayMu.Unlock()
-
-	idx, err := c.Index()
-	if err != nil {
-		return version, page, fmt.Errorf("memory was stored but the search index is unavailable: %w", err)
-	}
-	if err := idx.Put(page); err != nil {
-		return version, page, fmt.Errorf("memory was stored but could not be indexed: %w", err)
+	if err := c.publishMemory(page); err != nil {
+		return version, page, err
 	}
 	return version, page, nil
 }
@@ -572,7 +664,7 @@ func New(cols ...*Collection) (*Registry, error) {
 // tests that drive a subcommand directly with kb.UseFS) keep behaving
 // exactly as they did.
 func Global(provenance string) *Registry {
-	c := &Collection{Name: DefaultName, Provenance: provenance}
+	c := newCollection(DefaultName, provenance, "", nil)
 	return &Registry{list: []*Collection{c}, by: map[string]*Collection{DefaultName: c}}
 }
 
@@ -596,14 +688,17 @@ func Global(provenance string) *Registry {
 func Open(ctx context.Context, resolved []contentsource.ResolvedCollection) (*Registry, error) {
 	cols := make([]*Collection, 0, len(resolved))
 	for _, rc := range resolved {
-		c := &Collection{Name: rc.Name, Provenance: rc.Provenance, Source: rc.Source}
+		var fsys fs.FS
 		if len(resolved) > 1 && rc.Dir != "" {
-			fsys, err := kbdir.FSLayout(rc.Dir, rc.Source.Layout)
+			mounted, err := kbdir.FSLayout(rc.Dir, rc.Source.Layout)
 			if err != nil {
 				return nil, fmt.Errorf("collection %q: %w", rc.Name, err)
 			}
-			c.fsys = fsys
+			fsys = mounted
 		}
+		c := newCollection(rc.Name, rc.Provenance, rc.Version, fsys)
+		c.Source = rc.Source
+		c.status.configure(rc.Source)
 		// Personal-read visibility is set even when there is no memory:
 		// block (Spec.Visibility answers private for a nil Spec), because
 		// the reserved page-ID prefix means the same thing in every
@@ -807,7 +902,7 @@ func (r *Registry) Close() error {
 // reported alongside it rather than crammed into one string.
 func (r *Registry) Provenance() string {
 	if r.Single() {
-		return r.list[0].Provenance
+		return r.list[0].Provenance()
 	}
 	return fmt.Sprintf("collections:%d", len(r.list))
 }
@@ -824,6 +919,21 @@ type Health struct {
 	Pages int `json:"pages"`
 	// Error explains a not-Ready entry.
 	Error string `json:"error,omitempty"`
+	// Degraded is true when the collection's most recent reconciliation
+	// cycle FAILED and it is serving the last known-good snapshot.
+	//
+	// It is a separate axis from Ready, and keeping the two apart is the
+	// point. A degraded collection is answering every query correctly
+	// with content that is merely older than the bucket's — which is a
+	// staleness problem, not an availability one. Under the default
+	// serve-last-good policy it stays Ready; only `failure_policy:
+	// unready` couples the two, for a collection whose whole value is
+	// that it is current. See internal/refresh.
+	Degraded bool `json:"degraded,omitempty"`
+	// StaleReason explains a Degraded entry. It reaches the structured
+	// log and authenticated collection discovery, never /readyz's
+	// unauthenticated body.
+	StaleReason string `json:"stale_reason,omitempty"`
 }
 
 // contentRootReachable reports whether the collection's content root
@@ -841,7 +951,9 @@ func (c *Collection) contentRootReachable() bool {
 		// A FromPages collection has no filesystem to lose.
 		return true
 	}
-	fsys := c.fsys
+	snap := c.acquire()
+	defer snap.release()
+	fsys := snap.fsys
 	if fsys == nil {
 		fsys = kb.FS()
 	}
@@ -874,6 +986,18 @@ func (c *Collection) health() Health {
 		return h
 	}
 	h.Ready = true
+	// A failed refresh is reported ON TOP of a serving collection, not
+	// instead of one: the pages enumerated and the index built, both just
+	// now, so this collection answers queries. What it cannot currently
+	// do is prove it is current.
+	if reason, unready := c.status.degraded(); reason != "" {
+		h.Degraded = true
+		h.StaleReason = reason
+		if unready {
+			h.Ready = false
+			h.Error = reason
+		}
+	}
 	return h
 }
 
@@ -957,17 +1081,13 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 	v := r.viewerOf()
 	var out []Hit
 	for _, c := range targets {
-		idx, err := c.Index()
-		if err != nil {
-			return nil, fmt.Errorf("collection %q: %w", c.Name, err)
-		}
 		// The viewer goes INTO the query, not over its results. Each
 		// collection is asked for its best `limit` documents that this
 		// caller may see, so a collection full of somebody else's private
 		// memories contributes its best visible hits rather than
 		// contributing nothing — which is what a post-filter over the
 		// per-collection top-N would do, and it would do it invisibly.
-		results, err := idx.QueryAs(ctx, c.viewerFor(v), query, limit)
+		results, err := c.searchAs(ctx, v, query, limit)
 		if err != nil {
 			return nil, err
 		}

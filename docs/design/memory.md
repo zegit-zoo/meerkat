@@ -579,6 +579,25 @@ this one's first request. A document that fails to parse is skipped with
 a warning rather than failing the mount — one malformed memory must not
 make a whole collection unserveable.
 
+**Across replicas (#28).** The three steps above make a memory
+searchable on the process that wrote it. A `refresh:` block inside
+`memory:` makes it searchable on the *others*: each replica probes the
+store's listing fingerprint on a schedule and, only when it moves,
+re-`Load`s, rebuilds its overlay and its index off the request path, and
+swaps both in atomically. A write that lands during that rebuild is
+journalled and replayed into the new index before it is published, so a
+save the caller watched succeed cannot be lost by a swap.
+
+Two properties from this document survive that path by construction, and
+are tested over it rather than only over a fresh mount. The rebuilt
+overlay derives every page ID from the **store key** — never from the
+document's `memory_namespace:` frontmatter — so a personal memory
+re-read on another replica is private to exactly the principal who wrote
+it. And the rebuilt index contains **every** document, private ones
+included, because visibility is a clause in the query rather than an
+index-time filter; a reload that filtered would hide a memory from its
+own owner. See [hot-reload.md](hot-reload.md).
+
 **Concurrency.** The registry shares one `*Collection` (and therefore
 one overlay, one store and one index) across every MCP session, so all
 three are written while other sessions read. The overlay is under
@@ -802,7 +821,15 @@ package already makes about indexes).
   scope-level default would be a small addition.
 - **Cross-process locking for the local backend.** An advisory lock file
   would cover the two-replicas-one-volume case that currently has to use
-  GCS.
+  GCS. It would also be the missing half of a local `memory.refresh`,
+  which #28 deliberately refuses today (see
+  [hot-reload.md](hot-reload.md)): a directory one process owns has no
+  second writer to converge with, and giving it one is this item.
+- **Incremental reconciliation.** A moved fingerprint currently re-reads
+  every live document. The listing already carries per-object
+  generations, so re-reading only the objects whose generation changed is
+  a contained improvement — it needs a `Store` method that takes the
+  previous listing.
 - **A memory-aware read tool.** Memories are found by `mk_search` and
   `mk_list --prefix memory/` today. A dedicated `mk_recall` that filtered
   to the caller's own namespace by default would be a better default

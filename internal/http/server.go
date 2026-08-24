@@ -306,6 +306,13 @@ type collectionEntry struct {
 	Type   string `json:"type"`
 	Source string `json:"source"`
 	Pages  int    `json:"pages"`
+	// Refresh reports runtime reconciliation for this collection, one
+	// entry per configured target, and is absent for a collection
+	// resolved once at startup. This endpoint is auth-gated (which
+	// collections a deployment mounts is not public information), which
+	// is why the detailed freshness provenance belongs here rather than
+	// in the unauthenticated probes. See docs/design/hot-reload.md.
+	Refresh []collections.ReloadStatus `json:"refresh,omitempty"`
 }
 
 // showResponse is the POST /show wire shape: the page's stored fields
@@ -513,7 +520,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
 	out := make([]collectionEntry, 0, s.reg.Len())
 	for _, c := range s.reg.All() {
-		e := collectionEntry{Name: c.Name, Type: c.Type(), Source: c.Provenance}
+		e := collectionEntry{Name: c.Name, Type: c.Type(), Source: c.Provenance(), Refresh: c.ReloadStatuses()}
 		if pages, err := c.Pages(); err == nil {
 			e.Pages = len(pages)
 		}

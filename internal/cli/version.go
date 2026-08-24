@@ -56,7 +56,7 @@ func currentVersion() versionInfo {
 	reg := registry()
 	cols := make([]collectionInfo, 0, reg.Len())
 	for _, c := range reg.All() {
-		cols = append(cols, collectionInfo{Name: c.Name, Type: c.Source.Type, Source: c.Provenance})
+		cols = append(cols, collectionInfo{Name: c.Name, Type: c.Source.Type, Source: c.Provenance()})
 	}
 	return versionInfo{
 		Version:     version,

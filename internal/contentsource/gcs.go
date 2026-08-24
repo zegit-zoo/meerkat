@@ -265,7 +265,7 @@ func fetchGCSPrefix(ctx context.Context, client gcsAPI, src Source) (dir, versio
 	if err != nil {
 		return "", "", fmt.Errorf("gcs://%s/%s*: %w", src.Bucket, src.Prefix, err)
 	}
-	objs = keepFetchableObjects(objs, src.Prefix)
+	objs = keepFetchableObjects(objs, src.Prefix, true)
 	if len(objs) > maxGCSObjects {
 		return "", "", fmt.Errorf("gcs://%s/%s*: prefix matches %d objects, over the %d-object cap; refusing (narrow the prefix)",
 			src.Bucket, src.Prefix, len(objs), maxGCSObjects)
@@ -296,14 +296,21 @@ func fetchGCSPrefix(ctx context.Context, client gcsAPI, src Source) (dir, versio
 // safe relative path. An unsafe name is skipped rather than fatal — a
 // single oddly-named object in a shared bucket must not make the whole
 // collection unserveable — and os.Root backs the write side regardless.
-func keepFetchableObjects(objs []gcsObject, prefix string) []gcsObject {
+//
+// warn selects whether a skipped name is reported on stderr. The fetch
+// path passes true; the reconciliation probe (see probe.go) passes
+// false, because it re-lists on every interval and would otherwise emit
+// the same line about the same permanently-misnamed object forever.
+func keepFetchableObjects(objs []gcsObject, prefix string, warn bool) []gcsObject {
 	out := objs[:0:0]
 	for _, o := range objs {
 		if strings.HasSuffix(o.Name, "/") {
 			continue
 		}
 		if _, ok := objectRelPath(o.Name, prefix); !ok {
-			fmt.Fprintf(os.Stderr, "meerkat: skipping gcs object with unsafe name %q\n", o.Name)
+			if warn {
+				fmt.Fprintf(os.Stderr, "meerkat: skipping gcs object with unsafe name %q\n", o.Name)
+			}
 			continue
 		}
 		out = append(out, o)

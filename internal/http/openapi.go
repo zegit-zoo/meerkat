@@ -208,7 +208,7 @@ func openAPISchema(version string, collectionNames []string) map[string]any {
 			"get": map[string]any{
 				"operationId": "mk_collections",
 				"summary":     "List the knowledge-base collections this server mounts",
-				"description": "Returns one entry per mounted collection: its name (what to pass as \"collection\" to /search, /show and /list), the content-source type behind it, its provenance, and how many pages it serves.",
+				"description": "Returns one entry per mounted collection: its name (what to pass as \"collection\" to /search, /show and /list), the content-source type behind it, its provenance, how many pages it serves, and — for a collection configured for runtime reconciliation — the state of each refresh target.",
 				"security":    bearerSecurity,
 				"responses": map[string]any{
 					"200": map[string]any{
@@ -224,6 +224,24 @@ func openAPISchema(version string, collectionNames []string) map[string]any {
 											"type":   map[string]any{"type": "string"},
 											"source": map[string]any{"type": "string"},
 											"pages":  map[string]any{"type": "integer"},
+											// Absent unless the collection declares a
+											// refresh: block. See docs/design/hot-reload.md.
+											"refresh": map[string]any{
+												"type": "array",
+												"items": map[string]any{
+													"type": "object",
+													"properties": map[string]any{
+														"kind":           map[string]any{"type": "string", "enum": []string{"content", "memory"}},
+														"interval":       map[string]any{"type": "string"},
+														"failure_policy": map[string]any{"type": "string", "enum": []string{"serve-last-good", "unready"}},
+														"version":        map[string]any{"type": "string"},
+														"last_attempt":   map[string]any{"type": "string", "format": "date-time"},
+														"last_success":   map[string]any{"type": "string", "format": "date-time"},
+														"degraded":       map[string]any{"type": "boolean"},
+														"error":          map[string]any{"type": "string"},
+													},
+												},
+											},
 										},
 									},
 								},

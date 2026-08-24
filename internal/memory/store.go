@@ -110,6 +110,29 @@ type Store interface {
 	Describe() string
 }
 
+// Fingerprinter is implemented by a store that can summarise its LIVE
+// document set with a cheap, metadata-only call.
+//
+// It is the probe half of runtime reconciliation (see internal/refresh):
+// two replicas sharing one store converge by comparing fingerprints
+// every interval and doing the expensive Load only when the answer
+// changed. A store that cannot answer cheaply simply does not implement
+// it, and cannot be configured for refresh.
+//
+// The contract that makes it useful: the fingerprint must change if and
+// only if what Load returns would change. It therefore covers exactly
+// the objects Load covers — live .md documents, staging excluded — so a
+// pending proposal being written does not trigger a fleet-wide reload,
+// and a live document being overwritten always does.
+//
+// It is a separate interface rather than a Store method so that adding a
+// backend does not force a fingerprint implementation on it, and so that
+// a store which cannot honour the if-and-only-if contract is not
+// tempted to approximate one.
+type Fingerprinter interface {
+	Fingerprint(ctx context.Context) (string, error)
+}
+
 // maxDocumentBytes bounds one memory document. A memory is a note, not
 // a data dump: every stored document is held in memory, parsed, and
 // indexed, and the whole store is loaded at startup. The cap is well

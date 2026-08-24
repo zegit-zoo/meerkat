@@ -10,6 +10,8 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/zegit-zoo/meerkat/internal/collections"
 )
 
 // metrics is the hosted server's Prometheus instrumentation.
@@ -28,15 +30,17 @@ import (
 type metrics struct {
 	reg *prometheus.Registry
 
-	requests     *prometheus.CounterVec
-	duration     *prometheus.HistogramVec
-	authFailures *prometheus.CounterVec
-	toolCalls    *prometheus.CounterVec
-	toolDuration *prometheus.HistogramVec
-	sessions     prometheus.Gauge
-	ready        prometheus.Gauge
-	collections  prometheus.Gauge
-	buildInfo    *prometheus.GaugeVec
+	requests         *prometheus.CounterVec
+	duration         *prometheus.HistogramVec
+	authFailures     *prometheus.CounterVec
+	toolCalls        *prometheus.CounterVec
+	toolDuration     *prometheus.HistogramVec
+	sessions         prometheus.Gauge
+	ready            prometheus.Gauge
+	collections      prometheus.Gauge
+	collectionsReady prometheus.Gauge
+	collectionsStale prometheus.Gauge
+	buildInfo        *prometheus.GaugeVec
 
 	// routeOf resolves a request to one of the fixed route labels. Set
 	// by instrumentHTTP once the mux is known.
@@ -83,6 +87,14 @@ func newMetrics(reg *prometheus.Registry, version string, mounted int) *metrics 
 			Name: "meerkat_collections_mounted",
 			Help: "Number of collections mounted by this process (the deployment's total, not any caller's view).",
 		}),
+		collectionsReady: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "meerkat_collections_ready",
+			Help: "Number of mounted collections currently answering queries.",
+		}),
+		collectionsStale: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "meerkat_collections_degraded",
+			Help: "Number of mounted collections whose most recent refresh failed and which are serving the last known-good snapshot.",
+		}),
 		buildInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "meerkat_build_info",
 			Help: "Always 1; the version label carries the running meerkat version.",
@@ -90,7 +102,8 @@ func newMetrics(reg *prometheus.Registry, version string, mounted int) *metrics 
 	}
 	reg.MustRegister(
 		m.requests, m.duration, m.authFailures, m.toolCalls,
-		m.toolDuration, m.sessions, m.ready, m.collections, m.buildInfo,
+		m.toolDuration, m.sessions, m.ready, m.collections,
+		m.collectionsReady, m.collectionsStale, m.buildInfo,
 	)
 	m.collections.Set(float64(mounted))
 	m.buildInfo.WithLabelValues(version).Set(1)
@@ -103,6 +116,26 @@ func (m *metrics) setReady(ready bool) {
 		return
 	}
 	m.ready.Set(0)
+}
+
+// setCollectionStates publishes the two COUNTS a readiness computation
+// produces. Counts, not per-collection series: naming a collection in a
+// label would put the mounted set on an unauthenticated endpoint, which
+// is the one thing /readyz's body is careful not to do. The refresh
+// metrics carry per-target detail keyed by configuration ordinal (see
+// internal/refresh), and the log carries the names.
+func (m *metrics) setCollectionStates(health []collections.Health) {
+	ready, degraded := 0, 0
+	for _, h := range health {
+		if h.Ready {
+			ready++
+		}
+		if h.Degraded {
+			degraded++
+		}
+	}
+	m.collectionsReady.Set(float64(ready))
+	m.collectionsStale.Set(float64(degraded))
 }
 
 // instrumentHTTP wraps the mux, counting and timing every request under

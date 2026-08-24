@@ -323,9 +323,19 @@ unverified directory.
   `*Collection` values.
 - **Collection-aware ingest / sources / completion**, replacing the
   first-collection compromise above.
-- **Per-collection refresh.** Content is resolved once at startup;
-  serving a new GCS generation needs a restart. A background
-  re-resolve-and-swap is possible (the registry already holds each
-  collection behind a pointer) but out of scope here.
+- ~~**Per-collection refresh**~~ — done, in
+  [hot-reload.md](hot-reload.md) (#28). The prediction held: the registry
+  already held each collection behind a pointer, so the swap went *inside*
+  the `*Collection` rather than replacing it — which is what let
+  `personalReadsAreCollectionWide`, the memory store and the overlay keep
+  their mount-time lifecycle untouched. What the sketch above did not
+  anticipate was the reference counting: replacing a `*search.Index` while
+  a query holds one is a use-after-close rather than a data race, so the
+  snapshot is refcounted and the old index is closed only after its last
+  reader drains. The per-collection index arrangement paid off a second
+  time here — a refresh rebuilds exactly one collection's index and leaves
+  the others alone, which one shared index could not have done.
 - **Other object stores.** The `gcsAPI` seam is GCS-shaped but small; S3
-  or Azure Blob would follow the same generation/ETag-keyed pattern.
+  or Azure Blob would follow the same generation/ETag-keyed pattern. Since
+  #28 there is a second, matching seam to fill in: the cheap version probe
+  (`contentsource.GCSVersion`) and `memory.Fingerprinter`.
