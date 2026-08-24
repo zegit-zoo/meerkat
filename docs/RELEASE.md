@@ -34,7 +34,10 @@ The released artifacts are:
 - `meerkat_<v>_checksums.txt` (SHA-256)
 - `meerkat_<v>_checksums.txt.sigstore.json` (cosign Sigstore bundle: signature + certificate + Rekor inclusion proof)
 - `*.sbom.json` (SPDX SBOM per archive)
-- `ghcr.io/zegit-zoo/meerkat:<v>` / `:<major>.<minor>` / `:latest` (multi-arch OCI image, signed + attested — see [docs/CONTAINER.md](CONTAINER.md))
+- `ghcr.io/zegit-zoo/meerkat:X.Y.Z` / `:X.Y` / `:latest` (multi-arch OCI
+  image, signed + attested. Note these image tags drop the git tag's
+  leading `v` — a `vX.Y.Z` git tag publishes exactly these three
+  aliases — see [docs/CONTAINER.md](CONTAINER.md))
 
 > **Note:** the repository is public. Downloading release assets is
 > anonymous — no token or `gh` login required. A token only helps if you
@@ -85,8 +88,14 @@ rather than by querying Rekor live.
 cosign verify \
   --certificate-identity-regexp '^https://github.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  ghcr.io/zegit-zoo/meerkat:<v>
+  ghcr.io/zegit-zoo/meerkat:X.Y.Z
 ```
+
+Note `X.Y.Z` here is the *image* tag (no leading `v`), even though the
+`--certificate-identity-regexp` above still matches `refs/tags/vX.Y.Z` —
+that regexp is anchored to the *source* git ref the workflow ran from,
+which does keep the `v`. See [docs/CONTAINER.md](CONTAINER.md) for the
+full tag list.
 
 Same identity/issuer pair as the checksums-file verification above,
 applied to the image manifest instead of a blob. `cosign verify` for an

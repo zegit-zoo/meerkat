@@ -6,6 +6,13 @@ alongside the binary release described in [docs/INSTALL.md](INSTALL.md).
 See [.github/workflows/release.yml](../.github/workflows/release.yml) and
 the root [`Dockerfile`](../Dockerfile) for exactly how it's built.
 
+**Git tags and image tags are not spelled the same way.** The git tag is
+`vX.Y.Z`, but the published image tags drop the leading `v` — a
+`v1.2.3` git tag publishes the image aliases `1.2.3`, `1.2`, and
+`latest`. Requesting the `v`-prefixed form as an image tag (e.g. tag
+`v1.2.3` on `ghcr.io/zegit-zoo/meerkat`) does not exist and pulling it
+fails with `MANIFEST_UNKNOWN`.
+
 Jump to:
 
 - [Pulling the image](#pulling-the-image)
@@ -19,8 +26,9 @@ Jump to:
 ## Pulling the image
 
 ```bash
-docker pull ghcr.io/zegit-zoo/meerkat:v1.2.3   # pin a tag for reproducibility
-docker pull ghcr.io/zegit-zoo/meerkat:latest   # newest tagged release
+docker pull ghcr.io/zegit-zoo/meerkat:1.2.3   # pin the exact patch release
+docker pull ghcr.io/zegit-zoo/meerkat:1.2     # pin the minor line, auto-follows patches
+docker pull ghcr.io/zegit-zoo/meerkat:latest  # newest tagged release
 ```
 
 Both `linux/amd64` and `linux/arm64` manifests are published under the
@@ -37,12 +45,12 @@ a pull.
 # HTTP/OpenAPI server (for OpenWebUI) — see docs/INTEGRATION-OPENWEBUI.md
 docker run --rm -p 4004:4004 \
   -e MEERKAT_API_KEY=change-me \
-  ghcr.io/zegit-zoo/meerkat:v1.2.3 \
+  ghcr.io/zegit-zoo/meerkat:1.2.3 \
   http serve --host 0.0.0.0
 
 # MCP server over stdio (for agent harnesses) — see docs/INTEGRATION-OPENCODE.md
 docker run --rm -i \
-  ghcr.io/zegit-zoo/meerkat:v1.2.3 \
+  ghcr.io/zegit-zoo/meerkat:1.2.3 \
   mcp serve
 ```
 
@@ -61,7 +69,7 @@ to use unconditionally, not just permitted:
 ```bash
 docker run --rm --read-only --user 65532:65532 \
   -p 4004:4004 -e MEERKAT_API_KEY=change-me \
-  ghcr.io/zegit-zoo/meerkat:v1.2.3 \
+  ghcr.io/zegit-zoo/meerkat:1.2.3 \
   http serve --host 0.0.0.0
 ```
 
@@ -96,7 +104,7 @@ docker run --rm --read-only --user 65532:65532 \
   -e MEERKAT_CONTENT_SOURCE=/home/nonroot/.config/content-source.yaml \
   -e MEERKAT_API_KEY=change-me \
   -p 4004:4004 \
-  ghcr.io/zegit-zoo/meerkat:v1.2.3 \
+  ghcr.io/zegit-zoo/meerkat:1.2.3 \
   http serve --host 0.0.0.0
 ```
 
@@ -120,8 +128,13 @@ file, applied to the image manifest instead of a blob:
 cosign verify \
   --certificate-identity-regexp '^https://github.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-  ghcr.io/zegit-zoo/meerkat:v1.2.3
+  ghcr.io/zegit-zoo/meerkat:1.2.3
 ```
+
+(The `--certificate-identity-regexp` still matches `refs/tags/v1.2.3` —
+that's the *source* git ref the workflow was triggered from, baked into
+the OIDC identity. The image reference on the last line is the
+*published* tag, which — per the note above — has no `v`.)
 
 A successful `cosign verify` confirms the image manifest was produced by
 the `release.yml` workflow in this repository at the exact tagged ref,
@@ -146,8 +159,8 @@ time by `docker buildx build --sbom=true --provenance=true` (see
 Inspect either without pulling the full image:
 
 ```bash
-docker buildx imagetools inspect ghcr.io/zegit-zoo/meerkat:v1.2.3 --format '{{ json .SBOM }}'
-docker buildx imagetools inspect ghcr.io/zegit-zoo/meerkat:v1.2.3 --format '{{ json .Provenance }}'
+docker buildx imagetools inspect ghcr.io/zegit-zoo/meerkat:1.2.3 --format '{{ json .SBOM }}'
+docker buildx imagetools inspect ghcr.io/zegit-zoo/meerkat:1.2.3 --format '{{ json .Provenance }}'
 ```
 
 ## Kubernetes / Cloud Run notes

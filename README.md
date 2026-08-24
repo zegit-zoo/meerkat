@@ -82,13 +82,15 @@ mk update               # download + verified swap
 
 Every `vX.Y.Z` tag also publishes a hardened, multi-arch (linux/amd64,
 linux/arm64) OCI image to `ghcr.io/zegit-zoo/meerkat`, signed keylessly
-with cosign and carrying SLSA provenance + a Syft SBOM:
+with cosign and carrying SLSA provenance + a Syft SBOM. Image tags drop
+the git tag's leading `v` (`v1.2.3` publishes `1.2.3`, `1.2`, and
+`latest` — never `v1.2.3`):
 
 ```bash
-docker pull ghcr.io/zegit-zoo/meerkat:v1.2.3
+docker pull ghcr.io/zegit-zoo/meerkat:1.2.3
 
 docker run --rm --read-only --user 65532:65532 \
-  ghcr.io/zegit-zoo/meerkat:v1.2.3 \
+  ghcr.io/zegit-zoo/meerkat:1.2.3 \
   http serve --host 0.0.0.0 --api-key "$MEERKAT_API_KEY"
 ```
 
