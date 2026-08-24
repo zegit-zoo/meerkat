@@ -19,6 +19,16 @@ func installStagedWithSudo(_, _ string) error {
 			"the caller should have returned permissionDeniedError instead")
 }
 
+// swapWithBackupSudo mirrors installStagedWithSudo's stub: Windows has
+// no single-step user-driven elevation equivalent, so InstallAtomic
+// (bootstrap.go) must return permissionDeniedError before ever
+// reaching this path, exactly like SwapAndReExec already does.
+func swapWithBackupSudo(_, _ string) (string, error) {
+	return "", fmt.Errorf(
+		"swapWithBackupSudo called on windows — this is a bug; " +
+			"the caller should have returned permissionDeniedError instead")
+}
+
 // reExec launches the freshly-installed binary as a child process
 // with the original argv and exits the current process. This is the
 // standard Windows self-update pattern: syscall.Exec is unavailable

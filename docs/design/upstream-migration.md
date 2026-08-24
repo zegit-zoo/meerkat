@@ -147,6 +147,123 @@ downstream client regardless of which fork or patch series it's on:
    "downstream forks" generically — never a specific deployment or
    organization name.
 
+## Converging from a downstream fork
+
+**Status:** Implemented · **Scope:** `cmd/meerkat-bootstrap`,
+`internal/update` (shared primitives), `.goreleaser.yaml` · **Tracks:**
+issue #29
+
+Everything above this section (issue #13) makes upstream SemVer safe to
+converge onto *once a client is already running this repository's
+updater*. It deliberately does not, and structurally cannot, solve the
+other half of the problem this spec's own Summary called out: a binary
+built by a downstream fork has an updater that is compiled to query that
+fork's own release feed and trust that fork's own signing identity. No
+tag number changes that — `IsUpgrade`/`IsDowngrade` never run at all if
+the client's updater never asks `zegit-zoo/meerkat` in the first place.
+Crossing that gap needs one out-of-band, verified step, run once per
+host.
+
+### Why a separate binary rather than extending `mk update`
+
+The alternative — teaching `mk update` to accept an alternate
+repository/feed argument — was explicitly rejected (see Non-goals in the
+tracking issue): it would mean upstream's steady-state updater carries
+permanent code paths for trusting an arbitrary repository and signing
+identity, which is exactly the kind of trust surface this project's
+threat model (`docs/RELEASE.md`, `internal/update/cosign.go`) tries to
+keep as small and as pinned as possible. A separate, small, single-purpose
+binary — used once, then never needed again on that host — keeps that
+trust surface at zero in the steady state.
+
+`meerkat-bootstrap` (`cmd/meerkat-bootstrap`) is that binary. It
+deliberately does not reimplement any of the security-sensitive pieces
+`mk update` already has, tested, in `internal/update`: OS/architecture
+asset selection (`PickAssetName`/`PickAssetNameFor`), the HTTPS-only
+redirect allowlist (`client.go`), checksum parsing, Sigstore bundle
+verification pinned to this exact identity —
+
+- **OIDC issuer:** `https://token.actions.githubusercontent.com`
+- **Certificate identity:** `CertIdentityRegexp` in
+  `internal/update/cosign.go`, i.e. `zegit-zoo/meerkat`'s own
+  `release.yml` GitHub Actions workflow, running against an actual
+  `refs/tags/vX.Y.Z` ref
+
+— and the atomic write-to-temp-plus-rename install with backup/rollback
+(`install.go`). `meerkat-bootstrap` calls those functions directly; it
+does not fork, vendor, or reimplement any part of them, so a fix to any
+of that logic (a new redirect host, a stricter identity regexp, a
+symlink-handling hardening) benefits `mk update` and `meerkat-bootstrap`
+identically, from one change.
+
+What's new in `internal/update` for this is scoped to primitives
+`mk update` itself never needed, because it always operates on its own
+`os.Executable()`, which always exists and is always the platform it's
+currently running on:
+
+- `PickAssetNameFor(version, goos, goarch)` / `ArchiveExt(goos)` — asset
+  naming for a platform other than the one currently running, and the
+  Windows `.zip` vs. everything-else `.tar.gz` distinction
+  `.goreleaser.yaml`'s `archives.format_overrides` encodes. `PickAssetName`
+  itself (`mk update`'s own entry point) is untouched.
+- `ExtractMeerkatArchive` / `extractMeerkatZip` — a zip-extraction path
+  alongside the existing tar.gz one (`ExtractMeerkat`, untouched), needed
+  because `meerkat-bootstrap` must be able to install on Windows, which
+  `mk update` today only reaches via `ExtractMeerkat`'s existing tar.gz
+  path regardless of platform.
+- `InstallAtomic` / `resolveDestination` / `RemoveBackup` / `RestoreBackup`
+  — `swapWithBackup` (the core of `installStaged`, `mk update`'s own
+  install step) factored out and reused, but operating on an arbitrary,
+  resolved `--destination` instead of the running executable, and
+  deliberately *not* deleting the `.old` backup immediately the way
+  `installStaged` does on non-Windows — `meerkat-bootstrap` needs that
+  backup to survive until its own post-install check passes.
+- `RunVersionSmoke` / `DetectInstalledVersion` — run `<binary> version`
+  (optionally `--json`) as a subprocess. `mk update` never needed this: it
+  already knows its own version at compile time. `meerkat-bootstrap` does
+  not know what's at an arbitrary `--destination` ahead of time, so it
+  asks the binary itself, and falls back to parsing the first
+  SemVer-shaped token out of plain `version` output for a fork binary
+  that predates (or never added) a `--json` flag.
+
+None of this changes `PickAssetName`, `ExtractMeerkat`, `installStaged`,
+or `SwapAndReExec`'s own observable behavior — `mk update`'s existing
+tests are unmodified and green.
+
+### Downgrade guard and rollback
+
+`meerkat-bootstrap`'s downgrade guard is the same `IsDowngrade` this spec
+already established as the single source of truth for "newer" — a
+`--release` older than the version `DetectInstalledVersion` reports at
+`--destination` is refused unless `--force` is passed, and (as this
+spec's whole point) a downstream `v0.8.x` build accepts an upstream
+`v0.9.0+` target with no `--force` needed.
+
+Unlike `mk update` (which re-execs into the new binary immediately after
+a successful swap, on the premise that a binary which already passed
+cosign + SHA-256 verification is trustworthy enough to hand control to),
+`meerkat-bootstrap` keeps `<destination>.old` until it has independently
+confirmed the newly installed binary actually runs
+(`RunVersionSmoke`/`<destination> version`), and automatically restores
+that backup — via `RestoreBackup` — if that check, the swap itself, or
+verification upstream of the swap ever fails. See
+[`docs/INSTALL.md`'s "Converging from a downstream
+fork"](../INSTALL.md#converging-from-a-downstream-fork) for the exact
+operator-facing command, rollback behavior, and how to confirm `mk update
+--check` now queries `zegit-zoo/meerkat`.
+
+### Release publication
+
+`.goreleaser.yaml` builds `meerkat-bootstrap` as a second `builds:` entry
+from the same commit, same workflow run, and therefore the same cosign
+identity as `meerkat` itself — it is not a separately signed or
+separately trusted artifact. It publishes as a standalone binary
+(`archives: formats: [binary]`) rather than wrapped in a tar.gz/zip,
+named `meerkat-bootstrap_<version>_<os>_<arch>[.exe]`, and participates in
+the same `checksum:` file and per-artifact SBOM generation as the
+`meerkat` archives. The existing `meerkat` build, its archives, and the
+release workflow's `docker` job are untouched.
+
 ## Testing
 
 - `internal/update/semver_test.go`: `TestIsUpgrade` and `TestIsDowngrade`
@@ -159,6 +276,30 @@ downstream client regardless of which fork or patch series it's on:
   keyring used when gh errors or is empty) and confirm every keyring error
   path degrades to a non-fatal `ErrNoConfig`/`ErrNoToken` rather than
   propagating a distinguishable "fatal" error.
+- `internal/update/bootstrap_test.go`: `InstallAtomic` replacing a real
+  file and a symlinked destination (proving the real target is replaced
+  and neighbouring files/the symlink entry itself are untouched),
+  `RestoreBackup` round-tripping after a failed `RunVersionSmoke`,
+  `DetectInstalledVersion`'s `--json` and plain-text-fallback paths
+  against fixture shell-script binaries (including one shaped like the
+  acceptance criteria's "downstream `v0.8.6`, no GitHub updater support"
+  fixture), and two composition tests
+  (`TestBootstrapFlow_TamperedChecksumRejectedBeforeInstall`,
+  `TestBootstrapFlow_UnsignedBundleRejectedBeforeChecksumIsTrusted`) that
+  run the fetch → download → verify sequence against a fake release
+  server to confirm a tampered checksum or signature is rejected before
+  any install step runs.
+- `internal/update/release_test.go` / `download_test.go`:
+  `PickAssetNameFor`/`ArchiveExt` across all six published
+  darwin/linux/windows × amd64/arm64 combinations, and
+  `ExtractMeerkatArchive`'s zip-vs-tar.gz dispatch (including a
+  zip-specific oversize-entry rejection test).
+- `cmd/meerkat-bootstrap/install_test.go`: the CLI-level downgrade
+  refusal / `--force` decision (`decideProceed`) and the `--destination`
+  default-to-`$PATH` resolution (`resolveDestinationFlag`), both pure and
+  tested without any network dependency — mirroring this codebase's
+  existing convention of keeping the thin CLI layer's own tests network-
+  free and pushing verification-heavy testing into `internal/update`.
 
 ## Open questions / follow-ups
 

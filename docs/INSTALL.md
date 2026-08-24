@@ -20,6 +20,7 @@ Jump to:
 - [Verify the download](#verify-the-download)
 - [From source](#from-source)
 - [Updating](#updating)
+- [Converging from a downstream fork](#converging-from-a-downstream-fork)
 - [Troubleshooting](#troubleshooting)
 
 ## Install on macOS / Linux
@@ -359,6 +360,151 @@ binary is renamed to `meerkat.exe.old`, the new binary takes the
 original path, and the new binary is launched as a child process
 that streams its output back to your terminal. To you it looks like
 a normal update; the `.old` file is removed on the next `mk update`.
+
+## Converging from a downstream fork
+
+If your `meerkat`/`mk` binary was built by a downstream fork — a team or
+project that maintains its own patch series on top of this codebase — `mk
+update` on that binary cannot pull releases from this repository on its
+own, no matter how new they are. Its updater was *compiled* to query a
+different release feed and trust a different signing identity; that is a
+build-time decision baked into the binary, not something a version number
+can override. You need exactly one bootstrap step to cross that gap.
+After that, the binary you're left with is a normal upstream build, and
+every subsequent `mk update` works exactly as described above.
+
+### Why this needs a separate tool, not just a newer tag
+
+This repository's release tags follow plain SemVer precedence (see
+[`docs/design/upstream-migration.md`](design/upstream-migration.md)), and
+a tag here numbered `v0.9.0` or higher is guaranteed to compare as newer
+than any known downstream fork release, including `v0.8.x` series builds.
+That guarantee matters for exactly one thing: once a binary is already
+running this repository's updater, it will never mistake a legitimate
+upstream release for a downgrade. It does **not** — and structurally
+cannot — help a binary whose updater doesn't query this repository at
+all. SemVer ordering answers "is this a newer version of the release feed
+I already trust"; it has nothing to say about a binary that trusts a
+*different* feed and identity in the first place. Getting from there to
+here is a one-time, out-of-band step — `meerkat-bootstrap`.
+
+### `meerkat-bootstrap`
+
+`meerkat-bootstrap` is a small, standalone binary published alongside
+every release (see the release assets, or build it yourself with `go
+build ./cmd/meerkat-bootstrap`). It does not reimplement any of `mk
+update`'s security-sensitive logic — it calls the exact same,
+already-tested `internal/update` code for OS/architecture asset
+selection, the redirect allowlist, checksum and Sigstore verification,
+and the atomic backup/rollback install. The only things it does
+differently, because it is a bootstrap tool rather than a running binary
+updating itself, are: it can target an arbitrary `--destination` path
+instead of its own `os.Executable()`, and it runs a `version` smoke check
+against the newly installed binary before it lets go of the backup.
+
+```bash
+# Typical case: replace whatever "meerkat" already resolves to on $PATH
+# with the newest stable upstream release.
+meerkat-bootstrap install --destination "$(command -v meerkat)"
+
+# Pin a specific release instead of "newest stable".
+meerkat-bootstrap install --release v0.10.0 --destination /usr/local/bin/meerkat
+
+# The destination is already on a numerically higher downstream series
+# (e.g. v0.8.6) than the upstream tag you're targeting for some other
+# reason, or you're intentionally re-installing/downgrading:
+meerkat-bootstrap install --destination /usr/local/bin/meerkat --force
+```
+
+If `--destination` is omitted, it defaults to the first of `meerkat`/`mk`
+found on `$PATH` — the same binary the example above resolves explicitly.
+If `--release` is omitted, it installs the newest stable release (the
+same release GitHub's "latest" marker points at — no pre-releases or
+drafts). Like `mk update`, this works anonymously against the public
+repository; a cached `gh auth login` token is used automatically for the
+higher API rate limit if present, but there is no flag to pass a token
+directly — `meerkat-bootstrap` never accepts a static credential as a
+command-line argument.
+
+**What gets verified, and in what order, before anything is installed:**
+
+1. The release asset matching your OS/architecture, the checksums file,
+   and its Sigstore signature bundle are located strictly among
+   `zegit-zoo/meerkat`'s own published release assets — never any other
+   repository, and never a redirect to an untrusted host (the same
+   allowlist `mk update` itself enforces: `github.com`, `*.github.com`,
+   `*.githubusercontent.com`, over HTTPS only).
+2. The checksums file's Sigstore bundle is verified with `cosign
+   verify-blob`, keyless (Fulcio + Rekor), pinned to this exact identity:
+   - **OIDC issuer:** `https://token.actions.githubusercontent.com`
+   - **Certificate identity:**
+     `^https://github\.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$`
+
+     In words: the signature must have been minted by *this repository's*
+     `release.yml` GitHub Actions workflow, running against an actual
+     `vX.Y.Z` release tag — not a fork's workflow, not a differently
+     named workflow in this same repository, not a branch push. This is
+     the one piece of trust this whole process is bootstrapping *into* —
+     everything after this step inherits it.
+   - This step is **not skippable**. Unlike `mk update --skip-cosign`,
+     `meerkat-bootstrap` has no SHA-256-only fallback, because this is
+     the step that establishes trust in the upstream identity in the
+     first place; there is nothing to fall back to that would still mean
+     anything.
+3. Only once that signature is verified does `meerkat-bootstrap` trust
+   the checksums file's contents, and verify the downloaded asset's own
+   SHA-256 against it.
+4. Only then is anything written to `--destination`.
+
+**Downgrade guard:** exactly like `mk update`, a `--release` numerically
+older than what's detected at `--destination` (via `<destination>
+version`) is refused unless you pass `--force`. Migrating a `v0.8.x`
+downstream build onto a `v0.9.0+` upstream release is, by SemVer
+precedence, an upgrade — it needs no `--force`.
+
+**Install safety:** `--destination` may be a real file or a symlink (for
+example, `mk` symlinked to `meerkat` in the same directory, the layout
+[Install on macOS / Linux](#install-on-macos--linux) sets up by default).
+`meerkat-bootstrap` resolves the symlink to its real target first and
+replaces that — the same rename-based, never-write-through-a-symlink
+approach `make install` and `mk update` both already use (see [Atomic
+installs](#atomic-installs-macos-code-signatures) above) — so the
+symlink itself, and anything else nearby, is left untouched.
+
+### Rollback
+
+The previous binary is kept as `<destination>.old` until the newly
+installed one proves it actually runs (`<destination> version` exits
+successfully). If verification fails, the install/swap fails, or that
+final smoke check fails for any reason, `meerkat-bootstrap` automatically
+restores `<destination>.old` back over `<destination>` and exits non-zero
+— your previous binary is back exactly where it was, and nothing is left
+half-installed. You do not need to intervene.
+
+If `meerkat-bootstrap` itself is killed or crashes (SIGKILL, power loss)
+at the exact moment between renaming the old binary out of the way and
+promoting the new one — a very small window — you can recover manually
+the same way the [Windows self-update
+mechanics](#windows-self-update-mechanics) section above describes:
+rename `<destination>.old` back to `<destination>`.
+
+### Confirming the migration worked
+
+```bash
+mk update --check
+```
+
+should now report a `target:` line naming a `zegit-zoo/meerkat` release
+tag, and its `current:` line should match the version
+`meerkat-bootstrap` just installed. From this point on, `mk update` talks
+to `zegit-zoo/meerkat` directly — `meerkat-bootstrap` has done its job and
+you shouldn't need it again unless you're migrating another host.
+
+See
+[`docs/design/upstream-migration.md`](design/upstream-migration.md#converging-from-a-downstream-fork)
+for the full design rationale behind this split (why the SemVer fix
+alone isn't sufficient, and why this is a separate binary rather than a
+flag on `mk update` itself).
 
 ## Troubleshooting
 

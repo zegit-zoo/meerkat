@@ -89,7 +89,27 @@ func stageInTemp(newPath string) (string, func(), error) {
 }
 
 func installStaged(stagedPath, currentExe string) error {
-	// The staging file lives next to currentExe (so the final rename
+	if err := swapWithBackup(stagedPath, currentExe); err != nil {
+		return err
+	}
+	// Cleanup the backup. We keep it on Windows because in-use
+	// executables can't be deleted, but on Unix it's safe.
+	if runtime.GOOS != "windows" {
+		_ = os.Remove(currentExe + ".old")
+	}
+	return nil
+}
+
+// swapWithBackup stages stagedPath next to destination and atomically
+// promotes it, moving whatever was previously at destination to
+// "<destination>.old" first. On success the backup is left in place
+// at that path — callers decide when it's safe to remove (see
+// installStaged, which removes it immediately on non-Windows because
+// the binary was already verified before the swap ran, and
+// InstallAtomic in bootstrap.go, which keeps it until a caller-run
+// post-install check passes).
+func swapWithBackup(stagedPath, destination string) error {
+	// The staging file lives next to destination (so the final rename
 	// stays on one filesystem), but it must NOT have a fixed,
 	// guessable name: the install directory can be writable by other
 	// local users (e.g. macOS ships /usr/local/bin as root:admin 775),
@@ -98,11 +118,11 @@ func installStaged(stagedPath, currentExe string) error {
 	// os.CreateTemp gives both an unpredictable name and O_EXCL
 	// semantics, so there is nothing at the path we actually pick for
 	// a pre-planted symlink to have targeted.
-	dir := filepath.Dir(currentExe)
-	pattern := "." + filepath.Base(currentExe) + ".new-*"
+	dir := filepath.Dir(destination)
+	pattern := "." + filepath.Base(destination) + ".new-*"
 	stagingPath, err := copyFileToNewTemp(stagedPath, dir, pattern, 0o755)
 	if err != nil {
-		return wrapPermissionError(currentExe, "stage", err)
+		return wrapPermissionError(destination, "stage", err)
 	}
 	defer os.Remove(stagingPath) // no-op if already renamed away
 
@@ -110,23 +130,18 @@ func installStaged(stagedPath, currentExe string) error {
 	// os.Rename works even on a binary that is currently executing —
 	// the running process holds an open handle to the old file by
 	// inode, not by path. That's how mk can replace itself live.
-	backupPath := currentExe + ".old"
-	if err := os.Rename(currentExe, backupPath); err != nil {
-		return wrapPermissionError(currentExe, "backup current binary", err)
+	backupPath := destination + ".old"
+	if err := os.Rename(destination, backupPath); err != nil {
+		return wrapPermissionError(destination, "backup current binary", err)
 	}
 
 	// Promote the staged binary.
-	if err := os.Rename(stagingPath, currentExe); err != nil {
+	if err := os.Rename(stagingPath, destination); err != nil {
 		// Rollback.
-		_ = os.Rename(backupPath, currentExe)
-		return wrapPermissionError(currentExe, "install new binary", err)
+		_ = os.Rename(backupPath, destination)
+		return wrapPermissionError(destination, "install new binary", err)
 	}
 
-	// Cleanup the backup. We keep it on Windows because in-use
-	// executables can't be deleted, but on Unix it's safe.
-	if runtime.GOOS != "windows" {
-		_ = os.Remove(backupPath)
-	}
 	return nil
 }
 

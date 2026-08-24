@@ -31,9 +31,15 @@ flat CI run — it's part of the tag-triggered release gate below.
 
 The released artifacts are:
 - `meerkat_<v>_<os>_<arch>.tar.gz` / `.zip` (Windows)
-- `meerkat_<v>_checksums.txt` (SHA-256)
+- `meerkat-bootstrap_<v>_<os>_<arch>` / `.exe` (Windows) — a standalone
+  binary (not archived) that installs a verified `zegit-zoo/meerkat`
+  release independently of whatever updater the binary at its
+  `--destination` understands; see [docs/INSTALL.md's "Converging from a
+  downstream fork"](INSTALL.md#converging-from-a-downstream-fork)
+- `meerkat_<v>_checksums.txt` (SHA-256, covering every archive and
+  standalone binary above)
 - `meerkat_<v>_checksums.txt.sigstore.json` (cosign Sigstore bundle: signature + certificate + Rekor inclusion proof)
-- `*.sbom.json` (SPDX SBOM per archive)
+- `*.sbom.json` (SPDX SBOM per archive and per standalone binary)
 - `ghcr.io/zegit-zoo/meerkat:X.Y.Z` / `:X.Y` / `:latest` (multi-arch OCI
   image, signed + attested. Note these image tags drop the git tag's
   leading `v` — a `vX.Y.Z` git tag publishes exactly these three

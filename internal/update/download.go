@@ -2,6 +2,7 @@ package update
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -283,4 +284,87 @@ func ExtractMeerkat(tarballPath string) (string, error) {
 		return out.Name(), nil
 	}
 	return "", fmt.Errorf("no `meerkat` binary in tarball")
+}
+
+// ExtractMeerkatArchive extracts the `meerkat` binary from a
+// downloaded release archive, dispatching purely on assetName's
+// extension: a ".zip" (Windows releases, per .goreleaser.yaml's
+// archives.format_overrides) goes through extractMeerkatZip, every
+// other extension goes through the existing ExtractMeerkat tar.gz
+// path. Dispatch is keyed on the *requested asset name* — the actual
+// content we asked GitHub for — rather than archivePath's own
+// filename, since DownloadAsset always names its tempfile
+// "*.tar.gz" regardless of what bytes actually ended up in it.
+//
+// mk update itself never needs this: it only ever runs on (and so
+// only ever needs to extract for) the single platform it already is,
+// via ExtractMeerkat directly. This exists for meerkat-bootstrap,
+// which must be able to select and extract the correct archive for
+// whichever platform it's running on, Windows included.
+func ExtractMeerkatArchive(archivePath, assetName string) (string, error) {
+	if strings.HasSuffix(assetName, ".zip") {
+		return extractMeerkatZip(archivePath)
+	}
+	return ExtractMeerkat(archivePath)
+}
+
+// extractMeerkatZip extracts `meerkat.exe` from a Windows release zip
+// to a tempfile and returns its path. Mirrors ExtractMeerkat's
+// per-entry size cap (maxExtractedBinarySize) and its "only a regular
+// file literally named meerkat.exe" allowlist. Zip's central
+// directory records each entry's uncompressed size up front, so —
+// unlike tar.gz's sequential stream — skipping entries that aren't
+// "meerkat.exe" never requires decompressing them; the cumulative-cap
+// concern ExtractMeerkat has to defend against (a decoy entry forcing
+// unbounded decompression while searching for the real one) does not
+// apply here, so this only needs the per-entry cap plus a bounded
+// copy of the one entry we do read.
+func extractMeerkatZip(archivePath string) (string, error) {
+	zr, err := zip.OpenReader(archivePath) // #nosec G304 -- archivePath is a tempfile we downloaded and are about to sha256/cosign-verify by the time this runs
+	if err != nil {
+		return "", fmt.Errorf("open zip: %w", err)
+	}
+	defer zr.Close()
+
+	for _, f := range zr.File {
+		if filepath.Base(f.Name) != "meerkat.exe" {
+			continue
+		}
+		if !f.Mode().IsRegular() {
+			continue
+		}
+		if f.UncompressedSize64 > maxExtractedBinarySize {
+			return "", fmt.Errorf("extract: %q exceeds the %d-byte cap; refusing (corrupt or unexpectedly large archive)", f.Name, maxExtractedBinarySize)
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return "", fmt.Errorf("open zip entry: %w", err)
+		}
+		out, err := os.CreateTemp("", "meerkat-extracted-*.exe")
+		if err != nil {
+			_ = rc.Close()
+			return "", fmt.Errorf("tempfile: %w", err)
+		}
+		n, err := io.Copy(out, io.LimitReader(rc, maxExtractedBinarySize+1))
+		_ = rc.Close()
+		if err != nil {
+			out.Close()
+			os.Remove(out.Name())
+			return "", fmt.Errorf("extract: %w", err)
+		}
+		if n > maxExtractedBinarySize {
+			out.Close()
+			os.Remove(out.Name())
+			return "", fmt.Errorf("extract: %q exceeds the %d-byte cap; refusing (corrupt or unexpectedly large archive)", f.Name, maxExtractedBinarySize)
+		}
+		if err := out.Chmod(0o755); err != nil {
+			out.Close()
+			os.Remove(out.Name())
+			return "", fmt.Errorf("chmod: %w", err)
+		}
+		out.Close()
+		return out.Name(), nil
+	}
+	return "", fmt.Errorf("no `meerkat.exe` binary in zip")
 }

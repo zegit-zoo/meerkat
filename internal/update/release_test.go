@@ -116,6 +116,53 @@ func TestPickAssetName(t *testing.T) {
 	}
 }
 
+// TestPickAssetNameFor_AllPublishedPlatforms covers every OS/arch pair
+// .goreleaser.yaml actually publishes (darwin/linux/windows ×
+// amd64/arm64), independent of whatever platform the test itself
+// happens to run on -- unlike TestPickAssetName above, which can only
+// ever exercise runtime.GOOS/runtime.GOARCH. Windows gets the ".zip"
+// extension (see ArchiveExt / .goreleaser.yaml's
+// archives.format_overrides); every other OS gets ".tar.gz".
+func TestPickAssetNameFor_AllPublishedPlatforms(t *testing.T) {
+	cases := []struct {
+		goos, goarch string
+		want         string
+	}{
+		{"darwin", "amd64", "meerkat_0.10.0_darwin_amd64.tar.gz"},
+		{"darwin", "arm64", "meerkat_0.10.0_darwin_arm64.tar.gz"},
+		{"linux", "amd64", "meerkat_0.10.0_linux_amd64.tar.gz"},
+		{"linux", "arm64", "meerkat_0.10.0_linux_arm64.tar.gz"},
+		{"windows", "amd64", "meerkat_0.10.0_windows_amd64.zip"},
+		{"windows", "arm64", "meerkat_0.10.0_windows_arm64.zip"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.goos+"_"+tc.goarch, func(t *testing.T) {
+			if got := PickAssetNameFor("v0.10.0", tc.goos, tc.goarch); got != tc.want {
+				t.Errorf("PickAssetNameFor(%q,%q) = %q, want %q", tc.goos, tc.goarch, got, tc.want)
+			}
+			// A bare (no "v" prefix) version must produce the same name.
+			if got := PickAssetNameFor("0.10.0", tc.goos, tc.goarch); got != tc.want {
+				t.Errorf("PickAssetNameFor(%q,%q) (no v prefix) = %q, want %q", tc.goos, tc.goarch, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestArchiveExt pins the Windows/everything-else split to
+// .goreleaser.yaml's archives.format_overrides.
+func TestArchiveExt(t *testing.T) {
+	cases := map[string]string{
+		"windows": ".zip",
+		"darwin":  ".tar.gz",
+		"linux":   ".tar.gz",
+	}
+	for goos, want := range cases {
+		if got := ArchiveExt(goos); got != want {
+			t.Errorf("ArchiveExt(%q) = %q, want %q", goos, got, want)
+		}
+	}
+}
+
 // TestChecksumAssetName.
 func TestChecksumAssetName(t *testing.T) {
 	if got, want := ChecksumAssetName("v0.4.0"), "meerkat_0.4.0_checksums.txt"; got != want {
