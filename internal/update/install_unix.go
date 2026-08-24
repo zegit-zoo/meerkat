@@ -17,6 +17,24 @@ import (
 // equivalent. There the caller falls back to telling the user to
 // re-run from an elevated PowerShell.
 func installStagedWithSudo(stagedPath, currentExe string) error {
+	backupPath, err := swapWithBackupSudo(stagedPath, currentExe)
+	if err != nil {
+		return err
+	}
+	_ = runCommand("sudo", "rm", "-f", backupPath)
+	return nil
+}
+
+// swapWithBackupSudo is swapWithBackup's sudo-elevated twin: same
+// stage/backup/promote sequence, but every filesystem operation that
+// touches currentExe's directory runs through `sudo` because this
+// process itself doesn't have write access there. On success the
+// backup is left at the returned path rather than removed —
+// installStagedWithSudo removes it immediately (mirroring
+// installStaged's non-Windows behavior, since mk update's binary was
+// already verified before the swap ran); InstallAtomic in
+// bootstrap.go keeps it until its own post-install check passes.
+func swapWithBackupSudo(stagedPath, currentExe string) (backupPath string, err error) {
 	// Same rationale as installStaged's copyFileToNewTemp in
 	// install.go: the staging path must not be a fixed, guessable
 	// name, because a pre-planted symlink there would make `sudo cp`
@@ -31,28 +49,27 @@ func installStagedWithSudo(stagedPath, currentExe string) error {
 	// so a pre-planted symlink there can't be written through.
 	suffix, err := randomHexSuffix()
 	if err != nil {
-		return fmt.Errorf("generate staging suffix: %w", err)
+		return "", fmt.Errorf("generate staging suffix: %w", err)
 	}
 	stagingPath := currentExe + ".new-" + suffix
-	backupPath := currentExe + ".old"
+	backupPath = currentExe + ".old"
 
 	if err := runCommand("sudo", "cp", stagedPath, stagingPath); err != nil {
-		return fmt.Errorf("sudo cp staged binary: %w", err)
+		return "", fmt.Errorf("sudo cp staged binary: %w", err)
 	}
 	if err := runCommand("sudo", "chmod", "0755", stagingPath); err != nil {
 		_ = runCommand("sudo", "rm", "-f", stagingPath)
-		return fmt.Errorf("sudo chmod staged binary: %w", err)
+		return "", fmt.Errorf("sudo chmod staged binary: %w", err)
 	}
 	if err := runCommand("sudo", "mv", currentExe, backupPath); err != nil {
 		_ = runCommand("sudo", "rm", "-f", stagingPath)
-		return fmt.Errorf("sudo backup current binary: %w", err)
+		return "", fmt.Errorf("sudo backup current binary: %w", err)
 	}
 	if err := runCommand("sudo", "mv", stagingPath, currentExe); err != nil {
 		_ = runCommand("sudo", "mv", backupPath, currentExe)
-		return fmt.Errorf("sudo install new binary: %w", err)
+		return "", fmt.Errorf("sudo install new binary: %w", err)
 	}
-	_ = runCommand("sudo", "rm", "-f", backupPath)
-	return nil
+	return backupPath, nil
 }
 
 // reExec replaces the current process image with the newly-installed

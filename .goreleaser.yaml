@@ -38,8 +38,37 @@ builds:
     # so the `binary: meerkat` setting above yields meerkat.exe
     # inside the Windows zip.
 
+  # meerkat-bootstrap (see cmd/meerkat-bootstrap and
+  # docs/design/upstream-migration.md#converging-from-a-downstream-fork)
+  # installs a zegit-zoo/meerkat release independently of whatever
+  # updater the binary at its --destination understands. It reuses
+  # internal/update's verification/install code unchanged, so it
+  # ships from the same release, same commit, same cosign identity as
+  # `meerkat` itself — deliberately not a separate repo or a
+  # differently-signed artifact.
+  - id: meerkat-bootstrap
+    main: ./cmd/meerkat-bootstrap
+    binary: meerkat-bootstrap
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
 archives:
   - id: default
+    ids: [meerkat]
     # Default to tar.gz for Unix-y OSes. Windows users expect zip
     # archives — Expand-Archive is built into PowerShell and works
     # without extra tooling. format_overrides handles that delta.
@@ -59,18 +88,41 @@ archives:
     # users a copy of meerkat.exe to mk.exe (or a mk.cmd shim)
     # is recommended in the same doc.
 
+  # meerkat-bootstrap publishes as a bare standalone binary rather
+  # than a tar.gz/zip archive: it's a single small file with no
+  # accompanying LICENSE/NOTICE/THIRD-PARTY-LICENSES.txt bundle of
+  # its own (those already ship in the `meerkat` archive above, and
+  # meerkat-bootstrap's own module graph is a strict subset), so there
+  # is nothing an archive would add — a downstream operator running
+  # the one documented bootstrap command can `curl`/`gh release
+  # download` this file directly and chmod +x it, no unpacking step.
+  # `formats: [binary]` is goreleaser's standalone-binary publishing
+  # mode; it still participates in `checksum:` and `sboms:` below like
+  # any other archive.
+  - id: bootstrap
+    ids: [meerkat-bootstrap]
+    formats: [binary]
+    name_template: >-
+      meerkat-bootstrap_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
 checksum:
   name_template: '{{ .ProjectName }}_{{ .Version }}_checksums.txt'
   algorithm: sha256
 
 # SPDX SBOM per artifact via syft (must be on PATH; CI installs it
-# in the release job's before_script). One .sbom.json per archive +
-# one for the source tree.
+# in the release job's before_script). One .sbom.json per archive
+# (the `meerkat` tar.gz/zip), one per standalone binary (the
+# meerkat-bootstrap build above), and one for the source tree.
 sboms:
   - id: archive
     artifacts: archive
     documents:
       - '${artifact}.sbom.json'
+  - id: bootstrap-binary
+    ids: [bootstrap]
+    artifacts: binary
+    documents:
+      - 'meerkat-bootstrap_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if eq .Os "windows" }}.exe{{ end }}.sbom.json'
   - id: source
     artifacts: source
     documents:
@@ -131,6 +183,12 @@ release:
 
     Third-party licenses for statically linked dependencies are
     included in each archive as `THIRD-PARTY-LICENSES.txt`.
+
+    Converging a downstream fork onto this release? `meerkat-bootstrap`
+    (a standalone binary in this release's assets) installs a verified
+    upstream release independently of whatever updater your existing
+    binary understands — see
+    docs/design/upstream-migration.md#converging-from-a-downstream-fork.
 
 # Distribution: tagged releases publish cross-built tarballs to the
 # GitHub Releases page. First-time install is manual (see README).

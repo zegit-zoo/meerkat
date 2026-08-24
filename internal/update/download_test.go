@@ -2,6 +2,7 @@ package update
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -338,5 +339,137 @@ func TestExtractMeerkat_NoBinary(t *testing.T) {
 	_, err := ExtractMeerkat(tmp)
 	if err == nil || !strings.Contains(err.Error(), "no `meerkat` binary") {
 		t.Errorf("expected 'no meerkat binary' error, got: %v", err)
+	}
+}
+
+// fakeZipAsset builds a Windows-shaped release zip containing
+// meerkat.exe with the given content, mirroring fakeAsset's tar.gz
+// helper above. Returns (bytes, hex sha256).
+func fakeZipAsset(t *testing.T, content string) ([]byte, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("meerkat.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	body := buf.Bytes()
+	sum := sha256.Sum256(body)
+	return body, hex.EncodeToString(sum[:])
+}
+
+// TestExtractMeerkatArchive_Zip round-trips a Windows-shaped zip
+// through ExtractMeerkatArchive, dispatched purely by the requested
+// asset name's ".zip" suffix (as meerkat-bootstrap does) rather than
+// by the downloaded tempfile's own name.
+func TestExtractMeerkatArchive_Zip(t *testing.T) {
+	body, _ := fakeZipAsset(t, "fake windows binary")
+	// DownloadAsset always names its tempfile "*.tar.gz" regardless of
+	// actual content (see download.go) -- use that same misleading
+	// name here to prove dispatch really is keyed on assetName, not
+	// archivePath.
+	tmp := filepath.Join(t.TempDir(), "download.tar.gz")
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binPath, err := ExtractMeerkatArchive(tmp, "meerkat_0.10.0_windows_amd64.zip")
+	if err != nil {
+		t.Fatalf("ExtractMeerkatArchive: %v", err)
+	}
+	defer os.Remove(binPath)
+
+	got, err := os.ReadFile(binPath)
+	if err != nil {
+		t.Fatalf("read extracted binary: %v", err)
+	}
+	if string(got) != "fake windows binary" {
+		t.Errorf("got %q, want %q", got, "fake windows binary")
+	}
+	if !strings.HasSuffix(binPath, ".exe") {
+		t.Errorf("extracted path %q does not end in .exe", binPath)
+	}
+}
+
+// TestExtractMeerkatArchive_TarGz confirms the non-".zip" dispatch
+// path still goes through the existing tar.gz extraction unchanged.
+func TestExtractMeerkatArchive_TarGz(t *testing.T) {
+	body, _ := fakeAsset(t, "fake unix binary")
+	tmp := filepath.Join(t.TempDir(), "asset.tar.gz")
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binPath, err := ExtractMeerkatArchive(tmp, "meerkat_0.10.0_linux_amd64.tar.gz")
+	if err != nil {
+		t.Fatalf("ExtractMeerkatArchive: %v", err)
+	}
+	defer os.Remove(binPath)
+	got, _ := os.ReadFile(binPath)
+	if string(got) != "fake unix binary" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// TestExtractMeerkatZip_NoBinary errors when the zip has no
+// meerkat.exe entry -- the tampered/mismatched-asset case.
+func TestExtractMeerkatZip_NoBinary(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.Write([]byte("hi\n"))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(t.TempDir(), "nope.zip")
+	_ = os.WriteFile(tmp, buf.Bytes(), 0o644)
+
+	_, err = ExtractMeerkatArchive(tmp, "meerkat_0.10.0_windows_amd64.zip")
+	if err == nil || !strings.Contains(err.Error(), "no `meerkat.exe` binary") {
+		t.Errorf("expected 'no meerkat.exe binary' error, got: %v", err)
+	}
+}
+
+// TestExtractMeerkatZip_OversizeRejected: a meerkat.exe entry whose
+// actual uncompressed content exceeds the per-entry cap must be
+// rejected. zip.Writer computes UncompressedSize64 from what's
+// actually written (recorded in the central directory zw.Close()
+// writes out), so -- like TestExtractMeerkat_OversizeRejected's
+// tar.gz equivalent above -- this writes the declared size's worth of
+// real (compressible) zero bytes via zeroReader rather than faking
+// the header field directly.
+func TestExtractMeerkatZip_OversizeRejected(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("meerkat.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := int64(maxExtractedBinarySize + 1024)
+	if _, err := io.CopyN(w, zeroReader{}, size); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(t.TempDir(), "oversize.zip")
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ExtractMeerkatArchive(tmp, "meerkat_0.10.0_windows_amd64.zip")
+	if err == nil {
+		t.Fatal("expected an error for an oversize zip entry")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("expected a size-cap error, got: %v", err)
 	}
 }

@@ -151,10 +151,43 @@ func fetchOne(ctx context.Context, tag string) (*Release, error) {
 // and a sibling checksum file:
 //
 //	meerkat_<X.Y.Z>_checksums.txt
+//
+// NOTE: this always assumes the `.tar.gz` suffix, even when
+// runtime.GOOS is "windows" (where goreleaser actually publishes a
+// `.zip`, per .goreleaser.yaml's archives.format_overrides) — that
+// mismatch predates this comment and is unchanged here; `mk update`'s
+// own asset selection/extraction path is out of scope for this
+// function's callers to alter. meerkat-bootstrap, which must select
+// correctly across every published platform including Windows, uses
+// the OS-aware PickAssetNameFor below instead.
 func PickAssetName(version string) string {
 	v := strings.TrimPrefix(version, "v")
 	return fmt.Sprintf("meerkat_%s_%s_%s.tar.gz",
 		v, runtime.GOOS, runtime.GOARCH)
+}
+
+// PickAssetNameFor returns the asset name goreleaser publishes for an
+// arbitrary goos/goarch pair, using the correct per-platform archive
+// extension (see ArchiveExt). Unlike PickAssetName, this is accurate
+// for every platform meerkat ships for, including Windows — it is
+// meerkat-bootstrap's asset-selection primitive, and lets tests reason
+// about a platform other than the one they're currently running on
+// without actually running on it.
+func PickAssetNameFor(version, goos, goarch string) string {
+	v := strings.TrimPrefix(version, "v")
+	return fmt.Sprintf("meerkat_%s_%s_%s%s", v, goos, goarch, ArchiveExt(goos))
+}
+
+// ArchiveExt returns the archive filename extension goreleaser
+// publishes for goos, matching .goreleaser.yaml's
+// archives.format_overrides: a Windows release is a `.zip` (so
+// PowerShell's built-in Expand-Archive can open it with no extra
+// tooling); every other platform is a `.tar.gz`.
+func ArchiveExt(goos string) string {
+	if goos == "windows" {
+		return ".zip"
+	}
+	return ".tar.gz"
 }
 
 // ChecksumAssetName returns the checksum file name for a release.
