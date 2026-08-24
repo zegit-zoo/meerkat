@@ -22,6 +22,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/memory"
 	"github.com/zegit-zoo/meerkat/internal/refresh"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // hosted.go is the Streamable HTTP transport: `mk mcp serve-http`.
@@ -123,6 +124,32 @@ type HostedConfig struct {
 	// it only when a same-host reverse proxy forwards with the original
 	// Host header preserved; prefer rewriting Host at the proxy.
 	DisableDNSRebindingProtection bool
+	// Observability is the parsed `observability:` block. Nil — which is
+	// every deployment that has not written one — means no OpenTelemetry
+	// SDK is constructed at all: no spans, no exporter, no goroutine, no
+	// socket, and the Prometheus and slog behaviour of this server is
+	// byte-identical to what it was before tracing existed. See
+	// internal/telemetry and docs/design/observability.md.
+	Observability *telemetry.Config
+	// Telemetry injects an already-built telemetry instance, bypassing
+	// Observability.
+	//
+	// It is the test seam, and the reason no test in this repo needs a
+	// collector or a network: a test builds a *telemetry.Telemetry over
+	// sdk/trace/tracetest's in-memory exporter and hands it here.
+	// Production sets Observability instead; there is no configuration
+	// key that could reach this field.
+	Telemetry *telemetry.Telemetry
+	// SetOTelGlobals installs this server's tracer provider as the
+	// process-global one, so third-party clients instrumented against
+	// the OpenTelemetry globals — the Google Cloud Storage client above
+	// all — join meerkat's traces instead of emitting nowhere.
+	//
+	// Off by default because a test binary, or an embedding host, may
+	// run several servers in one process and exactly one of them can own
+	// a global. `mk mcp serve-http` sets it, because there it is the only
+	// server there is.
+	SetOTelGlobals bool
 }
 
 // HostedServer is a running (or runnable) Streamable HTTP MCP server.
@@ -141,6 +168,12 @@ type HostedServer struct {
 	// every deployment that has not written a `refresh:` block; every
 	// call site tolerates a nil controller.
 	refresh *refresh.Controller
+	// tel is the OpenTelemetry layer. nil when no `observability:` block
+	// opted in — which is every deployment that has not written one —
+	// and every call site tolerates a nil, exactly as the refresh
+	// controller above does. A nil tel is not a degraded mode; it is the
+	// server this file described before tracing existed.
+	tel *telemetry.Telemetry
 
 	ready readinessCache
 }
@@ -163,9 +196,6 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	if reg == nil {
 		reg = collections.Global(kbdir.SourceEmbedded)
 	}
-	if err := indexAll(reg); err != nil {
-		return nil, err
-	}
 
 	s := &HostedServer{
 		cfg:  cfg,
@@ -174,6 +204,45 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		auth: cfg.Auth,
 	}
 	s.metrics = newMetrics(cfg.Metrics, cfg.Version, reg.Len())
+
+	// Telemetry is constructed BEFORE the startup index build, so the
+	// build is the first thing traced: a slow start on a large collection
+	// is exactly the kind of thing an operator turns tracing on to see,
+	// and it would be invisible if the SDK came up afterwards.
+	//
+	// It is also constructed AFTER the metrics registry, because the
+	// domain collectors go on that same registry — /metrics gains series,
+	// never a second endpoint.
+	tel := cfg.Telemetry
+	// abandon releases telemetry on a startup failure — but only the
+	// instance THIS call built. An injected one (a test's) belongs to its
+	// caller, who will shut it down themselves; tearing down somebody
+	// else's exporter because our indexing failed would be a surprising
+	// thing for a constructor to do.
+	abandon := func() {}
+	if tel == nil {
+		built, err := telemetry.New(ctx, telemetry.Options{
+			Config:     cfg.Observability,
+			Registry:   s.metrics.reg,
+			Logger:     s.log,
+			Version:    cfg.Version,
+			SetGlobals: cfg.SetOTelGlobals,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("observability: %w", err)
+		}
+		tel = built
+		abandon = func() { _ = built.Shutdown(ctx) }
+	}
+	s.tel = tel
+	// Everything below this line runs with telemetry in its context, so
+	// startup work is traced by the same code that traces a request.
+	ctx = telemetry.NewContext(ctx, s.tel)
+
+	if err := indexAll(ctx, reg); err != nil {
+		abandon()
+		return nil, err
+	}
 	s.warnCollectionWidePersonalMemories()
 
 	// Runtime reconciliation is opt-in and configuration-driven: the
@@ -187,11 +256,18 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		Registry: s.metrics.reg,
 	})
 
+	// The OIDC client is wrapped so discovery and JWKS fetches carry this
+	// process's trace context outbound and appear as client spans. That
+	// is the one place meerkat makes an outbound HTTP call on a request's
+	// behalf, and "the IdP was slow" is otherwise indistinguishable from
+	// "meerkat was slow" in a trace. A nil telemetry returns the client
+	// untouched.
 	verifier, err := authn.NewVerifier(ctx, authn.Options{
 		Config:     cfg.Auth,
-		HTTPClient: cfg.HTTPClient,
+		HTTPClient: s.tel.HTTPClient(cfg.HTTPClient),
 	})
 	if err != nil {
+		abandon()
 		return nil, fmt.Errorf("oidc: %w", err)
 	}
 	metadataURL := ""
@@ -385,7 +461,13 @@ func (s *HostedServer) routes() http.Handler {
 	mux.Handle("GET "+MetricsPath, promhttp.HandlerFor(s.metrics.reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("GET /{$}", s.handleRoot)
 
-	return s.accessLog(s.metrics.instrumentHTTP(mux))
+	// Outermost first: the root span has to exist before the access log
+	// runs, so the log line can carry the trace it belongs to, and it has
+	// to cover the authentication gate, so a 401 is a complete trace
+	// rather than a gap. With no telemetry configured traceHTTP returns
+	// its argument unchanged — not a wrapper — so this composes to
+	// exactly the two middlewares it always did.
+	return s.traceHTTP(s.accessLog(s.metrics.instrumentHTTP(mux)))
 }
 
 // Handler exposes the fully-wrapped mux, for tests and for embedding
@@ -432,7 +514,12 @@ func (s *HostedServer) ListenAndServe(ctx context.Context) error {
 	// it here rather than in NewHosted means a caller that builds a server
 	// to inspect its handler (a test, an embedding host) never acquires a
 	// background poller it did not ask for.
-	s.refresh.Start(ctx)
+	//
+	// The controller's context carries the telemetry, so a scheduled
+	// refresh cycle is traced by the same code an admin-triggered one is
+	// — there is one funnel (Controller.runOnce) and it sees the same
+	// context either way.
+	s.refresh.Start(telemetry.NewContext(ctx, s.tel))
 	defer func() { _ = s.refresh.Close() }()
 
 	errCh := make(chan error, 1)
@@ -451,8 +538,16 @@ func (s *HostedServer) ListenAndServe(ctx context.Context) error {
 		defer cancel()
 		s.stream.CloseSessions(shutdownCtx)
 		_ = s.srv.Shutdown(shutdownCtx)
+		// Flush telemetry LAST, and never let it decide the outcome. The
+		// spans worth keeping are the ones from the requests that just
+		// finished, so the flush belongs after the graceful drain; and a
+		// collector that is already gone must not turn a clean shutdown
+		// into a failed one, so the error is logged inside Shutdown and
+		// discarded here.
+		_ = s.tel.Shutdown(shutdownCtx)
 		return ctx.Err()
 	case err := <-errCh:
+		_ = s.tel.Shutdown(context.Background())
 		return err
 	}
 }
@@ -465,6 +560,12 @@ func (s *HostedServer) ListenAndServe(ctx context.Context) error {
 // snapshot into a registry we are about to tear down.
 func (s *HostedServer) Close() error {
 	_ = s.refresh.Close()
+	// Telemetry after the controller and before the registry: a cycle
+	// that was still finishing may have ended spans, and they should get
+	// their one bounded flush attempt. Its error is deliberately not part
+	// of Close's answer — an unreachable collector is not a failure to
+	// release this server's resources.
+	_ = s.tel.Shutdown(context.Background())
 	if s.reg == nil {
 		return nil
 	}
@@ -486,7 +587,7 @@ func (s *HostedServer) Close() error {
 // and this is a no-op rather than an error: an operator sending SIGHUP
 // to the wrong process should not get a failure they have to interpret.
 func (s *HostedServer) Reload(ctx context.Context) error {
-	return s.refresh.ReloadNow(ctx)
+	return s.refresh.ReloadNow(telemetry.NewContext(ctx, s.tel))
 }
 
 // --- probes ----------------------------------------------------------
@@ -535,8 +636,8 @@ func (s *HostedServer) handleLivez(w http.ResponseWriter, _ *http.Request) {
 // opposite trade asks for it per collection with `failure_policy:
 // unready`, which makes the collection not-ready and shows up here as a
 // 503 through the normal path.
-func (s *HostedServer) handleReadyz(w http.ResponseWriter, _ *http.Request) {
-	ready, health := s.readiness()
+func (s *HostedServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	ready, health := s.readinessFor(r.Context())
 	total := len(health)
 	nReady, nDegraded := 0, 0
 	for _, h := range health {
@@ -568,13 +669,26 @@ func (s *HostedServer) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // readiness returns the cached readiness answer, recomputing it when
-// stale.
+// stale. It is readinessFor with no context — the startup call, which
+// happens before any request exists.
 func (s *HostedServer) readiness() (bool, []collections.Health) {
+	return s.readinessFor(telemetry.NewContext(context.Background(), s.tel))
+}
+
+// readinessFor is readiness with the caller's context, so a recompute
+// lands in that request's trace.
+//
+// The span carries the two COUNTS the response body carries and nothing
+// else: no collection name, no error text, no stale reason. /readyz is
+// unauthenticated and a span is exported off-box, so the stricter of the
+// two rules applies.
+func (s *HostedServer) readinessFor(ctx context.Context) (bool, []collections.Health) {
 	s.ready.mu.Lock()
 	defer s.ready.mu.Unlock()
 	if s.ready.computed && time.Since(s.ready.at) < s.cfg.ReadinessTTL {
 		return s.ready.ready, s.ready.health
 	}
+	_, span := telemetry.Span(ctx, telemetry.SpanReadiness)
 	ready, health := s.reg.Ready()
 	if !ready && (!s.ready.computed || s.ready.ready) {
 		// Log the transition into degraded, with the names the response
@@ -587,7 +701,18 @@ func (s *HostedServer) readiness() (bool, []collections.Health) {
 	}
 	s.ready.ready, s.ready.health, s.ready.at, s.ready.computed = ready, health, time.Now(), true
 	s.metrics.setReady(ready)
-	s.metrics.setCollectionStates(health)
+	nReady, nDegraded, pages := s.metrics.setCollectionStates(health)
+	// The indexed page total rides the readiness sweep because that is
+	// where the pages were just enumerated — computing it separately
+	// would double the most expensive thing a probe does.
+	telemetry.FromContext(ctx).Metrics().SetIndexedPages(pages)
+	span.SetAttributes(
+		telemetry.KeyReady.Bool(ready),
+		telemetry.KeyCollectionsReady.Int(nReady),
+		telemetry.KeyCollectionsDegraded.Int(nDegraded),
+		telemetry.KeyIndexPages.Int(pages),
+	)
+	span.End()
 	return ready, health
 }
 
@@ -620,10 +745,25 @@ func (s *HostedServer) handleRoot(w http.ResponseWriter, _ *http.Request) {
 // per request is a liability and tells an operator nothing they can act
 // on), or request bodies. It does log the subject and tenant of an
 // authenticated caller, which is what an audit trail needs.
+//
+// When tracing is on it additionally carries `trace_id` and `span_id`,
+// so this line and the trace of the same request join. That is the whole
+// of the bridge between the two surfaces, and it goes one way only: IDs
+// come into the log, and NOTHING goes from the log into the span. The
+// identity fields above stay here, on the operator's own stderr, rather
+// than being exported to a collector — see internal/telemetry's package
+// comment.
 func (s *HostedServer) accessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		// Reuse the recorder the tracing middleware already installed,
+		// when there is one, so a request is never counted twice or
+		// double-wrapped. With telemetry off there is none and this is the
+		// line it always was.
+		rec, ok := w.(*statusRecorder)
+		if !ok {
+			rec = &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		}
 		// The authentication gate runs BELOW this middleware and installs
 		// grants on a derived request, which this frame never sees. Hand
 		// a holder down for captureIdentity to fill in, so the access log
@@ -652,6 +792,7 @@ func (s *HostedServer) accessLog(next http.Handler) http.Handler {
 				attrs = append(attrs, "tenant", id.Tenant)
 			}
 		}
+		attrs = append(attrs, s.tel.LogAttrs(r.Context())...)
 		s.log.Info("mcp.access", attrs...)
 	})
 }
@@ -715,6 +856,7 @@ func (s *HostedServer) onDeny(r *http.Request, reason authn.Reason, err error) {
 	if err != nil {
 		attrs = append(attrs, "error", err.Error())
 	}
+	attrs = append(attrs, s.tel.LogAttrs(r.Context())...)
 	s.log.Warn("mcp.auth_denied", attrs...)
 }
 

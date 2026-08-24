@@ -16,6 +16,8 @@ import (
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/iterator"
+
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // gcs.go implements type: gcs — a Google Cloud Storage bucket as a
@@ -216,7 +218,9 @@ func FetchGCS(ctx context.Context, src Source) (dir, version string, err error) 
 func fetchGCSObject(ctx context.Context, client gcsAPI, src Source) (dir, version string, err error) {
 	generation := src.Generation
 	if generation == 0 {
-		attrs, aerr := client.Attrs(ctx, src.Bucket, src.Object)
+		attrs, aerr := gcsOp(ctx, "attrs", func() (gcsObject, error) {
+			return client.Attrs(ctx, src.Bucket, src.Object)
+		})
 		if aerr != nil {
 			return "", "", fmt.Errorf("gcs://%s/%s: %w", src.Bucket, src.Object, aerr)
 		}
@@ -231,14 +235,19 @@ func fetchGCSObject(ctx context.Context, client gcsAPI, src Source) (dir, versio
 	if isCacheComplete(cacheDir) {
 		// Immutable by generation: a restart on the same generation is
 		// free, exactly as a type: url restart on the same digest is.
+		telemetry.Record(ctx).CacheLookup(telemetry.SourceGCSObject, telemetry.CacheHit)
 		return cacheDir, version, nil
 	}
+	telemetry.Record(ctx).CacheLookup(telemetry.SourceGCSObject, telemetry.CacheMiss)
 
 	tmpFile, digest, err := downloadGCSToTemp(ctx, client, src.Bucket, src.Object, generation)
 	if err != nil {
 		return "", "", fmt.Errorf("gcs://%s/%s@%d: %w", src.Bucket, src.Object, generation, err)
 	}
 	defer func() { _ = os.Remove(tmpFile) }()
+	if info, serr := os.Stat(tmpFile); serr == nil {
+		telemetry.Record(ctx).Downloaded(telemetry.SourceGCSObject, info.Size())
+	}
 
 	// sha256 is optional for gcs (the generation already pins the bytes),
 	// but when an operator does pin one, it is verified BEFORE anything
@@ -261,7 +270,9 @@ func fetchGCSObject(ctx context.Context, client gcsAPI, src Source) (dir, versio
 // laid out as a directory tree, cached by a fingerprint over the whole
 // listing's (name, generation) pairs.
 func fetchGCSPrefix(ctx context.Context, client gcsAPI, src Source) (dir, version string, err error) {
-	objs, err := client.Objects(ctx, src.Bucket, src.Prefix)
+	objs, err := gcsOp(ctx, "list", func() ([]gcsObject, error) {
+		return client.Objects(ctx, src.Bucket, src.Prefix)
+	})
 	if err != nil {
 		return "", "", fmt.Errorf("gcs://%s/%s*: %w", src.Bucket, src.Prefix, err)
 	}
@@ -278,16 +289,45 @@ func fetchGCSPrefix(ctx context.Context, client gcsAPI, src Source) (dir, versio
 		return "", "", err
 	}
 	if isCacheComplete(cacheDir) {
+		telemetry.Record(ctx).CacheLookup(telemetry.SourceGCSPrefix, telemetry.CacheHit)
 		return cacheDir, version, nil
 	}
+	telemetry.Record(ctx).CacheLookup(telemetry.SourceGCSPrefix, telemetry.CacheMiss)
 
+	ctx, span := telemetry.Span(ctx, telemetry.SpanGCS,
+		telemetry.KeyGCSOperation.String("read"),
+		telemetry.KeySourceObjects.Int(len(objs)))
 	err = populateCacheDir(cacheDir, GCSProvenance(src, version), func(tmpDir string) error {
 		return downloadGCSTree(ctx, client, src, objs, tmpDir)
 	})
 	if err != nil {
+		telemetry.Fail(span, telemetry.OutcomeError)
 		return "", "", err
 	}
+	span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
+	span.End()
 	return cacheDir, version, nil
+}
+
+// gcsOp wraps one Google Cloud Storage call in a span.
+//
+// The span names the OPERATION — attrs, list, read — and nothing else.
+// No bucket, no object name, no prefix, no generation: a bucket name is
+// a deployment's storage layout, an object name is frequently the
+// document's own title, and both would be exported off-box. What is left
+// is what an operator needs from a trace anyway: which kind of call was
+// slow, and how many objects it touched.
+func gcsOp[T any](ctx context.Context, operation string, fn func() (T, error)) (T, error) {
+	_, span := telemetry.Span(ctx, telemetry.SpanGCS,
+		telemetry.KeyGCSOperation.String(operation))
+	v, err := fn()
+	if err != nil {
+		telemetry.Fail(span, telemetry.OutcomeError)
+		return v, err
+	}
+	span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
+	span.End()
+	return v, nil
 }
 
 // keepFetchableObjects drops entries that aren't files to serve: the

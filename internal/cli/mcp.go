@@ -153,6 +153,19 @@ store, and is what makes several replicas converge on each other's
 writes. SIGHUP runs every configured refresh immediately. See
 docs/design/hot-reload.md.
 
+An "observability:" block in content-source.yaml (or the standard OTEL_*
+environment variables) turns on OpenTelemetry tracing and optional OTLP
+export: one mk_search then becomes one trace spanning the HTTP request,
+OIDC verification, the authorization decision, the tool call, the search
+and any GCS or memory work underneath it, and the access log gains
+matching trace_id/span_id. With no block and no OTEL_* variable nothing
+is constructed at all — no spans, no exporter, no socket — and /metrics
+and the JSON logs are exactly what they were. Spans carry counts,
+durations and closed-set outcomes only: never a query, a page ID, a
+collection name, a bucket, a token or a subject. A collector that is
+down never affects a request, /readyz or shutdown. See
+docs/design/observability.md.
+
 The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -177,6 +190,13 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				Version:                       version,
 				Stateful:                      stateful,
 				DisableDNSRebindingProtection: trustProxyHost,
+				Observability:                 activeObservability,
+				// This process runs exactly one hosted server, so it is the
+				// one that may own the OpenTelemetry globals — which is what
+				// makes the Google Cloud Storage client's own instrumentation
+				// join meerkat's traces instead of emitting nowhere. A test
+				// binary or an embedding host runs several and sets neither.
+				SetOTelGlobals: true,
 			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

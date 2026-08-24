@@ -54,6 +54,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/search"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // serverName and serverVersion identify meerkat in the MCP initialize
@@ -123,9 +124,13 @@ func newServer(reg *collections.Registry, mem transportOptions, opts ...mcpserve
 // its startup cost at startup — not inside whichever request happens to
 // be first — and should fail to start at all if a collection can't be
 // indexed, rather than surfacing that as a tool error much later.
-func indexAll(reg *collections.Registry) error {
+//
+// ctx carries the telemetry, so the startup build is traced and timed
+// like any other index build. It is otherwise unused: nothing here is
+// cancellable, and the parameter exists to reach the instrumentation.
+func indexAll(ctx context.Context, reg *collections.Registry) error {
 	for _, c := range reg.All() {
-		if _, err := c.Index(); err != nil {
+		if _, err := c.IndexContext(ctx); err != nil {
 			return fmt.Errorf("build search index for collection %q: %w", c.Name, err)
 		}
 	}
@@ -149,7 +154,7 @@ func indexAll(reg *collections.Registry) error {
 // bites only on a store SHARED with a hosted server, where the other
 // namespaces belong to other people and were never this user's to read.
 func ServeStdio(ctx context.Context, reg *collections.Registry) error {
-	if err := indexAll(reg); err != nil {
+	if err := indexAll(ctx, reg); err != nil {
 		return err
 	}
 	defer func() { _ = reg.Close() }()
@@ -330,21 +335,53 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 		ctx, cancel := context.WithTimeout(ctx, search.DefaultQueryTimeout)
 		defer cancel()
 
-		results, err := visible(ctx, reg, mem).Search(ctx, req.GetString("collection", ""), query, limit)
+		// The search span carries the query's LENGTH and never the query.
+		// An operator debugging "queries over 4KB are slow" gets their
+		// answer; the text stays in the process. Same for the result
+		// count, which is the number of hits and never their IDs.
+		view := visible(ctx, reg, mem)
+		ctx, span := telemetry.Span(ctx, telemetry.SpanSearch,
+			telemetry.KeySearchQueryLength.Int(len(query)),
+			telemetry.KeySearchLimit.Int(limit),
+			telemetry.KeyCollectionNamed.Bool(req.GetString("collection", "") != ""),
+			telemetry.KeyCollectionCount.Int(view.Len()),
+		)
+		started := time.Now()
+
+		results, err := view.Search(ctx, req.GetString("collection", ""), query, limit)
 		if err != nil {
+			outcome := telemetry.OutcomeError
 			switch {
 			case errors.Is(err, search.ErrInvalidQuery), errors.Is(err, collections.ErrUnknownCollection):
+				outcome = telemetry.OutcomeInvalidQuery
+			case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+				outcome = telemetry.OutcomeTimeout
+			}
+			telemetry.Record(ctx).Searched(outcome, time.Since(started).Seconds(), 0)
+			// Fail, not End(span, err): a search error's text quotes the
+			// caller's own query ("search %q: ...") and an unknown-collection
+			// error names the mounted set. Neither may be exported.
+			telemetry.Fail(span, outcome)
+			switch outcome {
+			case telemetry.OutcomeInvalidQuery:
 				// A rejected input (oversized / pathologically nested
 				// query, or a collection that isn't mounted), not an
 				// internal failure — surface it as a normal tool error,
 				// not a transport-level error.
 				return mcp.NewToolResultError(err.Error()), nil
-			case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+			case telemetry.OutcomeTimeout:
 				return mcp.NewToolResultError("search: query did not complete within the maximum query duration"), nil
 			default:
 				return nil, fmt.Errorf("search: %w", err)
 			}
 		}
+		telemetry.Record(ctx).Searched(telemetry.OutcomeOK, time.Since(started).Seconds(), len(results))
+		span.SetAttributes(
+			telemetry.KeySearchResults.Int(len(results)),
+			telemetry.Outcome(telemetry.OutcomeOK),
+		)
+		span.End()
+
 		body, err := searchResultsJSON(results)
 		if err != nil {
 			return nil, fmt.Errorf("encode results: %w", err)
@@ -423,22 +460,44 @@ func showHandler(reg *collections.Registry, mem transportOptions) mcpserver.Tool
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		ref, err := visible(ctx, reg, mem).Show(req.GetString("collection", ""), id)
+		view := visible(ctx, reg, mem)
+		// The page ID is not a span attribute, and this is the span where
+		// the temptation is strongest: a show call IS a page ID. What is
+		// recorded instead is whether the caller qualified it and how many
+		// collections were searched — enough to explain a slow or
+		// ambiguous lookup, and nothing that names a document.
+		qualified, _ := view.SplitQualified(id)
+		ctx, span := telemetry.Span(ctx, telemetry.SpanShow,
+			telemetry.KeyCollectionQualified.Bool(qualified != ""),
+			telemetry.KeyCollectionNamed.Bool(req.GetString("collection", "") != ""),
+			telemetry.KeyCollectionCount.Int(view.Len()),
+		)
+		ref, err := view.Show(req.GetString("collection", ""), id)
 		if err != nil {
 			switch {
 			case errors.Is(err, kb.ErrNotFound):
+				telemetry.Fail(span, telemetry.OutcomeNotFound)
 				return mcp.NewToolResultError(
 					fmt.Sprintf("page %q not found - try the mk_list tool", id),
 				), nil
-			case errors.Is(err, collections.ErrAmbiguous), errors.Is(err, collections.ErrUnknownCollection):
-				// Both are caller-fixable: the error text already names
-				// the qualified IDs (or the mounted collections) to
-				// choose from, so hand it back as a tool error the model
-				// can act on rather than a transport failure.
+			case errors.Is(err, collections.ErrAmbiguous):
+				telemetry.Record(ctx).Ambiguous()
+				telemetry.Fail(span, telemetry.OutcomeAmbiguous)
+				return mcp.NewToolResultError(err.Error()), nil
+			case errors.Is(err, collections.ErrUnknownCollection):
+				// Caller-fixable: the error text already names the mounted
+				// collections to choose from, so hand it back as a tool
+				// error the model can act on rather than a transport
+				// failure. The text stays out of the span for exactly the
+				// reason it is useful here — it names collections.
+				telemetry.Fail(span, telemetry.OutcomeInvalidQuery)
 				return mcp.NewToolResultError(err.Error()), nil
 			}
+			telemetry.Fail(span, telemetry.OutcomeError)
 			return nil, err
 		}
+		span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK), telemetry.KeyPagesReturned.Int(1))
+		span.End()
 		body, err := showPageJSON(ref)
 		if err != nil {
 			return nil, err
@@ -526,13 +585,25 @@ func listTool(reg *collections.Registry) mcp.Tool {
 // searchHandler's shape.
 func listHandler(reg *collections.Registry, mem transportOptions) mcpserver.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		refs, err := visible(ctx, reg, mem).Pages(req.GetString("collection", ""))
+		view := visible(ctx, reg, mem)
+		// Counts in, counts out. The five filter VALUES are caller text
+		// (a page-ID prefix, an owner, a frontmatter type) and none of
+		// them reaches the span; how many pages enumerated and how many
+		// survived the filters is what explains a slow or empty list.
+		_, span := telemetry.Span(ctx, telemetry.SpanList,
+			telemetry.KeyCollectionNamed.Bool(req.GetString("collection", "") != ""),
+			telemetry.KeyCollectionCount.Int(view.Len()),
+		)
+		refs, err := view.Pages(req.GetString("collection", ""))
 		if err != nil {
 			if errors.Is(err, collections.ErrUnknownCollection) {
+				telemetry.Fail(span, telemetry.OutcomeInvalidQuery)
 				return mcp.NewToolResultError(err.Error()), nil
 			}
+			telemetry.Fail(span, telemetry.OutcomeError)
 			return nil, err
 		}
+		matched := len(refs)
 		refs = filterPages(refs,
 			req.GetString("prefix", ""),
 			req.GetString("category", ""),
@@ -540,6 +611,12 @@ func listHandler(reg *collections.Registry, mem transportOptions) mcpserver.Tool
 			req.GetString("owner", ""),
 			req.GetString("type", ""),
 		)
+		span.SetAttributes(
+			telemetry.Outcome(telemetry.OutcomeOK),
+			telemetry.KeyPagesMatched.Int(matched),
+			telemetry.KeyPagesReturned.Int(len(refs)),
+		)
+		span.End()
 		body, err := listPagesJSON(refs)
 		if err != nil {
 			return nil, err
@@ -656,10 +733,16 @@ func listCollectionsTool(reg *collections.Registry) mcp.Tool {
 // mk_list.
 func listCollectionsHandler(reg *collections.Registry, mem transportOptions) mcpserver.ToolHandlerFunc {
 	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		body, err := listCollectionsJSON(ctx, visible(ctx, reg, mem))
+		view := visible(ctx, reg, mem)
+		_, span := telemetry.Span(ctx, telemetry.SpanListCollections,
+			telemetry.KeyCollectionCount.Int(view.Len()))
+		body, err := listCollectionsJSON(ctx, view)
 		if err != nil {
+			telemetry.Fail(span, telemetry.OutcomeError)
 			return nil, fmt.Errorf("encode collections: %w", err)
 		}
+		span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
+		span.End()
 		return mcp.NewToolResultText(body), nil
 	}
 }

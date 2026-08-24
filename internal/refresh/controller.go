@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // controller.go is the runtime half of this package: the polling loop
@@ -20,6 +22,13 @@ import (
 // suppression, degradation accounting) in one place and the reconciliation
 // mechanics in the package that owns the state being reconciled — see
 // internal/collections.
+//
+// It imports internal/telemetry, which the CONFIGURATION half
+// (refresh.go) deliberately does not import anything from meerkat at
+// all. That constraint is intact: refresh.go's rule exists so
+// internal/contentsource and internal/memory can both embed a Spec
+// without importing each other, and internal/telemetry imports nothing
+// from meerkat, so it cannot close a cycle with either of them.
 
 // Target kinds. A closed set of two, so it is safe as a metric label.
 const (
@@ -253,8 +262,29 @@ func (c *Controller) loop(ctx context.Context, t Target) {
 }
 
 // runOnce performs one cycle and records it.
+//
+// It is the single funnel for every reconciliation — the scheduled loop
+// and the admin trigger both land here — so it is also the single place
+// a cycle span is created. There is no second path that could produce an
+// untraced refresh, for the same reason there is no second path that
+// could skip the staging discipline.
+//
+// # What the cycle span may carry
+//
+// The collection's configuration ORDINAL, never its name; the target
+// kind; whether anything changed; and — uniquely for a span — the
+// resolved VERSION. metrics.go refuses the version as a Prometheus label
+// because a generation increments forever and each value would mint a
+// permanent time series. A span is one event, not a series, so the
+// version costs one string and answers the question an operator actually
+// has: which generation did this replica pick up, and when.
 func (c *Controller) runOnce(ctx context.Context, t Target) error {
 	key := t.Key()
+	ctx, span := telemetry.Span(ctx, telemetry.SpanRefreshCycle,
+		telemetry.KeyCollectionOrdinal.Int(key.Ordinal),
+		telemetry.KeyRefreshKind.String(key.Kind),
+		telemetry.KeyRefreshPolicy.String(t.Spec().Policy()),
+	)
 	start := time.Now()
 	c.metrics.attempts(key).Inc()
 	out, err := t.Reconcile(ctx)
@@ -269,26 +299,45 @@ func (c *Controller) runOnce(ctx context.Context, t Target) error {
 		c.metrics.skipped(key).Inc()
 		c.log.Debug("collection refresh skipped: already in flight",
 			"collection", key.Name, "kind", key.Kind)
+		span.SetAttributes(telemetry.Outcome(telemetry.OutcomeBusy))
+		span.End()
 		return nil
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// Shutdown, or a caller-imposed deadline. Counting it as a refresh
 		// failure would make every graceful restart look like an incident.
 		c.log.Debug("collection refresh cancelled", "collection", key.Name, "kind", key.Kind)
+		span.SetAttributes(telemetry.Outcome(telemetry.OutcomeCancelled))
+		span.End()
 		return nil
 	case err != nil:
 		c.metrics.failures(key).Inc()
 		c.metrics.setDegraded(key, true)
 		c.log.Error("collection refresh failed — continuing to serve the last known-good content",
 			"collection", key.Name, "kind", key.Kind, "policy", t.Spec().Policy(), "error", err.Error())
+		// Classified rather than recorded. Every error out of Reconcile is
+		// wrapped as `collection %q: ...` and most of them go on to name a
+		// bucket or an object; the log above carries the full text, and
+		// the log is not exported off-box.
+		telemetry.Fail(span, telemetry.OutcomeError)
 		return err
 	}
 
 	c.metrics.setDegraded(key, false)
 	c.metrics.lastSuccess(key).SetToCurrentTime()
+	outcome := telemetry.OutcomeUnchanged
 	if out.Changed {
+		outcome = telemetry.OutcomeOK
 		c.metrics.changes(key).Inc()
 		c.log.Info("collection refreshed",
 			"collection", key.Name, "kind", key.Kind, "version", out.Version)
 	}
+	span.SetAttributes(
+		telemetry.Outcome(outcome),
+		telemetry.KeyRefreshChanged.Bool(out.Changed),
+	)
+	if out.Version != "" {
+		span.SetAttributes(telemetry.KeyRefreshVersion.String(out.Version))
+	}
+	span.End()
 	return nil
 }

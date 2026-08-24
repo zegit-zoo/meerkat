@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // EnvVar is the environment variable consulted for an explicit
@@ -198,7 +201,38 @@ const SourceEmbedded = "embedded"
 // `collections:` entry — to a local directory plus its provenance.
 // cfgPath is the content-source.yaml the source was read from; a
 // relative type: local path resolves against its directory.
+//
+// It is wrapped in a span and timed under the source's BOUNDED TYPE
+// (embedded | local | url | gcs-object | gcs-prefix), which is the
+// deliberate limit of what a resolution reports. The bucket, the object
+// name, the prefix, the URL and the resolved cache directory are all
+// operator-configured strings that describe a deployment's storage
+// layout, and none of them belongs in a metric label or on a span
+// exported to a collector — the same rule internal/refresh/metrics.go
+// states for the refresh series.
 func resolveSource(ctx context.Context, src Source, cfgPath string) (ResolvedCollection, error) {
+	sourceType := telemetry.SourceType(src.Type, src.Object != "", src.Prefix != "")
+	ctx, span := telemetry.Span(ctx, telemetry.SpanSourceResolve,
+		telemetry.KeySourceType.String(sourceType))
+	started := time.Now()
+	rc, err := resolveSourceInner(ctx, src, cfgPath)
+	outcome := telemetry.OutcomeOK
+	if err != nil {
+		outcome = telemetry.OutcomeError
+	}
+	telemetry.Record(ctx).SourceResolved(sourceType, outcome, time.Since(started).Seconds())
+	if err != nil {
+		// Classified, not recorded: every error below names the config
+		// path, and the GCS/URL ones name the bucket, object or URL.
+		telemetry.Fail(span, outcome)
+		return rc, err
+	}
+	span.SetAttributes(telemetry.Outcome(outcome))
+	span.End()
+	return rc, nil
+}
+
+func resolveSourceInner(ctx context.Context, src Source, cfgPath string) (ResolvedCollection, error) {
 	switch src.Type {
 	case TypeNone:
 		// Dir stays empty (serve the embedded build), but the source is

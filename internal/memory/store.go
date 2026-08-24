@@ -72,6 +72,31 @@ type Record struct {
 	Version Version
 }
 
+// Backend returns the BOUNDED telemetry label for a store: "local",
+// "gcs", or "other" for anything else (a test fake, or a backend added
+// later that forgot this function).
+//
+// It is a type switch rather than a method on Store deliberately. Adding
+// a method would widen the interface every implementation — including
+// every test fake in this repo — has to satisfy, for a purely
+// observational concern. More importantly, the obvious alternative is
+// worse: Describe() already returns a human string, and it embeds the
+// BUCKET NAME ("gcs://<bucket>/<prefix>"). Using that as a metric label
+// or a span attribute would publish a deployment's storage layout on an
+// unauthenticated endpoint, which is precisely what the label discipline
+// in internal/mcp/metrics.go forbids. This function exists so the
+// tempting call is not the available one.
+func Backend(s Store) string {
+	switch s.(type) {
+	case *LocalStore:
+		return "local"
+	case *GCSStore:
+		return "gcs"
+	default:
+		return "other"
+	}
+}
+
 // Store is a collection's writable memory backend.
 //
 // Implementations are safe for concurrent use: the registry shares one

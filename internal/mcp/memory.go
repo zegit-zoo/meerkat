@@ -15,6 +15,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/memory"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // memory.go is the writable half of the MCP surface: mk_save_memory.
@@ -316,20 +317,37 @@ func targetMemoryCollection(view *collections.Registry, name string) (*collectio
 }
 
 // saveMemory performs an authorized write.
+//
+// The span and the outcome counter both carry the SCOPE (a closed set of
+// three) and the OUTCOME (a closed set of four) and nothing else. Not
+// the key, not the namespace, not the page ID, not the title, and
+// emphatically not the body — a memory is the most sensitive thing a
+// caller hands meerkat, and the size of it is the most a collector
+// learns.
 func saveMemory(ctx context.Context, col *collections.Collection, args saveMemoryArgs, ref memory.Ref, d memory.Decision) (*mcp.CallToolResult, error) {
+	ctx, span := telemetry.Span(ctx, telemetry.SpanMemorySave,
+		telemetry.KeyMemoryScope.String(string(ref.Scope)),
+		telemetry.KeyMemoryBytes.Int(len(args.doc.Body)),
+	)
 	// Resolve the store ONCE. The collection can be closed out from
 	// under a request in flight (shutdown), and reaching for it twice
 	// would mean the second reach could find nil.
 	store := col.Memory()
 	if store == nil {
+		telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeError)
+		telemetry.Fail(span, telemetry.OutcomeError)
 		return mcp.NewToolResultError("this collection no longer accepts memories"), nil
 	}
 	body, err := memory.Render(args.doc, ref, d.Identity, memory.StatusLive, time.Now())
 	if err != nil {
+		telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeError)
+		telemetry.Fail(span, telemetry.OutcomeError)
 		return nil, err
 	}
 	pre, err := precondition(ctx, store, ref.Key, args)
 	if err != nil {
+		telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeError)
+		telemetry.Fail(span, telemetry.OutcomeError)
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
@@ -337,13 +355,22 @@ func saveMemory(ctx context.Context, col *collections.Collection, args saveMemor
 	if err != nil {
 		var conflict *memory.ConflictError
 		if errors.As(err, &conflict) {
+			telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeConflict)
+			telemetry.Fail(span, telemetry.OutcomeConflict)
 			return mcp.NewToolResultError(conflictMessage(ref, conflict)), nil
 		}
 		if errors.Is(err, memory.ErrConflict) {
+			telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeConflict)
+			telemetry.Fail(span, telemetry.OutcomeConflict)
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeError)
+		telemetry.Fail(span, telemetry.OutcomeError)
 		return nil, fmt.Errorf("save memory: %w", err)
 	}
+	telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeSaved)
+	span.SetAttributes(telemetry.Outcome(telemetry.OutcomeSaved))
+	span.End()
 
 	out := map[string]any{
 		"status":     "saved",
@@ -363,14 +390,25 @@ func saveMemory(ctx context.Context, col *collections.Collection, args saveMemor
 // stageMemory writes a pending review artifact for a caller who may
 // write here, but not at this scope.
 func stageMemory(ctx context.Context, col *collections.Collection, args saveMemoryArgs, ref memory.Ref, d memory.Decision) (*mcp.CallToolResult, error) {
+	ctx, span := telemetry.Span(ctx, telemetry.SpanMemoryStage,
+		telemetry.KeyMemoryScope.String(string(ref.Scope)),
+		telemetry.KeyMemoryBytes.Int(len(args.doc.Body)),
+	)
 	body, err := memory.Render(args.doc, ref, d.Identity, memory.StatusPending, time.Now())
 	if err != nil {
+		telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeError)
+		telemetry.Fail(span, telemetry.OutcomeError)
 		return nil, err
 	}
 	location, err := col.StageMemory(ctx, ref.StagingKey(), body)
 	if err != nil {
+		telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeError)
+		telemetry.Fail(span, telemetry.OutcomeError)
 		return nil, fmt.Errorf("stage memory: %w", err)
 	}
+	telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeStaged)
+	span.SetAttributes(telemetry.Outcome(telemetry.OutcomeStaged))
+	span.End()
 	out := map[string]any{
 		"status":     "staged",
 		"collection": col.Name,

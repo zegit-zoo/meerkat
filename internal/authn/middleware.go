@@ -10,6 +10,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // Reason classifies why a request was refused, for metrics and access
@@ -94,31 +95,73 @@ func NewGate(v *Verifier, metadataURL string, opts ...GateOption) *Gate {
 // capability-agnostic, so a principal granted only `personal-write`
 // passes the gate and reaches the memory tool, even though every read
 // surface will show them an empty registry.
+// # What the two spans say, and what they must not
+//
+// Verification and the policy decision each get a span, because they
+// fail for different reasons and an operator debugging "everyone is
+// getting 403" needs to know which half. Neither carries any of the
+// material it handles: not the bearer token or any substring of it, not
+// the subject, issuer, email, tenant, audience or a single group name,
+// and not the name of a collection the policy granted. What they carry
+// is a bounded result and a COUNT — how many providers were tried, how
+// many rules were evaluated, how many collections came out.
+//
+// The access log deliberately does carry sub/issuer/tenant, because it
+// is an audit trail on the operator's own stderr. A span is exported to
+// a collector, so it is held to the stricter rule. See
+// internal/telemetry's package comment.
 func (g *Gate) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !g.verifier.Enabled() {
 			next.ServeHTTP(w, r)
 			return
 		}
+		ctx, span := telemetry.Span(r.Context(), telemetry.SpanAuthnVerify,
+			telemetry.KeyAuthnProviders.Int(len(g.verifier.providers)))
+		r = r.WithContext(ctx)
+
 		raw := BearerToken(r)
 		if raw == "" {
+			span.SetAttributes(telemetry.KeyAuthnResult.String(string(ReasonMissingToken)))
+			telemetry.Fail(span, string(ReasonMissingToken))
 			g.deny(w, r, http.StatusUnauthorized, ReasonMissingToken, "invalid_request",
 				"a bearer token is required", ErrNoToken)
 			return
 		}
-		id, err := g.verifier.Verify(r.Context(), raw)
+		id, err := g.verifier.Verify(ctx, raw)
 		if err != nil {
+			// The verification error is NOT recorded on the span: go-oidc's
+			// messages quote the audience it expected and the issuer it got,
+			// which are configuration, and in some failure modes the token's
+			// own claims. The bounded reason is what a consumer groups by;
+			// the full text goes to the auth log.
+			span.SetAttributes(telemetry.KeyAuthnResult.String(string(ReasonInvalidToken)))
+			telemetry.Fail(span, string(ReasonInvalidToken))
 			g.deny(w, r, http.StatusUnauthorized, ReasonInvalidToken, "invalid_token",
 				"the access token is expired, malformed, or issued for another audience", err)
 			return
 		}
-		grants := g.verifier.Policy().Evaluate(id)
+		span.SetAttributes(telemetry.KeyAuthnResult.String("ok"), telemetry.Outcome(telemetry.OutcomeOK))
+		span.End()
+
+		policy := g.verifier.Policy()
+		ctx, decision := telemetry.Span(ctx, telemetry.SpanAuthzDecide,
+			telemetry.KeyAuthzRules.Int(policy.Len()))
+		r = r.WithContext(ctx)
+		grants := policy.Evaluate(id)
+		decision.SetAttributes(
+			telemetry.KeyAuthzGranted.Bool(!grants.Empty()),
+			telemetry.KeyAuthzCollections.Int(grants.Len()),
+		)
 		if grants.Empty() {
+			telemetry.Fail(decision, string(ReasonNoGrants))
 			g.deny(w, r, http.StatusForbidden, ReasonNoGrants, "insufficient_scope",
 				"this identity is not granted access to any collection", nil)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(authz.NewContext(r.Context(), grants)))
+		decision.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
+		decision.End()
+		next.ServeHTTP(w, r.WithContext(authz.NewContext(ctx, grants)))
 	})
 }
 

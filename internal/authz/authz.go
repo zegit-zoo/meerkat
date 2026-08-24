@@ -329,6 +329,25 @@ func (g *Grants) Named() []string {
 	return out
 }
 
+// Len reports how many collections the grants name explicitly. A
+// wildcard grant names none, so it counts as one — "the caller holds
+// something over everything" is one fact, and this is a telemetry
+// COUNT, not a capability computation.
+//
+// It exists so an authorization-decision span can say how wide a
+// decision was without saying which collections it covered. Nil-safe:
+// no policy in force reports 0, since there was no decision to describe.
+func (g *Grants) Len() int {
+	if g == nil {
+		return 0
+	}
+	n := len(g.byCollection)
+	if len(g.wildcard) > 0 {
+		n++
+	}
+	return n
+}
+
 // Wildcarded reports whether the caller holds c over every collection.
 func (g *Grants) Wildcarded(c Capability) bool {
 	if g == nil {

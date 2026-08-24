@@ -260,6 +260,72 @@ every capability, including ones a later meerkat adds — grant it sparingly.
 Full schema: [content-source.example.yaml](content-source.example.yaml).
 Design and threat reasoning: [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md).
 
+### Observability (`observability:`) — traces, OTLP, domain metrics
+
+Out of the box the hosted server gives you `/metrics` (Prometheus) and
+structured JSON logs on stderr, and **that is all it gives you unless you
+ask for more**. With no `observability:` block and no `OTEL_*` variable, no
+OpenTelemetry SDK is constructed at all: no spans, no exporter, no
+goroutine, no socket.
+
+Ask for more, and one `mk_search` becomes one trace — the HTTP request, the
+OIDC verification, the authorization decision, the tool call, the search,
+the index access, and any GCS or memory work underneath it:
+
+```yaml
+observability:
+  service_name: meerkat
+  environment: production
+
+  traces:
+    enabled: true
+    sample_ratio: 0.10        # head sampling for traces THIS process starts
+
+  logs:
+    include_trace_context: true   # trace_id/span_id on the access + auth logs
+
+  metrics:
+    prometheus: true          # /metrics, unchanged, plus bounded domain series
+    otlp: false
+
+  otlp:
+    endpoint: otel-collector.observability.svc:4317
+    protocol: grpc            # grpc | http/protobuf
+    insecure: false
+    # Credentials come from the environment. This names the VARIABLE;
+    # the value never appears in this file.
+    headers_env: OTEL_EXPORTER_OTLP_HEADERS
+```
+
+**Precedence:** explicit configuration beats `OTEL_*` environment beats
+default, per field — so a file that sets only `traces.enabled: true` still
+takes its endpoint from `OTEL_EXPORTER_OTLP_ENDPOINT`. Two deliberate
+inversions: `OTEL_SDK_DISABLED=true` beats an explicit `enabled: true` (an
+off switch a file can override is not an off switch), and
+`OTEL_EXPORTER_OTLP_INSECURE` does not apply once the file has written an
+`otlp:` block of its own. With no config file at all,
+`MEERKAT_TRACES_ENABLED=true` plus the standard `OTEL_*` variables is the
+container-friendly way in.
+
+**What a span may say.** Counts, durations, booleans, outcomes from a closed
+set, the matched route pattern, and a collection's configuration *ordinal*.
+Never a query, a page ID, page or memory content, a collection name, a
+bucket or object name, a token, a claim, a subject, a session ID or a
+request path. The access log still carries `sub`/`issuer`/`tenant` for
+audit — it stays on your stderr; a span goes to a collector, so it is held
+to the stricter rule. A test walks every recorded span and metric label
+asserting all of that.
+
+**Failure behaviour.** A collector that is down never affects a search, a
+memory write, `/readyz`, or how long a pod takes to terminate. The span
+queue is bounded and drops rather than growing
+(`meerkat_otel_spans_dropped_total`), export failures are counted
+(`meerkat_otel_export_failures_total`) and logged once a minute, and the
+shutdown flush is bounded by `limits.shutdown_timeout`.
+
+Design, the full span/attribute taxonomy and the precedence table:
+[docs/design/observability.md](docs/design/observability.md).
+
 ## Memory (`mk_save_memory`)
 
 Give a collection a **memory store** and agents can save what they learn —
@@ -1009,6 +1075,9 @@ internal/
   mcp/        MCP server (mk_search / mk_show / mk_list / mk_save_memory) —
               stdio and the hosted Streamable HTTP transport, probes,
               metrics, access log
+  telemetry/  opt-in OpenTelemetry: the observability: block, spans,
+              OTLP export, bounded domain metrics. Returns nil when
+              nothing opted in, and every method tolerates one
   memory/     writable memory stores (local dir / GCS prefix) with
               optimistic locking, identity-derived namespaces, staging
   authn/      OIDC discovery/JWKS verification + the bearer gate (RFC 9728)
@@ -1027,7 +1096,8 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
                       (local path / git repo / submodule / url archive /
                       GCS object or prefix), as one source or several
                       named collections, plus the optional auth: policy,
-                      per-collection memory: stores and update: contracts
+                      the optional observability: block, per-collection
+                      memory: stores and update: contracts
 ```
 
 ## See also
@@ -1054,6 +1124,12 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
 - [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md) — the hosted
   Streamable HTTP MCP server: OIDC, the capability model, and why an
   unauthorized collection is made invisible rather than denied
+- [docs/design/observability.md](docs/design/observability.md) —
+  `observability:`: the span taxonomy and `meerkat.*` attribute
+  namespace, the config-vs-`OTEL_*` precedence rule and its two
+  deliberate inversions, why a span is held to a stricter disclosure
+  standard than the access log beside it, and how a collector outage is
+  kept out of the request path
 - [docs/design/memory.md](docs/design/memory.md) — `mk_save_memory`: why
   the personal namespace is structurally unspoofable, why a personal
   memory is private to READ as well as to write (and why that filter has

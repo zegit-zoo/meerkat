@@ -184,3 +184,72 @@ unless an in-memory volume is configured) — point `--content-source`'s
 cache dir at `/tmp` via `XDG_CACHE_HOME=/tmp/meerkat-cache` if `type:
 url` content is in use; the default embedded-content path needs no
 change at all.
+
+## OpenTelemetry collector sidecar
+
+`mk mcp serve-http` speaks OTLP when — and only when — an
+`observability:` block or an `OTEL_*` variable asks it to. meerkat never
+ships or runs a collector; point it at one you already have. With
+neither configured, no SDK is constructed at all and the container's
+only telemetry is `/metrics` and JSON logs on stderr, exactly as before.
+
+The environment is the container-friendly way in, because an image
+frequently has no `content-source.yaml` at all:
+
+```yaml
+env:
+  # There is no standard variable for "does the application create
+  # spans" — OTEL_SDK_DISABLED is only an off switch — so this one is
+  # meerkat's own.
+  - name: MEERKAT_TRACES_ENABLED
+    value: "true"
+  - name: OTEL_SERVICE_NAME
+    value: meerkat
+  - name: OTEL_RESOURCE_ATTRIBUTES
+    value: deployment.environment.name=production
+  # A sidecar shares the pod's network namespace, so this is loopback
+  # and the export never leaves the pod.
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: http://localhost:4317
+  - name: OTEL_EXPORTER_OTLP_INSECURE
+    value: "true"
+  - name: OTEL_TRACES_SAMPLER
+    value: parentbased_traceidratio
+  - name: OTEL_TRACES_SAMPLER_ARG
+    value: "0.1"
+```
+
+`OTEL_EXPORTER_OTLP_INSECURE=true` is right for a **sidecar** (the hop is
+loopback inside the pod) and wrong for a cluster-wide collector service,
+where the export crosses the network and should be `https://`. meerkat
+refuses a plaintext `http://` endpoint unless that flag is explicitly
+set, precisely so the second case cannot be reached by copying the
+first.
+
+For a collector that needs credentials, name the variable rather than
+writing the value into any file meerkat reads:
+
+```yaml
+  - name: OTEL_EXPORTER_OTLP_HEADERS
+    valueFrom:
+      secretKeyRef: { name: otel-collector-auth, key: headers }
+```
+
+Three operational notes, all of them about the collector not being
+there:
+
+- **Startup does not wait on it.** OTLP/gRPC dials lazily, so a sidecar
+  that becomes ready second is not a crash loop.
+- **Shutdown does not wait on it either.** The final flush is bounded by
+  `observability.limits.shutdown_timeout` (5s by default) and then the
+  process exits regardless — which matters here specifically, because a
+  sidecar is often terminated *before* the app container.
+- **An outage is visible without it.** `/metrics` carries
+  `meerkat_otel_export_failures_total` and
+  `meerkat_otel_spans_dropped_total`, and the failure is logged to
+  stderr once a minute. It never affects `/readyz`, a search, or a
+  memory write.
+
+Precedence between these variables and an `observability:` block in
+`content-source.yaml`, and the full list of what a span may and may not
+carry, are in [design/observability.md](design/observability.md).

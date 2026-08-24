@@ -569,3 +569,114 @@ content:
 #   # collection is readable by any caller that reaches the process. Cannot
 #   # be combined with providers: above.
 #   # allow_unauthenticated: false
+
+# --- observability: traces, OTLP export, domain metrics (runtime, hosted) ----
+#
+# Read ONLY by `mk mcp serve-http` (docs/design/observability.md). Absent —
+# which is every configuration written before it existed — NO OpenTelemetry
+# SDK is constructed at all: no spans, no exporter, no goroutine, no socket,
+# and /metrics plus the JSON logs on stderr are byte-identical to what they
+# were. Turning it on adds signals; it never removes or changes one.
+#
+# PRECEDENCE, per field:
+#
+#     explicit configuration here  >  OTEL_* environment  >  default
+#
+# A field written below wins. A field left out falls back to the standard
+# OpenTelemetry variable for that setting, then to meerkat's default — so a
+# file that sets only `traces.enabled: true` still takes its endpoint from
+# OTEL_EXPORTER_OTLP_ENDPOINT. Two deliberate inversions:
+#
+#   * OTEL_SDK_DISABLED=true beats an explicit `traces.enabled: true`. An
+#     off switch a config file can override is not an off switch.
+#   * OTEL_EXPORTER_OTLP_INSECURE does not apply once this file has written
+#     an `otlp:` block of its own — a stated TLS posture is not revoked by
+#     ambient environment.
+#
+# With no config file at all, MEERKAT_TRACES_ENABLED=true plus the standard
+# OTEL_* variables is the container-friendly way in (docs/CONTAINER.md).
+#
+# WHAT A SPAN MAY CARRY: counts, durations, booleans, outcomes from a closed
+# set, the server's own matched route pattern, and a collection's
+# configuration ORDINAL. Never a query, a page ID, page or memory content,
+# a collection name, a bucket or object name, a token, a claim, a subject,
+# a session ID or a request path. The access log still carries
+# sub/issuer/tenant for audit — it stays on your stderr, and a span goes to
+# a collector.
+#
+# Validation runs at LOAD time: a plaintext http:// endpoint with no
+# explicit insecure: true, an unsupported protocol, a sample_ratio outside
+# [0,1] or a headers_env that is not an environment variable name all fail
+# the process rather than producing a server that exports nothing.
+#
+# observability:
+#   service_name: meerkat            # OTEL_SERVICE_NAME; defaults to "meerkat"
+#   environment: production          # deployment.environment.name; omitted if unset
+#
+#   logs:
+#     level: info                    # debug | info | warn | error
+#     format: json                   # json | text
+#     # trace_id/span_id on the access and auth logs when a span is active.
+#     # On by default whenever tracing is — the correlation is the point of
+#     # turning tracing on — but a log pipeline with a fixed schema can say
+#     # false and keep the old shape.
+#     include_trace_context: true
+#
+#   metrics:
+#     # Keep the bounded domain collectors on the /metrics registry. The
+#     # endpoint and every pre-existing series stay either way; false only
+#     # stops the ADDITIONS being registered.
+#     prometheus: true
+#     # Additionally export OpenTelemetry metrics over OTLP. Requires an
+#     # endpoint below (or OTEL_EXPORTER_OTLP_ENDPOINT) — asking for OTLP
+#     # metrics with nowhere to send them is refused, not ignored.
+#     otlp: false
+#     # interval: 60s                # OTEL_METRIC_EXPORT_INTERVAL
+#
+#   traces:
+#     enabled: true
+#     # Head sampling for traces THIS process starts. A trace arriving with
+#     # a valid W3C traceparent inherits the caller's decision instead
+#     # (parent-based), so a gateway that already sampled gets a complete
+#     # trace rather than a meerkat-only fragment. Unset falls back to
+#     # OTEL_TRACES_SAMPLER/_ARG, then to 1.0 — `enabled` is already the off
+#     # switch.
+#     sample_ratio: 0.10
+#
+#   otlp:
+#     # host:port for grpc, or a base URL for http/protobuf. Unset falls
+#     # back to OTEL_EXPORTER_OTLP_ENDPOINT. With NEITHER, tracing still
+#     # runs — spans are created and the logs correlate — and nothing leaves
+#     # the process.
+#     endpoint: otel-collector.observability.svc:4317
+#     protocol: grpc                 # grpc | http/protobuf
+#     # TLS is on unless this says otherwise. An in-cluster collector
+#     # address looks local, and a plaintext export of request metadata
+#     # across a cluster network is a disclosure worth having to type.
+#     insecure: false
+#     # AUTHENTICATION MATERIAL IS NAMED HERE, NEVER WRITTEN HERE. This is
+#     # the NAME of an environment variable holding `k1=v1,k2=v2` headers;
+#     # meerkat reads that variable at startup. There is deliberately no
+#     # `headers:` field — this file is committed, shared between
+#     # environments and often baked into an image, so a collector bearer
+#     # token has nowhere to be written, the same way `type: gcs` has no
+#     # service-account-key field. Unset falls back to
+#     # OTEL_EXPORTER_OTLP_HEADERS.
+#     headers_env: OTEL_EXPORTER_OTLP_HEADERS
+#     # timeout: 10s                 # one export attempt; OTEL_EXPORTER_OTLP_TIMEOUT
+#
+#   # What an unreachable collector is allowed to cost. Every one of these
+#   # has a working default; the block exists so a tight memory budget can
+#   # lower them, not so anybody has to think about them.
+#   limits:
+#     queue_size: 2048               # spans held for export; beyond it they
+#                                    # are DROPPED and counted
+#                                    # (meerkat_otel_spans_dropped_total),
+#                                    # never buffered without bound and
+#                                    # never blocking a request
+#     batch_size: 512
+#     batch_timeout: 5s
+#     shutdown_timeout: 5s           # the final flush; shutdown continues
+#                                    # when it expires, so a collector that
+#                                    # is down cannot hold a pod in
+#                                    # Terminating
