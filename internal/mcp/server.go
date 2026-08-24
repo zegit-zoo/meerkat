@@ -29,8 +29,14 @@
 // own registry view rather than the mounted one: see visible (reads)
 // and writable (memory writes), and docs/design/hosted-mcp.md for why
 // an unauthorized collection has to be invisible rather than denied.
-// Under stdio nothing is filtered, so the read code path below is
-// bit-for-bit the one that ran before authorization existed.
+//
+// That view narrows twice, in one expression: which COLLECTIONS the
+// caller may read, and which PAGES they may see inside them. The second
+// exists for personal memories, which are private to the principal who
+// saved them (docs/design/memory.md). Under stdio no collection is ever
+// filtered out, and the page viewer is the local user — who owns the one
+// personal namespace a stdio session writes into, so a single-user
+// deployment sees exactly what it always saw.
 package mcp
 
 import (
@@ -58,23 +64,35 @@ const (
 	serverVersion = "0.2.0"
 )
 
-// visible returns the collections ctx's caller may read.
+// visible returns the caller's read view: the collections ctx's caller
+// may read, and within them the pages ctx's caller may see.
 //
 // This is the ONLY place the MCP surface consults authorization, and it
 // does so by narrowing the registry rather than by checking a
 // permission at each operation. Everything downstream — the handlers
 // below, the tool descriptions, the ambiguity error, the "available:"
-// list in an unknown-collection error — then works from a registry that
-// simply does not contain the collections this caller may not read.
+// list in an unknown-collection error, the page counts — then works from
+// a registry that simply does not contain the collections this caller
+// may not read, and whose pages are already the ones they may see.
 //
-// A context with no grants (stdio, and any hosted deployment with no
-// auth: block) yields reg itself, unfiltered and unallocated.
-func visible(ctx context.Context, reg *collections.Registry) *collections.Registry {
+// The two narrowings are deliberately both applied here, in one
+// expression, rather than one here and one at each read:
+//
+//	Restrict(CanRead)  which COLLECTIONS exist for this caller
+//	ViewedBy(viewer)   which PAGES exist inside them
+//
+// A context with no grants means no collection policy is in force
+// (stdio, or a hosted deployment with no auth: block), so nothing is
+// filtered out of the registry. The page viewer is applied regardless:
+// it does not come from the policy, it comes from who the caller IS, and
+// on stdio that is the local user (see transportOptions.viewer).
+func visible(ctx context.Context, reg *collections.Registry, mem transportOptions) *collections.Registry {
 	g := authz.FromContext(ctx)
-	if g == nil {
-		return reg
+	view := reg
+	if g != nil {
+		view = reg.Restrict(g.CanRead)
 	}
-	return reg.Restrict(g.CanRead)
+	return view.ViewedBy(mem.viewer(g))
 }
 
 // newServer builds the MCP server and registers the tool set. Shared by
@@ -82,19 +100,19 @@ func visible(ctx context.Context, reg *collections.Registry) *collections.Regist
 // stdio and to the hosted HTTP server at once.
 //
 // mem carries the few decisions the memory tool cannot make for itself
-// — see memoryOptions — and is the one place the two transports
+// — see transportOptions — and is the one place the two transports
 // deliberately differ.
 //
 // opts are appended after the defaults, so a transport can add its own
 // server options (the hosted one adds a per-request tool filter and
 // session hooks).
-func newServer(reg *collections.Registry, mem memoryOptions, opts ...mcpserver.ServerOption) *mcpserver.MCPServer {
+func newServer(reg *collections.Registry, mem transportOptions, opts ...mcpserver.ServerOption) *mcpserver.MCPServer {
 	opts = append([]mcpserver.ServerOption{mcpserver.WithToolCapabilities(true)}, opts...)
 	s := mcpserver.NewMCPServer(serverName, serverVersion, opts...)
-	registerSearch(s, reg)
-	registerShow(s, reg)
-	registerList(s, reg)
-	registerListCollections(s, reg)
+	registerSearch(s, reg, mem)
+	registerShow(s, reg, mem)
+	registerList(s, reg, mem)
+	registerListCollections(s, reg, mem)
 	registerSaveMemory(s, reg, mem)
 	return s
 }
@@ -122,8 +140,14 @@ func indexAll(reg *collections.Registry) error {
 //
 // stdio is unauthenticated by construction: the transport is a pipe
 // from a process the user already started, so there is no caller to
-// identify and nothing to filter. No grants ever enter the context
+// identify and no collection to filter. No grants ever enter the context
 // here, and every collection is visible.
+//
+// Per-page visibility still applies, and is a no-op for the deployment
+// this transport exists for: the local user reads the `local` personal
+// namespace, which is the only one a stdio session ever writes into. It
+// bites only on a store SHARED with a hosted server, where the other
+// namespaces belong to other people and were never this user's to read.
 func ServeStdio(ctx context.Context, reg *collections.Registry) error {
 	if err := indexAll(reg); err != nil {
 		return err
@@ -133,8 +157,8 @@ func ServeStdio(ctx context.Context, reg *collections.Registry) error {
 	// AllowAnonymousPersonal is true here and nowhere else: a stdio
 	// server was spawned by the one user it serves, so a personal memory
 	// has an unambiguous owner even though no token established it. See
-	// memoryOptions.
-	return mcpserver.ServeStdio(newServer(reg, memoryOptions{AllowAnonymousPersonal: true}))
+	// transportOptions.
+	return mcpserver.ServeStdio(newServer(reg, transportOptions{AllowAnonymousPersonal: true}))
 }
 
 // Tool names. Constants because the per-request tool filter
@@ -244,8 +268,8 @@ func collectionSuffix(reg *collections.Registry) string {
 		"may be written as '<collection>:<page-id>'."
 }
 
-func registerSearch(s *mcpserver.MCPServer, reg *collections.Registry) {
-	s.AddTool(searchTool(reg), searchHandler(reg))
+func registerSearch(s *mcpserver.MCPServer, reg *collections.Registry, mem transportOptions) {
+	s.AddTool(searchTool(reg), searchHandler(reg, mem))
 }
 
 // searchTool builds the mk_search tool definition. Split out from
@@ -287,7 +311,7 @@ func searchTool(reg *collections.Registry) mcp.Tool {
 // searchHandler returns the mk_search tool handler bound to reg. Split out
 // (and the formatting moved to searchResultsJSON) so the query→result-shape
 // path is unit-testable against an injected registry.
-func searchHandler(reg *collections.Registry) mcpserver.ToolHandlerFunc {
+func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		query, err := req.RequireString("query")
 		if err != nil {
@@ -306,7 +330,7 @@ func searchHandler(reg *collections.Registry) mcpserver.ToolHandlerFunc {
 		ctx, cancel := context.WithTimeout(ctx, search.DefaultQueryTimeout)
 		defer cancel()
 
-		results, err := visible(ctx, reg).Search(ctx, req.GetString("collection", ""), query, limit)
+		results, err := visible(ctx, reg, mem).Search(ctx, req.GetString("collection", ""), query, limit)
 		if err != nil {
 			switch {
 			case errors.Is(err, search.ErrInvalidQuery), errors.Is(err, collections.ErrUnknownCollection):
@@ -353,8 +377,8 @@ func searchResultsJSON(results []collections.Hit) (string, error) {
 	return string(body), nil
 }
 
-func registerShow(s *mcpserver.MCPServer, reg *collections.Registry) {
-	s.AddTool(showTool(reg), showHandler(reg))
+func registerShow(s *mcpserver.MCPServer, reg *collections.Registry, mem transportOptions) {
+	s.AddTool(showTool(reg), showHandler(reg, mem))
 }
 
 // showTool builds the mk_show tool definition. Split out from
@@ -393,13 +417,13 @@ func showTool(reg *collections.Registry) mcp.Tool {
 
 // showHandler returns the mk_show tool handler. Split out to mirror
 // searchHandler's shape.
-func showHandler(reg *collections.Registry) mcpserver.ToolHandlerFunc {
+func showHandler(reg *collections.Registry, mem transportOptions) mcpserver.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		id, err := req.RequireString("id")
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		ref, err := visible(ctx, reg).Show(req.GetString("collection", ""), id)
+		ref, err := visible(ctx, reg, mem).Show(req.GetString("collection", ""), id)
 		if err != nil {
 			switch {
 			case errors.Is(err, kb.ErrNotFound):
@@ -453,8 +477,8 @@ func showPageJSON(ref collections.PageRef) (string, error) {
 	return string(body), nil
 }
 
-func registerList(s *mcpserver.MCPServer, reg *collections.Registry) {
-	s.AddTool(listTool(reg), listHandler(reg))
+func registerList(s *mcpserver.MCPServer, reg *collections.Registry, mem transportOptions) {
+	s.AddTool(listTool(reg), listHandler(reg, mem))
 }
 
 // listTool builds the mk_list tool definition. Split out from
@@ -500,9 +524,9 @@ func listTool(reg *collections.Registry) mcp.Tool {
 
 // listHandler returns the mk_list tool handler. Split out to mirror
 // searchHandler's shape.
-func listHandler(reg *collections.Registry) mcpserver.ToolHandlerFunc {
+func listHandler(reg *collections.Registry, mem transportOptions) mcpserver.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		refs, err := visible(ctx, reg).Pages(req.GetString("collection", ""))
+		refs, err := visible(ctx, reg, mem).Pages(req.GetString("collection", ""))
 		if err != nil {
 			if errors.Is(err, collections.ErrUnknownCollection) {
 				return mcp.NewToolResultError(err.Error()), nil
@@ -583,8 +607,8 @@ func listPagesJSON(refs []collections.PageRef) (string, error) {
 	return string(body), nil
 }
 
-func registerListCollections(s *mcpserver.MCPServer, reg *collections.Registry) {
-	s.AddTool(listCollectionsTool(reg), listCollectionsHandler(reg))
+func registerListCollections(s *mcpserver.MCPServer, reg *collections.Registry, mem transportOptions) {
+	s.AddTool(listCollectionsTool(reg), listCollectionsHandler(reg, mem))
 }
 
 // listCollectionsTool builds the mk_list_collections tool definition.
@@ -630,9 +654,9 @@ func listCollectionsTool(reg *collections.Registry) mcp.Tool {
 // to reg. It takes no arguments — see visible() for the hosted-mode
 // filtering, applied here exactly as it is for mk_search/mk_show/
 // mk_list.
-func listCollectionsHandler(reg *collections.Registry) mcpserver.ToolHandlerFunc {
+func listCollectionsHandler(reg *collections.Registry, mem transportOptions) mcpserver.ToolHandlerFunc {
 	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		body, err := listCollectionsJSON(ctx, visible(ctx, reg))
+		body, err := listCollectionsJSON(ctx, visible(ctx, reg, mem))
 		if err != nil {
 			return nil, fmt.Errorf("encode collections: %w", err)
 		}
@@ -709,7 +733,12 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry) (strin
 			Capabilities: g.Capabilities(c.Name).Strings(),
 			Description:  c.Description(),
 		}
-		if pages, err := c.Pages(); err == nil {
+		// view.Pages, not c.Pages: a page count is a count, and a count
+		// that included other principals' personal memories would say how
+		// many of them there are. Routing through the view applies the
+		// same viewer mk_list does, so the number a caller is told matches
+		// the number they can enumerate.
+		if pages, err := view.Pages(c.Name); err == nil {
 			entry.Pages = len(pages)
 		}
 		if c.Contract().Declared() {

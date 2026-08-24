@@ -64,7 +64,7 @@ func TestSearchHandler_ReturnsHits(t *testing.T) {
 		testPage("concepts/sharding", "Sharding", "Split data across shards.", "concepts", "reviewed", "team-a"),
 	)
 
-	res, err := searchHandler(reg)(context.Background(), callTool(map[string]any{"query": "quorum"}))
+	res, err := searchHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{"query": "quorum"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestSearchHandler_QueryTooLongIsToolError(t *testing.T) {
 	reg := testRegistry(t)
 
 	huge := strings.Repeat("x", 5000)
-	res, err := searchHandler(reg)(context.Background(), callTool(map[string]any{"query": huge}))
+	res, err := searchHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{"query": huge}))
 	if err != nil {
 		t.Fatalf("handler returned transport error: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestSearchHandler_PathologicalNestingIsToolError(t *testing.T) {
 	reg := testRegistry(t)
 
 	nested := strings.Repeat("(", 100)
-	res, err := searchHandler(reg)(context.Background(), callTool(map[string]any{"query": nested}))
+	res, err := searchHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{"query": nested}))
 	if err != nil {
 		t.Fatalf("handler returned transport error: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestSearchHandler_ContextCancelledIsToolError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	res, err := searchHandler(reg)(ctx, callTool(map[string]any{"query": "quorum"}))
+	res, err := searchHandler(reg, stdioTransport())(ctx, callTool(map[string]any{"query": "quorum"}))
 	if err != nil {
 		t.Fatalf("handler returned transport error: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestSearchHandler_LimitClampedToMax(t *testing.T) {
 	}
 	reg := testRegistry(t, pages...)
 
-	res, err := searchHandler(reg)(context.Background(), callTool(map[string]any{"query": "widget", "limit": float64(100000)}))
+	res, err := searchHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{"query": "widget", "limit": float64(100000)}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestSearchHandler_LimitClampedToMax(t *testing.T) {
 
 func TestSearchHandler_MissingQueryIsToolError(t *testing.T) {
 	reg := testRegistry(t)
-	res, err := searchHandler(reg)(context.Background(), callTool(map[string]any{}))
+	res, err := searchHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{}))
 	if err != nil {
 		t.Fatalf("handler returned transport error: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestListHandler_TypeFilter(t *testing.T) {
 	})
 	t.Cleanup(func() { kb.UseFS(nil) })
 
-	res, err := listHandler(testGlobalRegistry())(context.Background(), callTool(map[string]any{"type": "BigQuery Table"}))
+	res, err := listHandler(testGlobalRegistry(), stdioTransport())(context.Background(), callTool(map[string]any{"type": "BigQuery Table"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -345,7 +345,7 @@ body
 	})
 	t.Cleanup(func() { kb.UseFS(nil) })
 
-	res, err := showHandler(testGlobalRegistry())(context.Background(), callTool(map[string]any{"id": "tables/orders"}))
+	res, err := showHandler(testGlobalRegistry(), stdioTransport())(context.Background(), callTool(map[string]any{"id": "tables/orders"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestShowHandler_NotFoundIsToolError(t *testing.T) {
 	kb.UseFS(fstest.MapFS{})
 	t.Cleanup(func() { kb.UseFS(nil) })
 
-	res, err := showHandler(testGlobalRegistry())(context.Background(), callTool(map[string]any{"id": "does-not-exist"}))
+	res, err := showHandler(testGlobalRegistry(), stdioTransport())(context.Background(), callTool(map[string]any{"id": "does-not-exist"}))
 	if err != nil {
 		t.Fatalf("handler returned transport error: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestListCollectionsHandler_Shape(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reg.Close() })
 
-	res, err := listCollectionsHandler(reg)(context.Background(), callTool(nil))
+	res, err := listCollectionsHandler(reg, stdioTransport())(context.Background(), callTool(nil))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}

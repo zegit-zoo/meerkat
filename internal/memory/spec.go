@@ -29,6 +29,32 @@ const (
 // live documents only.
 const DefaultLocalPath = "memory"
 
+// Personal-memory read visibility, the `personal_visibility:` key of a
+// `memory:` block.
+const (
+	// VisibilityPrivate makes a personal memory readable ONLY by the
+	// principal who owns it — the verified (issuer, subject) pair its
+	// namespace was derived from. It is the default, including for every
+	// configuration written before the key existed, because "personal"
+	// means private to a caller and a default that meant anything else
+	// would be a default that discloses.
+	VisibilityPrivate = "private"
+	// VisibilityCollection restores the pre-#27 behaviour: a personal
+	// memory is readable by every caller who can read its collection, and
+	// `personal` describes only who may WRITE it.
+	//
+	// It exists so an operator who deliberately relied on that can say so
+	// out loud, in a word that admits what it does. Configuring it
+	// alongside OIDC providers produces a startup warning: under
+	// authentication meerkat knows exactly whose memory each one is, and
+	// choosing to show it to everybody else is a decision worth seeing in
+	// the log.
+	VisibilityCollection = "collection"
+)
+
+// PersonalVisibilities lists the accepted `personal_visibility:` values.
+func PersonalVisibilities() []string { return []string{VisibilityPrivate, VisibilityCollection} }
+
 // Spec is the `memory:` block of a content-source.yaml collection: the
 // writable backend mk_save_memory saves into for that collection.
 //
@@ -57,6 +83,28 @@ type Spec struct {
 	// is Application Default Credentials.
 	Bucket string `yaml:"bucket,omitempty"`
 	Prefix string `yaml:"prefix,omitempty"`
+
+	// PersonalVisibility decides who may READ this collection's personal
+	// memories: private (the default — only the principal who wrote it)
+	// or collection (every reader of the collection). Empty means
+	// private, so the secure answer is what a configuration that says
+	// nothing gets. Read it through Visibility().
+	PersonalVisibility string `yaml:"personal_visibility,omitempty"`
+}
+
+// Visibility returns the effective personal-memory read policy: the
+// configured value, or VisibilityPrivate when none was set.
+//
+// A nil Spec (a collection with no memory: block) also answers private.
+// Such a collection has no memory store, but the reserved page-ID prefix
+// is reserved everywhere — a content page that sits under it is treated
+// the same way in every collection, rather than depending on whether an
+// unrelated block happens to be present.
+func (s *Spec) Visibility() string {
+	if s == nil || s.PersonalVisibility == "" {
+		return VisibilityPrivate
+	}
+	return s.PersonalVisibility
 }
 
 // Validate checks a memory: block. label is the config path a message
@@ -71,6 +119,16 @@ type Spec struct {
 func (s *Spec) Validate(label string, contentIsEphemeral bool) error {
 	if s == nil {
 		return nil
+	}
+	// An unrecognised visibility is a configuration ERROR, never a
+	// silently-ignored line: "the deployment ignored the word I wrote" is
+	// exactly how a store ends up more readable than its operator
+	// believes. Same reasoning as authz.ParseCapability.
+	switch s.PersonalVisibility {
+	case "", VisibilityPrivate, VisibilityCollection:
+	default:
+		return fmt.Errorf("%s.personal_visibility must be %s or %s, got %q",
+			label, VisibilityPrivate, VisibilityCollection, s.PersonalVisibility)
 	}
 	switch s.Type {
 	case "":

@@ -119,6 +119,19 @@ mounts one collection or fifty, and it names none of them. Telling
 someone "you have no access here" leaks nothing; telling them "you have
 no access *to `secrets`*" leaks everything.
 
+**One level down.** #27 added a second narrowing of the same shape, for
+the one kind of page whose ID says whose it is: a **personal memory** is
+visible only to the principal who saved it.
+`Registry.ViewedBy(kb.Viewer)` is `Restrict`'s per-page counterpart —
+a derived, borrowing view carrying a viewer, consulted by every read
+below it rather than checked per operation — and it inherits every
+consequence listed above, including the ambiguity count and the
+identical-error property. Search additionally carries a mandatory
+visibility clause *inside* the bleve query, because ranking and
+truncation happen there and a post-filter over the top N cannot be made
+correct. The collection is still the unit of read access for ordinary
+content; see [memory.md](memory.md#private-personal-reads-27).
+
 ## Transport
 
 `mk mcp serve-http` runs mcp-go's `StreamableHTTPServer` — the MCP

@@ -20,6 +20,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
+	"github.com/zegit-zoo/meerkat/internal/memory"
 )
 
 // hosted.go is the Streamable HTTP transport: `mk mcp serve-http`.
@@ -167,6 +168,7 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		auth: cfg.Auth,
 	}
 	s.metrics = newMetrics(cfg.Metrics, cfg.Version, reg.Len())
+	s.warnCollectionWidePersonalMemories()
 
 	verifier, err := authn.NewVerifier(ctx, authn.Options{
 		Config:     cfg.Auth,
@@ -192,8 +194,11 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	// AllowAnonymousPersonal is deliberately false on this transport,
 	// including under allow_unauthenticated: a hosted server that cannot
 	// name its caller must not let them write into a personal namespace,
-	// because every anonymous caller would share the same one.
-	mcpSrv := newServer(reg, memoryOptions{},
+	// because every anonymous caller would share the same one — and, by
+	// the same token, must not let them READ one either. An anonymous
+	// caller here owns nothing, so they see every public page and no
+	// personal memory at all (see transportOptions.viewer).
+	mcpSrv := newServer(reg, transportOptions{},
 		mcpserver.WithHooks(hooks),
 		// The per-request tool filter is what keeps tools/list from
 		// naming collections the caller may not read — see toolFilter.
@@ -235,6 +240,38 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		IdleTimeout:  cfg.IdleTimeout,
 	}
 	return s, nil
+}
+
+// warnCollectionWidePersonalMemories logs, once at startup, every
+// collection that opted out of private personal reads
+// (`memory.personal_visibility: collection`) while this server
+// authenticates its callers.
+//
+// The pairing is the point. Without OIDC there is no principal to keep a
+// memory private FROM, so the setting changes nothing worth mentioning.
+// With OIDC, meerkat knows exactly whose each personal memory is and has
+// been told to show it to every other reader of the collection anyway —
+// a deliberate, unusual choice, and one an operator should be able to
+// find in the log of the process that is acting on it rather than only
+// in the config file they wrote months ago.
+//
+// It is a warning, not an error: the setting exists precisely so a
+// deployment that relied on the pre-#27 behaviour can keep it.
+func (s *HostedServer) warnCollectionWidePersonalMemories() {
+	if !s.AuthEnabled() {
+		return
+	}
+	for _, c := range s.reg.All() {
+		if !c.PersonalReadsAreCollectionWide() {
+			continue
+		}
+		s.log.Warn("personal memories are readable collection-wide",
+			"collection", c.Name,
+			"setting", "memory.personal_visibility="+memory.VisibilityCollection,
+			"effect", "every caller who can read this collection can read every personal memory in it, "+
+				"including memories saved by other authenticated principals",
+			"secure_default", memory.VisibilityPrivate)
+	}
 }
 
 func (c *HostedConfig) applyDefaults() {
