@@ -128,11 +128,14 @@ jobs:
           images: ghcr.io/zegit-zoo/meerkat
           # {{version}}/{{major}}.{{minor}} both come from the vX.Y.Z tag
           # this workflow triggers on (see the `on.push.tags` filter
-          # above) — no separate semver parsing needed.
+          # above) — no separate semver parsing needed. `latest` comes
+          # from the action's default `latest=auto` flavor, which tags
+          # it on semver tag events; an explicit raw rule here would
+          # emit `latest` twice (v0.11.0's docker job failed the tag
+          # assertion on exactly that duplication).
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
           labels: |
             org.opencontainers.image.licenses=Apache-2.0
 
