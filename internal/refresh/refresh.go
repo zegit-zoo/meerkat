@@ -168,6 +168,7 @@ func (s *Spec) Delay() time.Duration {
 	if window <= 0 {
 		return every
 	}
+	// #nosec G404 -- scheduling noise, not key material (see below).
 	//nolint:gosec // G404: this is scheduling noise for spreading replica
 	// probes, not a secret. A predictable jitter reveals nothing an
 	// observer could not learn from the configured interval itself.
