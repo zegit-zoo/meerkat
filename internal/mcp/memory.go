@@ -13,6 +13,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
+	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/memory"
 )
 
@@ -43,11 +44,14 @@ import (
 // would silently leave the unfiltered description in place.
 const toolSaveMemory = "mk_save_memory"
 
-// memoryOptions are the transport-level decisions the memory tool needs
-// and cannot work out for itself.
-type memoryOptions struct {
-	// AllowAnonymousPersonal permits a personal memory from a caller
-	// with no verified subject.
+// transportOptions are the transport-level decisions the memory toolset
+// needs and cannot work out for itself. There is exactly one, and it
+// answers the same question on both sides of the memory feature: when
+// nobody authenticated, WHO is this?
+type transportOptions struct {
+	// AllowAnonymousPersonal says the anonymous caller is the single
+	// local user, and may therefore both write and read the fixed
+	// `local` personal namespace.
 	//
 	// True on stdio ONLY. A stdio server was spawned by the single user
 	// it serves, over a pipe, with no identity to establish and nobody to
@@ -58,6 +62,38 @@ type memoryOptions struct {
 	// that deployment meerkat genuinely does not know who is calling, and
 	// every caller would otherwise share one namespace.
 	AllowAnonymousPersonal bool
+}
+
+// viewer derives the per-page read viewer for the caller behind g. It is
+// the read-side counterpart of memory.Authorize, and it obeys the same
+// rule: the owner comes out of the VERIFIED identity, never out of a
+// request.
+//
+//	verified identity          -> that principal's namespace; they see
+//	                              their own personal memories and no
+//	                              other principal's
+//	anonymous, stdio           -> the fixed `local` namespace, which is
+//	                              the one this user's own memories are
+//	                              written into — single-user behaviour
+//	                              unchanged
+//	anonymous, hosted          -> no owner at all: every public page,
+//	                              and no personal memory belonging to
+//	                              anyone
+//
+// The last row is the one worth arguing. A hosted server with no
+// providers (or with allow_unauthenticated) cannot tell its callers
+// apart, so it cannot tell which of them a personal memory belongs to
+// — and it already refuses to let them WRITE one for exactly that
+// reason. Handing every such caller the `local` namespace would give
+// them, as a group, read access to whatever a stdio session wrote into a
+// shared store. Owning nothing is the only answer that stays true when
+// meerkat does not know who is asking.
+func (o transportOptions) viewer(g *authz.Grants) kb.Viewer {
+	id := g.Identity()
+	if memory.Anonymous(id) && !o.AllowAnonymousPersonal {
+		return kb.AsOwner("")
+	}
+	return kb.AsOwner(memory.Namespace(id))
 }
 
 // writable returns the collections ctx's caller may write memories to:
@@ -94,7 +130,7 @@ func writable(ctx context.Context, reg *collections.Registry) *collections.Regis
 // mounted collection has a memory store. A deployment that configured
 // none sees no new tool at all — the same back-compat rule the rest of
 // meerkat follows: a feature nobody enabled changes nothing.
-func registerSaveMemory(s *mcpserver.MCPServer, reg *collections.Registry, opts memoryOptions) {
+func registerSaveMemory(s *mcpserver.MCPServer, reg *collections.Registry, opts transportOptions) {
 	if len(reg.MemoryNames()) == 0 {
 		return
 	}
@@ -223,7 +259,7 @@ func parseSaveMemoryArgs(req mcp.CallToolRequest) (saveMemoryArgs, error) {
 }
 
 // saveMemoryHandler returns the mk_save_memory handler bound to reg.
-func saveMemoryHandler(reg *collections.Registry, opts memoryOptions) mcpserver.ToolHandlerFunc {
+func saveMemoryHandler(reg *collections.Registry, opts transportOptions) mcpserver.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args, err := parseSaveMemoryArgs(req)
 		if err != nil {

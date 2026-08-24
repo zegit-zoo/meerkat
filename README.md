@@ -275,19 +275,20 @@ collections:
     memory:
       type: local            # or: type: gcs, with bucket + prefix
       path: memory           # a SIBLING of wiki/, not inside it
+      personal_visibility: private   # private (default) | collection
 ```
 
 With no `memory:` block anywhere the tool is not registered at all, and
 nothing else changes — which is what every configuration written before
 this feature gets.
 
-**Three scopes, three capabilities:**
+**Three scopes, three capabilities, two read audiences:**
 
-| scope | needs | if you don't hold it |
-|---|---|---|
-| `personal` | `personal-write` | refused (a personal memory has no reviewer) |
-| `team` | `team-write` | **staged for review**, if you hold any other write capability |
-| `global` | `global-write` | **staged for review**, likewise |
+| scope | needs | if you don't hold it | who can read it |
+|---|---|---|---|
+| `personal` | `personal-write` | refused (a personal memory has no reviewer) | **you alone** |
+| `team` | `team-write` | **staged for review**, if you hold any other write capability | every reader of the collection |
+| `global` | `global-write` | **staged for review**, likewise | every reader of the collection |
 
 A staged memory lands under `<store>/_staging/<scope>/<namespace>/` with
 `status: pending-review`. It is **not** searchable, showable or listable —
@@ -319,10 +320,33 @@ you wanted to add, and save again with version="3f2a1c0b9d8e7f60".
 ```
 
 Memories are ordinary pages under a reserved `memory/` prefix, so
-`mk list --prefix memory/` and `mk search` find them like anything else.
-Note that **`personal` is about who may write, not who may read**: the
-collection remains the unit of read access, so a personal memory is visible
-to everyone who can read its collection.
+`mk list --prefix memory/` and `mk search` find them like anything else —
+subject to who may read them.
+
+**`personal` means private to read, too.** A personal memory is readable
+only by the principal who saved it, identified by the verified OIDC
+`(iss, sub)` pair its namespace came from. To everybody else — including
+holders of `read` on the same collection, including `admin` — it is not
+refused, it is *absent*: missing from `mk_search`, from `mk_list`, from the
+page counts in `mk_list_collections`, and from `mk_show`, which answers a
+guessed ID exactly as it answers an ID nobody ever wrote. Filtering happens
+inside the search query rather than over its results, so a hidden memory
+never consumes a slot in your `limit` either.
+
+Three things follow, and are worth knowing:
+
+- **Ownership is `(iss, sub)` and nothing else.** Change team, email address
+  or tenant and you keep your memories. Two identity providers that both
+  mint `user-1` are two different people.
+- **`team` and `global` are unchanged**: readable by every reader of the
+  collection, exactly as before.
+- **Locally it makes no difference.** `mk search`/`mk list`/`mk show` and
+  `mk mcp serve` serve a single user, who owns the `local` namespace their
+  own memories are written into.
+
+An operator who deliberately wants the old, collection-wide behaviour asks
+for it by name, per collection — `personal_visibility: collection` — and a
+hosted server running OIDC logs a warning at startup saying so.
 
 Design and threat reasoning: [docs/design/memory.md](docs/design/memory.md).
 
@@ -964,8 +988,10 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
   Streamable HTTP MCP server: OIDC, the capability model, and why an
   unauthorized collection is made invisible rather than denied
 - [docs/design/memory.md](docs/design/memory.md) — `mk_save_memory`: why
-  the personal namespace is structurally unspoofable, the scope→capability
-  table, the optimistic-locking scheme, and the staging shape
+  the personal namespace is structurally unspoofable, why a personal
+  memory is private to READ as well as to write (and why that filter has
+  to live inside the search query), the scope→capability table, the
+  optimistic-locking scheme, and the staging shape
 - [docs/design/update-contract.md](docs/design/update-contract.md) — the
   per-collection `update:` contract: why it is declared rather than
   inferred, and how the path a caller is shown is narrowed to what that

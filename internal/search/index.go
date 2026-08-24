@@ -127,7 +127,82 @@ func indexDoc(p kb.Page) map[string]any {
 		"title":    p.Title,
 		"body":     p.Body,
 		"category": p.Front.Category,
+		ownerField: ownerToken(p),
 	}
+}
+
+// The visibility field, and the two token shapes it holds.
+//
+// EVERY document carries one, including public ones: a document with no
+// owner field could not be matched by a term query, so "visible to
+// everyone" needs a token of its own rather than an absence. publicToken
+// is a value no owner can collide with — internal/memory's namespaces
+// are a slug plus a 16-hex digest, or the fixed "local" — and the
+// private form is prefixed anyway, so the two spaces cannot overlap even
+// if that ever changed.
+const (
+	ownerField  = "owner"
+	publicToken = "public"
+	ownerPrefix = "own:"
+	// ownerBoost is zero so the visibility clause decides eligibility
+	// without touching the score. See visibilityClause.
+	ownerBoost = 0.0
+)
+
+// keywordAnalyzer indexes a field as one verbatim token: no splitting,
+// no stemming, no lowercasing. Used for the two fields whose values are
+// identifiers to be matched exactly rather than prose to be searched.
+const keywordAnalyzer = "keyword"
+
+// ownerToken is the value a page's visibility field is indexed as.
+func ownerToken(p kb.Page) string { return ownerTokenFor(p.PrivateOwner()) }
+
+// ownerTokenFor maps a derived owner to its indexed token.
+func ownerTokenFor(owner string) string {
+	if owner == "" {
+		return publicToken
+	}
+	return ownerPrefix + owner
+}
+
+// visibilityClause is the MANDATORY query clause a restricted viewer's
+// search is conjoined with, and it is the whole reason per-page
+// visibility is enforceable at all.
+//
+// It has to be part of the query rather than a filter over the results,
+// because the two are not equivalent: bleve ranks and truncates to
+// `limit` inside SearchInContext, so a caller whose top ten hits are
+// somebody else's private memories would get an empty page of results
+// from a post-filter, while the same query with the clause in it returns
+// the ten best documents that caller is actually allowed to see.
+// Filtering afterwards also has to have loaded the metadata it then
+// discards, which is how snippets and counts leak.
+//
+// The clause is boosted to zero so it contributes nothing to the score:
+// a conjunction's score is the sum of its children's, and a zero query
+// boost makes both the term's weight and its score zero, leaving the
+// content clauses' BM25 scores exactly as they were. Visibility decides
+// what is eligible; it does not decide what ranks.
+//
+// An unfiltered viewer gets no clause at all, so the query executed for
+// the CLI and for a single-user deployment is byte-for-byte the one that
+// ran before per-page visibility existed.
+func visibilityClause(v kb.Viewer) query.Query {
+	if v.IsUnfiltered() {
+		return nil
+	}
+	public := bleve.NewTermQuery(publicToken)
+	public.SetField(ownerField)
+	public.SetBoost(ownerBoost)
+	if v.Owner() == "" {
+		return public
+	}
+	own := bleve.NewTermQuery(ownerTokenFor(v.Owner()))
+	own.SetField(ownerField)
+	own.SetBoost(ownerBoost)
+	either := bleve.NewDisjunctionQuery(public, own)
+	either.SetBoost(ownerBoost)
+	return either
 }
 
 // Put indexes (or re-indexes) a single page into a LIVE index, so it is
@@ -173,7 +248,20 @@ func (i *Index) Query(q string, limit int) ([]Result, error) {
 	return i.QueryContext(context.Background(), q, limit)
 }
 
-// QueryContext is Query with an explicit context. ctx is threaded into
+// QueryContext is QueryAs for a viewer that sees every page. It is what
+// a single-user surface (the CLI, `mk http serve`) wants: there is one
+// principal in front of it and they own everything.
+//
+// Anything serving several principals at once must call QueryAs with
+// that caller's viewer instead. Nothing here can tell the difference, so
+// the enforcement point is one layer up: collections.Registry.Search
+// always passes the viewer its per-request view was built with, and the
+// MCP surface only ever reaches an index through that.
+func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result, error) {
+	return i.QueryAs(ctx, kb.Unfiltered(), q, limit)
+}
+
+// QueryAs is Query with an explicit context and an explicit VIEWER. ctx is threaded into
 // bleve's SearchInContext, so a client disconnect or a caller-imposed
 // deadline (e.g. internal/http.Config.QueryTimeout, or the timeout
 // internal/mcp's search handler applies) actually stops the underlying
@@ -207,7 +295,16 @@ func (i *Index) Query(q string, limit int) ([]Result, error) {
 //	while still allowing non-boosted pages to surface via the
 //	title/id/body clauses. If no category boosts are configured (the
 //	default), the query is a plain title/id/body disjunction.
-func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result, error) {
+//
+// Visibility (see visibilityClause):
+//
+//	The whole disjunction above is conjoined with a zero-boosted
+//	visibility clause matching the pages v may see, so ineligible
+//	documents are excluded BEFORE bleve ranks and truncates to limit —
+//	not filtered out of the results afterwards, which would leak
+//	metadata and silently shrink the result set. An unfiltered viewer
+//	adds no clause, and scores are unchanged either way.
+func (i *Index) QueryAs(ctx context.Context, v kb.Viewer, q string, limit int) ([]Result, error) {
 	if q == "" {
 		return nil, nil
 	}
@@ -250,7 +347,10 @@ func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result
 		clauses = append(clauses, catBoost)
 	}
 
-	combined := bleve.NewDisjunctionQuery(clauses...)
+	var combined query.Query = bleve.NewDisjunctionQuery(clauses...)
+	if vis := visibilityClause(v); vis != nil {
+		combined = bleve.NewConjunctionQuery(vis, combined)
+	}
 	req := bleve.NewSearchRequestOptions(combined, limit, 0, false)
 	req.Highlight = bleve.NewHighlight()
 	req.Highlight.AddField("body")
@@ -265,6 +365,17 @@ func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result
 		page, ok := i.page(hit.ID)
 		if !ok {
 			continue // index/page map drift - shouldn't happen
+		}
+		if !v.CanSee(page) {
+			// Unreachable: visibilityClause already excluded this document
+			// from the search. It is here as a second, independent line of
+			// defence — the clause is built from the same viewer, but this
+			// check reads the page rather than an index field, so a future
+			// mapping/analysis mistake that made the clause match too much
+			// fails closed instead of disclosing. It is NOT the mechanism:
+			// a post-filter cannot undo truncation, which is why the clause
+			// exists.
+			continue
 		}
 		snippet := ""
 		if frags, ok := hit.Fragments["body"]; ok && len(frags) > 0 {
@@ -315,8 +426,25 @@ func buildMapping() *mapping.IndexMappingImpl {
 	// category is indexed as a single keyword token (no analysis) so
 	// values match exactly, not as stemmed/analysed tokens.
 	categoryField := bleve.NewTextFieldMapping()
-	categoryField.Analyzer = "keyword"
+	categoryField.Analyzer = keywordAnalyzer
 	docMap.AddFieldMappingsAt("category", categoryField)
+
+	// owner carries per-page visibility (see visibilityClause). Keyword
+	// analysis is load-bearing rather than a preference: the standard
+	// analyzer would split "own:alice-8f2a1c0b9d8e7f60" on the colon and
+	// the dash and stem the pieces, so one owner's token could match
+	// another's. One verbatim token per document means a term query
+	// matches exactly one owner and no other.
+	//
+	// IncludeInAll is off so the token never becomes part of the _all
+	// field a free-text query can reach: a caller must not be able to
+	// search for "own:<somebody-else>" and learn from the hit count that
+	// the somebody exists.
+	ownerFieldMapping := bleve.NewTextFieldMapping()
+	ownerFieldMapping.Analyzer = keywordAnalyzer
+	ownerFieldMapping.IncludeInAll = false
+	ownerFieldMapping.IncludeTermVectors = false
+	docMap.AddFieldMappingsAt(ownerField, ownerFieldMapping)
 
 	im.AddDocumentMapping("_default", docMap)
 	return im

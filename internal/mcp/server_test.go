@@ -28,10 +28,10 @@ func TestRegisterTools_BuildsCleanly(t *testing.T) {
 		"meerkat-test", "test",
 		mcpserver.WithToolCapabilities(true),
 	)
-	registerSearch(s, reg)
-	registerShow(s, reg)
-	registerList(s, reg)
-	registerListCollections(s, reg)
+	registerSearch(s, reg, stdioTransport())
+	registerShow(s, reg, stdioTransport())
+	registerList(s, reg, stdioTransport())
+	registerListCollections(s, reg, stdioTransport())
 
 	// Exercise the public CapabilityRegistry too — confirms the
 	// server has the tool-capability flag set, which is what an

@@ -1,6 +1,6 @@
 # Spec: Memory toolset — personal, team and global memory with review
 
-**Status:** Implemented (`internal/memory`, `mk_save_memory` in `internal/mcp`; `memory:` in content-source.yaml) · **Builds on:** [hosted-mcp.md](hosted-mcp.md) · **Issue:** #10
+**Status:** Implemented (`internal/memory`, `mk_save_memory` in `internal/mcp`; `memory:` in content-source.yaml) · **Builds on:** [hosted-mcp.md](hosted-mcp.md) · **Issues:** #10, #27 (private personal reads)
 
 *(`docs/design/` is a design record. The up-to-date schema reference is
 [content-source.example.yaml](../../content-source.example.yaml); the
@@ -23,6 +23,14 @@ same one*.
 
 It also consumes the capability model #9 defined and left unenforced.
 
+**#27 added the third question:** *who may read it.* The original answer
+— the collection is the unit of read access, and `personal` describes
+who may write — was the wrong one for a hosted deployment, where
+"remember this for me" reasonably means private. A personal memory is
+now readable by the principal whose namespace it is in and by nobody
+else, and unreadable is indistinguishable from nonexistent. See
+[Private personal reads](#private-personal-reads-27).
+
 ## Non-goals
 
 - **A GitOps / merge-request review pipeline.** An unauthorized team or
@@ -34,12 +42,16 @@ It also consumes the capability model #9 defined and left unenforced.
 - **Deleting or editing memories through MCP.** `mk_save_memory` creates
   and updates. There is no `mk_delete_memory`: removal is an operator
   action against the store, where it is auditable.
-- **Per-page read authorization.** Unchanged from #9: **the collection
-  is the unit of read access.** "Personal" describes who may WRITE a
-  memory, not a private read channel — a personal memory is readable by
-  everyone who can read its collection. This is stated loudly because
-  the word invites the other reading, and a test pins it
-  (`TestHostedMemory_APersonalMemoryIsVisibleToTheCollectionsReaders`).
+- **General per-page read authorization.** #27 made *personal memories*
+  private to read as well as to write (see [Private personal
+  reads](#private-personal-reads-27)), but it did not build a row-level
+  authorization language for arbitrary KB pages. The collection remains
+  the unit of read access for ordinary content; the one exception is a
+  page whose ID says whose it is.
+- **Team-private reads.** `team` still means "every reader of the
+  collection". Deriving a team identity from claims and scoping reads to
+  it is a separate decision with a separate blast radius — see
+  [Future work](#future-work).
 - **Cross-process locking for the local backend.** Two meerkat processes
   writing one local directory cannot be serialised portably; that
   deployment should use the GCS backend, whose preconditions the backend
@@ -115,24 +127,238 @@ Two deployments have no verified subject: **stdio** (spawned by the one
 user it serves, over a pipe) and **`allow_unauthenticated`** (a gateway
 authenticated, meerkat did not). They are not the same case:
 
-| transport | anonymous personal write |
-| --- | --- |
-| stdio | **allowed**, in the fixed `local` namespace — one user, no ambiguity |
-| hosted | **refused** — every anonymous caller would otherwise share one namespace |
+| transport | anonymous personal write | anonymous personal read |
+| --- | --- | --- |
+| stdio | **allowed**, in the fixed `local` namespace — one user, no ambiguity | the `local` namespace, which is the one it writes into |
+| hosted | **refused** — every anonymous caller would otherwise share one namespace | **nothing** — a server that cannot name its caller must not hand out somebody's private memory either |
 
-That is one boolean, `memoryOptions.AllowAnonymousPersonal`, set at
-server construction and true in exactly one place. Team and global
-writes need no identity and are unaffected.
+That is one boolean, `transportOptions.AllowAnonymousPersonal`, set at
+server construction and true in exactly one place. It now answers the
+same question on both sides of the feature — *when nobody
+authenticated, who is this?* — which is why the type is no longer named
+for the write path alone. Team and global writes need no identity and
+are unaffected.
+
+## Private personal reads (#27)
+
+The original design said the namespace decided who may **write** a
+personal memory, and that the collection remained the unit of **read**
+access. That was a defensible line for #10 and the wrong one for a
+hosted, multi-user deployment: "remember this for me" means *for me*,
+and a note a caller kept for themselves — a correction, a preference, a
+summary of a conversation — was readable by every other reader of the
+collection.
+
+#27 closes that. **A personal memory is readable by the principal whose
+namespace it is in, and by nobody else.** Not merely refused to
+everybody else: *absent*. It does not appear in their search results,
+their listing, their page counts or their snippets; asking for its ID
+answers exactly as asking for an ID nobody ever wrote; and it is not
+counted by the ambiguity error. That is the same invisibility property
+#9 established for collections ([hosted-mcp.md](hosted-mcp.md)), applied
+one level down, and it is held to the same standard by the same kind of
+test.
+
+### The owner is the page ID
+
+The first question is where "whose is this?" lives. Three candidates,
+and only one of them cannot be forgotten or forged:
+
+| carrier | failure mode |
+| --- | --- |
+| a frontmatter field | the document's own bytes claim it. A caller writes the body; trusting it would let whoever can write one memory claim another's — the same reason `kb.ParsePage` already ignores a document's `id:`. |
+| a struct field stamped by a constructor | a constructor that forgets it produces a **public** page. The failure is silent and in the wrong direction. |
+| **the page ID** | none available: the ID is built by `memory.Resolve` out of the identity-derived namespace and nothing a caller supplied. |
+
+So the owner is derived, at every enforcement point, from the ID:
+
+```
+memory/personal/<namespace>/<slug>   private to <namespace>
+anything else                        visible to every reader of the collection
+```
+
+`kb.PrivateOwner(id)` is that derivation, and `kb.Viewer` is the value
+that answers "may this viewer see it". Both live in `internal/kb`
+because that package defines what a page ID *is*; a test in
+`internal/memory` pins `kb.PrivateOwner(ref.PageID) == ref.Namespace`
+for every scope, so the two packages' notions of the layout cannot drift
+apart quietly.
+
+Two consequences worth stating:
+
+- **`memory/personal/` is a reserved page-ID prefix everywhere.** An
+  ingested content page that happens to sit at
+  `content/memory/personal/x/y.md` is treated as private to `x` too.
+  That is the safe direction (it becomes harder to read, not easier), it
+  removes any question of whether the content tree or the overlay is
+  authoritative about an ID's owner, and it means a private overlay
+  document cannot make a public content page vanish for everybody else
+  by sitting on its ID — the overlay only shadows a content page for the
+  viewers who can actually see the overlay entry.
+- **The namespace is already a sufficient owner key.** It is
+  `sha256(issuer + "\x00" + subject)`, so two issuers minting the same
+  `sub` are two owners, and an email or group change moves nothing. The
+  read side inherits all of that for free rather than re-deriving it.
+
+### Filtering happens in the query, not over the results
+
+The load-bearing implementation decision. Visibility is a **mandatory
+clause in the bleve query**, conjoined with the existing title/id/body
+disjunction:
+
+```
+Conjunction(
+    Disjunction( owner:public , owner:own:<caller> ),   ← boost 0
+    Disjunction( title^5 , id^3 , body , category boosts... ),
+)
+```
+
+Post-filtering the top *N* results would be both a leak and a bug:
+
+- **A bug**, because bleve ranks and truncates to `limit` *inside* the
+  search. A caller whose ten best-scoring documents are somebody else's
+  private memories would get an empty result and be told, truthfully
+  from its point of view, that the knowledge base has no answer. A test
+  pins exactly this: fifty private documents that all outrank the one
+  public match, a limit of five, and the assertion that the public match
+  comes back.
+- **A leak**, because a post-filter has to have loaded and scored the
+  metadata it then throws away — which is how counts, snippets and
+  timing differences escape.
+
+The clause is boosted to **zero** so it decides eligibility without
+touching ranking: a conjunction's score is the sum of its children's,
+and a zero query boost zeroes both the term's weight and its score
+contribution. A test asserts score-for-score parity between a restricted
+and an unrestricted query over the documents both can see, so
+"visibility does not change relevance" is pinned rather than assumed.
+
+An **unfiltered** viewer adds no clause at all, so the query the CLI
+runs is byte-for-byte the one that ran before any of this existed.
+
+The `owner` field is indexed with the `keyword` analyzer (one verbatim
+token — the standard analyzer would split `own:alice-8f2a…` on the
+colon and the dash and let one owner's token match another's) and with
+`IncludeInAll: false`, so it is not reachable from a free-text query: a
+caller cannot search for another principal's token and learn from the
+hit count that the principal exists.
+
+`indexDoc` is shared by the bulk build and by `Index.Put`, so a memory
+indexed incrementally into a live index carries the same visibility
+field as one present at startup. There is no per-user index and no
+rebuild: one shared index, one extra field, one extra clause.
+
+### One seam, two narrowings
+
+The MCP surface applies authorization in exactly one place, and #27 did
+not add a second:
+
+```go
+func visible(ctx, reg, mem) *collections.Registry {
+    view := reg
+    if g := authz.FromContext(ctx); g != nil {
+        view = reg.Restrict(g.CanRead)   // which COLLECTIONS exist
+    }
+    return view.ViewedBy(mem.viewer(g))  // which PAGES exist inside them
+}
+```
+
+`Registry.ViewedBy` is the per-page counterpart of `Restrict` and has
+deliberately the same shape: it returns a derived, borrowing view
+carrying the viewer, and every read below it — `Pages`, `Search`,
+`Show`, and therefore the ambiguity error and the page counts — reads
+that viewer without knowing it exists. There is no per-operation viewer
+argument for a call site to forget, and a read method added later
+inherits the policy for free, exactly as `Restrict` covers methods added
+after it.
+
+The two compose in either order and a test pins that they do.
+
+`show` and `list` are enforced by the same value rather than by a
+parallel check. `Collection.LoadFor` checks the requested **ID** before
+it loads anything (so an unauthorized lookup does no work and touches no
+store) and the returned **page** afterwards (because the ID a caller
+passed and the page that came back are two different things), and
+answers `kb.ErrNotFound` either way. `Registry.Show` calls `LoadFor`, so
+an invisible page is not *withheld* from the ambiguity count — it is
+never found, and the count is right by construction.
+
+### Who the viewer is
+
+The viewer's owner comes from the verified identity and from nothing
+else. `transportOptions.viewer` is the whole derivation:
+
+| caller | viewer |
+| --- | --- |
+| verified OIDC identity | `AsOwner(memory.Namespace(id))` — their own personal memories, plus everything public |
+| anonymous, **stdio** | `AsOwner("local")` — the namespace this user's own memories are written into |
+| anonymous, **hosted** (no `auth:` block, or `allow_unauthenticated`) | `AsOwner("")` — every public page and **no** personal memory belonging to anyone |
+| no MCP transport at all (`mk search/list/show`, `mk http serve`) | `Unfiltered()` — one principal in front of it, who owns everything |
+
+The third row is the one worth arguing. A hosted server with no
+providers cannot tell its callers apart, so it cannot tell whose a
+personal memory is — and it already refuses to let such a caller
+**write** one for exactly that reason. Handing every anonymous caller
+the `local` namespace would give them, as a group, read access to
+whatever a stdio session wrote into a shared store. Owning nothing is
+the only answer that stays true when meerkat does not know who is
+asking.
+
+The fourth row is why the registry's viewer is a **pointer**: "nobody
+attached a viewer" (unrestricted — the CLI, the static-token HTTP
+server, every pre-existing caller) has to stay distinguishable from
+`AsOwner("")` (a caller who owns nothing). Collapsing them into one zero
+value would either break single-user surfaces or unhide private pages
+from anonymous ones, depending on which way it fell.
+
+### Configuration
+
+```yaml
+memory:
+  type: gcs
+  bucket: my-org-knowledge
+  prefix: kb/memory/
+  personal_visibility: private     # private (default) | collection
+```
+
+- **`private` is the default**, including for every configuration
+  written before the key existed and for a collection with no `memory:`
+  block at all. A word that means privacy must not need an opt-in to
+  provide it.
+- **`collection`** is the pre-#27 behaviour, named for what it does
+  rather than for the version it dates from: personal memories are
+  readable by every reader of the collection. Configuring it alongside
+  `auth.providers` produces a startup **warning** naming the collection
+  — under authentication meerkat knows exactly whose each memory is and
+  has been told to show it to everyone anyway, and that decision belongs
+  in the log of the process acting on it. Without OIDC there is no
+  principal to be private from, so the setting changes nothing there and
+  is not worth a line.
+- An unrecognised value is a **load-time error**, not an ignored line —
+  the same rule `ParseCapability` follows, for the same reason: "the
+  deployment ignored the word I wrote" is how a store ends up more
+  readable than its operator believes.
+
+The policy is per-collection because the `memory:` block is, and it is
+applied in `Collection.viewerFor`: a collection that opted out widens
+every viewer to an unfiltered one. The page metadata stays
+policy-free — one place decides, and it is not the document.
 
 ## Scopes and capabilities
 
-| scope | capability | held | not held |
-| --- | --- | --- | --- |
-| `personal` | `personal-write` | write | **refuse** |
-| `team` | `team-write` | write | **stage**, if any write capability is held |
-| `global` | `global-write` | write | **stage**, if any write capability is held |
+| scope | capability | held | not held | who may READ it |
+| --- | --- | --- | --- | --- |
+| `personal` | `personal-write` | write | **refuse** | the owning principal alone (see [Private personal reads](#private-personal-reads-27)) |
+| `team` | `team-write` | write | **stage**, if any write capability is held | every reader of the collection |
+| `global` | `global-write` | write | **stage**, if any write capability is held | every reader of the collection |
 
-`admin` implies all three, as it implies everything.
+`admin` implies all three write capabilities, as it implies everything.
+It does **not** confer read access to another principal's personal
+memories: `admin` is a capability over a *collection*, and ownership is
+not a capability. An operator who needs to reach a personal memory does
+it at the store — where it is auditable — or configures
+`personal_visibility: collection` for that collection and accepts what
+that says.
 
 **Personal has no staging row.** A personal memory has no reviewer — it
 is nobody's business but the caller's — so an unauthorized personal
@@ -258,12 +484,18 @@ collections:
       type: gcs
       bucket: my-org-knowledge
       prefix: kb/memory/
+      personal_visibility: private   # private (default) | collection
 ```
 
 No `memory:` block means the collection is **read-only** and
 `mk_save_memory` will not name it — which is what every configuration
 that predates this change has, and why a deployment that configured
 nothing sees no new tool at all.
+
+`personal_visibility:` is the read policy, described under [Private
+personal reads](#private-personal-reads-27). It defaults to `private`,
+so a `memory:` block written before the key existed keeps personal
+memories private without being edited.
 
 Validation runs at **load** time, as `auth:`'s does. The interesting
 rule: a *relative* local `path:` under a `type: url` or `type: gcs`
@@ -360,7 +592,10 @@ exactly the memories, and a memory is distinguishable from an ingested
 page at a glance. A document's own `id:` frontmatter is ignored in
 favour of its store key (`kb.ParsePage` takes the ID from the caller),
 because trusting the body would let whoever can write one memory shadow
-any page in the collection.
+any page in the collection. Since #27 that ID is also the document's
+**owner**: `memory/personal/<ns>/` is what every read surface derives
+visibility from, which is why the store key having to win over the body
+is now load-bearing twice over.
 
 ## Document format
 
@@ -396,6 +631,13 @@ The `memory_*` keys are written as **top-level** frontmatter, not under
 so top-level is what round-trips; `kb.MarshalFrontmatter` would have
 nested them one level deeper than they parse back out. Hence a small
 local frontmatter struct rather than a reuse of `kb.Frontmatter`.
+
+`memory_namespace` is **provenance, not policy**. It records whose
+memory this is so a document copied out of the store is still
+self-describing, but no read path consults it: visibility comes from the
+page ID (see [The owner is the page ID](#the-owner-is-the-page-id)). A
+document whose frontmatter claims somebody else's namespace is served
+under the owner its store key says, and a test pins exactly that.
 
 ## Staging shape
 
@@ -455,6 +697,23 @@ know it had happened.
 | an existing `auth:` policy | unchanged meaning; `global-write` is new, so no existing rule gains a power |
 | `--kb-dir` | still suppresses `content-source.yaml` discovery, and therefore `memory:` too |
 
+**#27's one deliberate behaviour change.** Personal memories written
+before it stop being readable by anyone but their owner. That is the
+point of the issue rather than a regression, and it is the only
+direction the change goes: nothing becomes *more* readable. The
+surfaces that keep their exact previous behaviour are worth listing,
+because they are the ones an operator might worry about:
+
+| surface | after #27 |
+| --- | --- |
+| `mk search` / `mk list` / `mk show` | unchanged — one local principal, unrestricted viewer |
+| `mk http serve` (static token) | unchanged — untouched by this work, unrestricted viewer |
+| `mk mcp serve` (stdio) | reads the `local` namespace, which is the only one it writes; a single-user deployment sees exactly what it saw |
+| `team` / `global` memories | unchanged, at every scope and every surface |
+| ordinary KB content | unchanged, except for the reserved `memory/personal/` prefix |
+| an existing `memory:` block | keeps working; `personal_visibility` defaults to `private` |
+| a deployment that wants the old reads | `personal_visibility: collection`, per collection |
+
 `collections.Open` gained a `context.Context` (memory stores do network
 work at mount time, and a store that cannot be reached should fail the
 process at startup where a health gate catches it — the same call this
@@ -494,6 +753,44 @@ package already makes about indexes).
   generation semantics. No credentials, no bucket, no network — the same
   seam `internal/contentsource` uses for the read side.
 
+### Private personal reads (#27)
+
+- **The derivation** (`internal/kb/visibility_test.go`): which IDs are
+  private and to whom, including truncated and near-miss prefixes, and
+  that a document's frontmatter cannot claim an owner its ID does not
+  have. Plus the distinction between `Unfiltered()` and `AsOwner("")`,
+  which the registry's nil-viewer pointer exists to preserve.
+- **The layout agreement** (`internal/memory/visibility_test.go`):
+  `kb.PrivateOwner(ref.PageID) == ref.Namespace` for every scope and a
+  battery of hostile subjects — the test that stops the two packages'
+  notions of the layout drifting apart quietly. Also the read
+  consequences of the namespace rules: two issuers with the same `sub`
+  are two owners; changed email/groups/tenant move nothing; a different
+  subject carrying the old claims inherits nothing.
+- **The clause, not a post-filter** (`internal/search/visibility_test.go`):
+  fifty private documents that all outrank the one public match, a limit
+  of five, and the assertion that the public match comes back. It is the
+  test that fails if the filter ever moves to the result loop, and it
+  was confirmed to fail against exactly that implementation. Alongside
+  it: score-for-score parity with an unrestricted query, the owner token
+  being unreachable from free text, and restricted queries running
+  concurrently with `Put`.
+- **Absence, not refusal** (`internal/collections/visibility_test.go`,
+  `internal/mcp/visibility_test.go`): a guessed ID — bare, qualified, or
+  with an explicit `collection` — answered with the same bytes as a
+  fictional one; the ambiguity error for a page in two collections
+  reduced to a plain not-found for anyone who owns neither copy; page
+  counts in `mk_list_collections` that do not move when another
+  principal saves.
+- **Both backends** (`internal/memory/visibility_test.go`): local and
+  GCS driven through one table, asserting the store key — which is what
+  the owner is derived from — survives the write/load round trip
+  identically in each. Plus a remount at the collection level, which is
+  the path a hot reload will take.
+- **Concurrency**: several principals saving and reading through one
+  shared `*Collection` at once, each asserting they never observe
+  another's document, under `-race`.
+
 ## Future work
 
 - **A real review pipeline.** Staging is a directory. Opening a merge
@@ -510,7 +807,19 @@ package already makes about indexes).
   `mk_list --prefix memory/` today. A dedicated `mk_recall` that filtered
   to the caller's own namespace by default would be a better default
   than a prefix filter the model has to remember.
-- **Per-page read authorization**, which would let "personal" mean
-  private-to-read as well as private-to-write. That is a much larger
-  change to the authorization model — the collection is the unit today
-  — and is not implied by anything here.
+- **Team-private reads.** `team` still means "every reader of the
+  collection". Scoping it to a server-derived team identifier would
+  reuse the whole #27 mechanism — an owner token in the page ID, a
+  clause in the query — but needs a decision about where a team identity
+  comes from and what happens to a memory when somebody leaves one.
+- **An administrative recovery capability.** #27's issue allows for an
+  explicitly configured one; this implementation ships none. `admin`
+  deliberately does not confer it (ownership is not a capability), so
+  today the answer is the store itself, where the access is auditable.
+  A capability that could read another principal's personal memories
+  should probably also *log* every such read, and that is a design of
+  its own.
+- **Migrating an existing store.** A deployment that ran with
+  collection-visible personal memories and wants them shared for real
+  has no tool to promote one to `team`/`global` — that is the same
+  missing promotion tool the review pipeline needs.

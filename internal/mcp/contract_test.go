@@ -63,7 +63,7 @@ func contractRegistry(t *testing.T) *collections.Registry {
 // entries by collection name.
 func entriesByName(t *testing.T, ctx context.Context, reg *collections.Registry) map[string]map[string]any {
 	t.Helper()
-	res, err := listCollectionsHandler(reg)(ctx, callTool(nil))
+	res, err := listCollectionsHandler(reg, stdioTransport())(ctx, callTool(nil))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}

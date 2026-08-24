@@ -44,6 +44,16 @@ type memFixture struct {
 
 func newMemFixture(t *testing.T, rules []authz.Rule) *memFixture {
 	t.Helper()
+	return newMemFixtureWith(t, rules, nil)
+}
+
+// newMemFixtureWith is newMemFixture with a hook that runs over each
+// mounted collection before the server is built — for tests that need a
+// collection configured differently (e.g. the
+// `personal_visibility: collection` opt-out, which a real deployment
+// sets in content-source.yaml and collections.Open applies at mount).
+func newMemFixtureWith(t *testing.T, rules []authz.Rule, configure func(*collections.Collection)) *memFixture {
+	t.Helper()
 	f := &memFixture{hostedFixture: &hostedFixture{t: t, logs: &bytes.Buffer{}}}
 
 	var authCfg *authz.Config
@@ -72,6 +82,11 @@ func newMemFixture(t *testing.T, rules []authz.Rule) *memFixture {
 	)
 	if err != nil {
 		t.Fatalf("collections.New: %v", err)
+	}
+	if configure != nil {
+		for _, c := range reg.All() {
+			configure(c)
+		}
 	}
 
 	srv, err := NewHosted(context.Background(), HostedConfig{
@@ -559,31 +574,12 @@ func TestHostedMemory_SavedMemoryIsImmediatelySearchableAndShowable(t *testing.T
 	}
 }
 
-func TestHostedMemory_APersonalMemoryIsVisibleToTheCollectionsReaders(t *testing.T) {
-	ctx := context.Background()
-	// Personal scope is about WHO MAY WRITE it, not about a private
-	// read channel: meerkat's unit of read authorization is the
-	// collection (see docs/design/hosted-mcp.md), and this test pins
-	// that the memory feature did not quietly claim otherwise.
-	f := newMemFixture(t, []authz.Rule{
-		{Groups: []string{"writers"}, Collections: []string{"notes"}, Capabilities: []string{"read", "personal-write"}},
-		{Groups: []string{"readers"}, Collections: []string{"notes"}, Capabilities: []string{"read"}},
-	})
-	writer := f.client(ctx, f.token("alice", "writers"))
-	got, text, isErr := callSaveMemory(t, ctx, writer, map[string]any{
-		"scope": "personal", "title": "Mine", "content": "the axolotl detail",
-	})
-	if isErr {
-		t.Fatalf("save: %s", text)
-	}
-	id, _ := got["id"].(string)
-
-	reader := f.client(ctx, f.token("rita", "readers"))
-	found, _ := callText(t, ctx, reader, toolSearch, map[string]any{"query": "axolotl"})
-	if !strings.Contains(found, id) {
-		t.Errorf("a reader of the collection cannot see a personal memory in it: %s", found)
-	}
-}
+// The personal scope's READ semantics moved in issue #27: a personal
+// memory is now readable only by the principal who owns it. The test
+// that used to pin the opposite here — a reader of the collection could
+// see it — is replaced by its inverse and the rest of the property, in
+// visibility_test.go (TestHostedMemory_APersonalMemoryIsInvisibleToOtherReaders
+// and the tests around it).
 
 // --- optimistic locking ----------------------------------------------
 
@@ -755,7 +751,7 @@ func TestStdioMemory_AnonymousPersonalWriteIsAllowed(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reg.Close() })
 
-	res, err := saveMemoryHandler(reg, memoryOptions{AllowAnonymousPersonal: true})(ctx, callTool(map[string]any{
+	res, err := saveMemoryHandler(reg, transportOptions{AllowAnonymousPersonal: true})(ctx, callTool(map[string]any{
 		"scope": "personal", "title": "Mine", "content": "a local note",
 	}))
 	if err != nil {

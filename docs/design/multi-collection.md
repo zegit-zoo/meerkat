@@ -153,6 +153,15 @@ be filtered per caller without rebuilding, which is precisely what
 per-collection authorization needs. Ties break on configuration order,
 then page ID, so output is deterministic.
 
+Since #27 each per-collection query also carries a per-caller
+**visibility clause** (see [memory.md](memory.md#private-personal-reads-27)),
+so a caller's `limit` is spent on documents they may actually see rather
+than on personal memories that would be discarded afterwards. That is a
+clause in the query, not a second index: the "one index per collection,
+filtered per caller by narrowing the registry" arrangement above is
+unchanged, and the clause is what extends it from *which collections*
+to *which pages within them*.
+
 ### The single-collection fallback
 
 `internal/kb` reads through process-global state (`kb.UseFS`), which

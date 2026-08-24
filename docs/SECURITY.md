@@ -166,6 +166,7 @@ is small but worth being explicit about:
 | User's GitHub token (used by `mk update` and `mk ingest` git auth) | Disclosure via argv, on-disk config, or logging | The token (from the `gh` auth cache) is handed to the clone/fetch subprocess only via a `credential.helper` script that reads it back from an env var (`MEERKAT_GIT_TOKEN`) at request time — it never appears in argv, in the persisted remote URL, or in `.git/config`. The remote URL is scrubbed back to its tokenless form in a `defer` immediately after clone/fetch, including on error paths, so a live credential doesn't linger in the cache dir. |
 | Downloaded release binary (in `mk update` flow) | Supply-chain swap | SHA256 verified against published `checksums.txt`; cosign signature on the checksums file (Rekor-logged); staged in a user-owned temp dir before final copy/move; `.old` backup during swap |
 | `mk mcp serve-http` — who may reach which collection | An authenticated caller reading a collection they aren't entitled to, or *learning it exists* | Bearer tokens are verified as real OIDC tokens (signature against the issuer's JWKS, `iss`, `aud`, `exp`) by `github.com/coreos/go-oidc`; discovery runs at startup so a bad issuer fails the process rather than producing intermittent 401s. **Audience is mandatory** — a provider with no `audience` and no `auth.resource` is refused at construction, because an audience-unbound resource server accepts tokens minted for any other relying party of the same IdP. Authorization is applied by *narrowing the registry* once per request (`collections.Registry.Restrict`), not by a per-operation check: a collection the caller can't read is absent from `Names`/`All`/`Get`/`target`/`SplitQualified` and therefore from search, list, show, the MCP tool descriptions, the `available: …` list in an error, and `mk_show`'s ambiguity count. See the note below on why that distinction is the security property. Policy validation runs at config-load time (unknown capability, rule with no collections, non-https issuer, rules without providers) so a policy that would silently grant nothing fails the process instead. |
+| `mk mcp serve-http` — who may read another principal's PERSONAL memory | A caller reading, enumerating or inferring the existence of a memory somebody else saved for themselves | A personal memory is readable only by the principal whose namespace it is in — the verified `(iss, sub)` pair, never a tool argument, and never a mutable claim like email/groups/tenant. Enforcement is by *narrowing the per-request registry view* once (`Registry.ViewedBy`), exactly as collection authorization narrows it, so search, list, show, page counts, snippets and `mk_show`'s ambiguity count all inherit it rather than each checking. In search the filter is a **mandatory clause inside the bleve query**, boosted to zero, so ineligible documents are excluded before ranking and before the `limit` truncation — a post-filter over the top N would both leak metadata and silently return an empty result when the limit was consumed by hidden documents. An unauthorized read answers `not found`, byte-identical to a page that was never written, for bare and qualified IDs alike. `admin` does not confer it: capabilities are held over a collection, and ownership is not a capability. An operator may opt a collection back into the old collection-wide behaviour with `memory.personal_visibility: collection`, which logs a startup warning under OIDC. See [design/memory.md](design/memory.md#private-personal-reads-27). |
 | `mk mcp serve-http` unauthenticated endpoints (`/livez`, `/readyz`, `/metrics`, `/.well-known/oauth-protected-resource`) | Enumeration of the deployment by an unauthenticated caller | Probes and metrics are deliberately unauthenticated (an orchestrator and a scrape job have no OIDC token, and a probe that can fail for auth reasons restarts healthy pods), so they are written to carry nothing: `/readyz` reports **counts, never collection names** — the names behind a failure go to the structured log; no metric carries a collection name, page ID, query or caller subject as a label; the `route` label is the server's own matched mux pattern from a closed set, never `r.URL.Path`, so a scanner can't add time series. The RFC 9728 metadata is public by definition — its job is to be readable by a client that has no token yet — and contains only the resource identifier and the configured issuers. `GET /` names no collection. |
 | `mk mcp serve-http` access logs | Credential or membership disclosure via logging | The `Authorization` header, the raw token, group membership and request bodies are never logged. Logged: method, path, status, duration, bytes, peer, user agent, MCP session ID, and (authenticated only) `sub`/`issuer`/`tenant` — an audit trail without a directory dump. `X-Forwarded-For` is deliberately **not** consulted: it is client-controlled unless a trusted proxy rewrites it, and meerkat has no way to know that. **The server has no TLS of its own**; default bind is loopback. Exposed beyond one host without a TLS-terminating proxy, bearer tokens and every response body cross the network in plaintext. |
 | `mk http serve` API key, and the traffic it guards | Disclosure — in code/logs, or on the wire | Key comparison is constant-time (`subtle.ConstantTimeCompare`), the key is never echoed, and the server refuses to start without one. **The server has no TLS of its own** (`ListenAndServe`, never `ListenAndServeTLS`) — default bind is loopback (`127.0.0.1`). Exposed beyond one host without a TLS-terminating reverse proxy in front, the bearer token and every response body cross the network in plaintext. See `docs/INTEGRATION-OPENWEBUI.md` for the reverse-proxy pattern. |
@@ -217,6 +218,56 @@ The one thing meerkat *does* say plainly is that a caller has no access
 at all: a token that verifies but matches no policy rule gets **403**.
 That is a statement about the caller, identical whether the deployment
 mounts one collection or fifty, and it names none of them.
+
+### Personal memories: private to read, not just to write
+
+`mk_save_memory`'s `personal` scope means private in both directions.
+The reasoning is the same one behind invisible collections, and the
+mistakes available here are the same shape, so it is worth stating the
+three decisions that carry it.
+
+**Ownership comes from the page ID.** A personal memory is stored at
+`personal/<namespace>/<slug>.md` and served at page ID
+`memory/personal/<namespace>/<slug>`, where the namespace is
+`sha256(iss + "\x00" + sub)`. Every read surface derives the owner from
+that ID. The alternatives were a frontmatter field (which the document's
+own caller-written bytes could claim) or a struct field stamped by a
+constructor (which a constructor could forget to set, producing a
+*public* page — a silent failure in the wrong direction). Deriving from
+the ID has neither failure mode: the ID is built from the verified
+identity and from no caller input, so it is an unforgeable carrier.
+`memory/personal/` is therefore a **reserved page-ID prefix**: an
+ingested content page that happens to sit under it is treated as private
+too, which is the safe direction.
+
+**Filtering happens before ranking and truncation.** The visibility
+condition is a clause in the bleve query, conjoined with the content
+clauses and boosted to zero so it changes eligibility and not relevance.
+Post-filtering the top N results would be a security bug *and* a
+correctness bug: a caller whose ten best-scoring documents were somebody
+else's private memories would receive an empty result and be told,
+truthfully from its point of view, that the knowledge base has no
+answer. A test pins this with fifty private documents that outrank the
+one public match and a limit of five.
+
+**Unauthorized is indistinguishable from nonexistent.** A guessed ID —
+bare, qualified as `<collection>:<id>`, or with an explicit `collection`
+argument — produces the same answer as an ID nobody has ever written.
+The ambiguity error counts only pages the caller may see, so the same
+personal key saved into two collections is an ambiguity for its owner
+and a plain not-found for everyone else. Page counts in
+`mk_list_collections` do not move when another principal saves.
+
+**Where the line is drawn.** `team` and `global` memories are unchanged:
+readable by every reader of the collection. This is not a general
+row-level authorization language for arbitrary pages — the collection
+remains the unit of read access for ordinary content. And a hosted
+server that cannot name its caller (no `auth:` block, or
+`allow_unauthenticated`) gives that caller **no** personal memories at
+all rather than defaulting them into a shared namespace, matching the
+fact that it already refuses to let them write one. Local and stdio
+usage serve one principal, who owns the `local` namespace their own
+memories are written into, and are unaffected.
 
 ### `kb_commit` vs. `kb_source`: the provenance split
 

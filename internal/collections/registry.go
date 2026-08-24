@@ -30,6 +30,25 @@
 // before collections existed: nothing to name, nothing to disambiguate,
 // unqualified IDs everywhere. That is the case every pre-existing
 // configuration resolves to.
+//
+// # Two narrowings
+//
+// A per-request VIEW of a registry can be narrowed twice, and the two
+// are independent:
+//
+//	Restrict(allow)   which COLLECTIONS exist for this caller
+//	ViewedBy(viewer)  which PAGES exist inside them
+//
+// Both return a derived registry that borrows the underlying
+// *Collection values, and both are applied ONCE per request so that
+// every read below them inherits the answer without knowing it exists —
+// see Restrict's doc comment for why filtering upstream of the
+// operations is strictly stronger than a check inside each. ViewedBy is
+// there for personal memories, which are readable only by the principal
+// whose namespace they are in (see internal/kb's Viewer and
+// docs/design/memory.md). A registry with no viewer attached reads
+// unrestricted, which is what every single-principal surface gets by
+// never calling it.
 package collections
 
 import (
@@ -93,6 +112,21 @@ type Collection struct {
 	// configured. nil means the collection is read-only and
 	// mk_save_memory will not name it.
 	memory memory.Store
+	// personalReadsAreCollectionWide is the collection's
+	// `memory.personal_visibility: collection` opt-out: personal
+	// memories here are readable by every reader of the collection, as
+	// they were before per-page visibility existed.
+	//
+	// The zero value is the SECURE one. A collection built by any path
+	// that does not explicitly configure the legacy behaviour — including
+	// FromPages, and every configuration written before the key existed —
+	// keeps personal memories private.
+	//
+	// Written once at mount (Open -> SetPersonalVisibility), before
+	// anything serves, and read-only thereafter — the same lifecycle as
+	// Name, Provenance and fsys, and the reason it needs no lock while
+	// overlay and memory (which requests mutate) do.
+	personalReadsAreCollectionWide bool
 	// overlayMu guards overlay.
 	overlayMu sync.RWMutex
 	// overlay holds the memory documents layered over the collection's
@@ -152,20 +186,65 @@ func (c *Collection) Type() string {
 	return contentsource.TypeNone
 }
 
-// Pages returns every page in the collection, sorted by ID: the
-// content root's pages with the memory overlay merged in.
+// Pages returns EVERY page in the collection, sorted by ID: the content
+// root's pages with the memory overlay merged in, private ones
+// included.
+//
+// It is the unrestricted form, and it exists for the three callers that
+// legitimately need the whole set: the search-index build (the index
+// must contain every document — visibility is applied at query time, not
+// at index time), the readiness check's page count, and single-user
+// surfaces with no principals to distinguish. Anything serving several
+// principals must go through the registry, whose Pages applies the
+// per-request viewer — see Registry.Pages and PagesFor.
 //
 // Deliberately not cached: with a runtime content directory the content
 // root is live (an `mk ingest` run, a redeploy writing into a mounted
 // volume), and POST /list on a long-running server has always reflected
 // that immediately. The search index, which is expensive to build, is
 // the thing that's built once — see Index.
-func (c *Collection) Pages() ([]kb.Page, error) {
+func (c *Collection) Pages() ([]kb.Page, error) { return c.PagesFor(kb.Unfiltered()) }
+
+// PagesFor is Pages as seen by v: the same list with every page v may
+// not see removed, before any caller has had a chance to count them.
+func (c *Collection) PagesFor(v kb.Viewer) ([]kb.Page, error) {
 	pages, err := c.contentPages()
 	if err != nil {
 		return nil, err
 	}
-	return c.mergeOverlay(pages), nil
+	return c.mergeOverlay(pages, c.viewerFor(v)), nil
+}
+
+// viewerFor applies the collection's own visibility policy to a
+// request's viewer.
+//
+// A collection configured `personal_visibility: collection` widens every
+// viewer to an unfiltered one: its personal memories are readable by
+// every reader of the collection, which is exactly the pre-#27
+// behaviour and exactly what that key asks for. Any other collection —
+// including every one that configures nothing — passes the viewer
+// through untouched.
+func (c *Collection) viewerFor(v kb.Viewer) kb.Viewer {
+	if c.personalReadsAreCollectionWide {
+		return kb.Unfiltered()
+	}
+	return v
+}
+
+// PersonalReadsAreCollectionWide reports whether this collection opted
+// out of private personal reads (`memory.personal_visibility:
+// collection`). The hosted server warns about it at startup when OIDC is
+// configured; nothing else needs to ask.
+func (c *Collection) PersonalReadsAreCollectionWide() bool {
+	return c.personalReadsAreCollectionWide
+}
+
+// SetPersonalVisibility applies a `memory.personal_visibility:` value.
+// Anything other than memory.VisibilityCollection — including the empty
+// string, and including a value that somehow escaped validation — leaves
+// personal memories private, so the failure direction is closed.
+func (c *Collection) SetPersonalVisibility(v string) {
+	c.personalReadsAreCollectionWide = v == memory.VisibilityCollection
 }
 
 // contentPages returns the pages of the content root alone, with no
@@ -181,32 +260,76 @@ func (c *Collection) contentPages() ([]kb.Page, error) {
 	}
 }
 
-// mergeOverlay layers the memory overlay over a content page list. A
-// memory whose ID collides with a content page WINS: the overlay is the
-// live, just-written state, and a content page that shadowed it would
-// make a save look like it silently did nothing.
-func (c *Collection) mergeOverlay(pages []kb.Page) []kb.Page {
+// mergeOverlay layers the memory overlay over a content page list,
+// keeping only what v may see. A memory whose ID collides with a content
+// page WINS: the overlay is the live, just-written state, and a content
+// page that shadowed it would make a save look like it silently did
+// nothing.
+//
+// Visibility is applied to both halves, and shadowing is conditioned on
+// the overlay entry actually being visible — so a private overlay
+// document cannot make a public content page disappear for everybody
+// else by sitting on its ID.
+func (c *Collection) mergeOverlay(pages []kb.Page, v kb.Viewer) []kb.Page {
 	c.overlayMu.RLock()
 	defer c.overlayMu.RUnlock()
 	if len(c.overlay) == 0 {
-		return pages
+		return v.VisiblePages(pages)
 	}
 	out := make([]kb.Page, 0, len(pages)+len(c.overlay))
 	for _, p := range pages {
-		if _, shadowed := c.overlay[p.ID]; shadowed {
+		if op, shadowed := c.overlay[p.ID]; shadowed && v.CanSee(op) {
+			continue
+		}
+		if !v.CanSee(p) {
 			continue
 		}
 		out = append(out, p)
 	}
 	for _, p := range c.overlay {
+		if !v.CanSee(p) {
+			continue
+		}
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
+// LoadFor is Load as seen by v: a page v may not see answers
+// kb.ErrNotFound, the identical error a page that does not exist
+// answers.
+//
+// Both halves matter. The ID is checked BEFORE the load, so an
+// unauthorized lookup does no work and touches no store — there is no
+// timing or error-shape difference between guessing a real private ID
+// and guessing a fictional one. The loaded page is then checked again,
+// because the ID a caller passed and the page that came back are two
+// different things and only the second one is authoritative.
+//
+// Returning ErrNotFound rather than a refusal is the whole point:
+// internal/collections' invisibility rule says an unauthorized thing is
+// absent, not denied, and a distinguishable error here would turn
+// mk_show into a per-page existence oracle over other people's memories.
+func (c *Collection) LoadFor(v kb.Viewer, id string) (kb.Page, error) {
+	v = c.viewerFor(v)
+	norm := strings.TrimSuffix(strings.TrimPrefix(id, "/"), ".md")
+	if !v.CanSeeOwner(kb.PrivateOwner(norm)) {
+		return kb.Page{}, kb.ErrNotFound
+	}
+	page, err := c.Load(norm)
+	if err != nil {
+		return kb.Page{}, err
+	}
+	if !v.CanSee(page) {
+		return kb.Page{}, kb.ErrNotFound
+	}
+	return page, nil
+}
+
 // Load returns one page by its unqualified ID, the memory overlay
-// first.
+// first. It applies no visibility policy — see LoadFor, and
+// Collection.Pages for why the unrestricted form exists.
 func (c *Collection) Load(id string) (kb.Page, error) {
 	norm := strings.TrimSuffix(strings.TrimPrefix(id, "/"), ".md")
 	if p, ok := c.overlayPage(norm); ok {
@@ -386,12 +509,24 @@ func (c *Collection) StageMemory(ctx context.Context, key string, body []byte) (
 type Registry struct {
 	list []*Collection
 	by   map[string]*Collection
-	// derived marks a registry produced by Restrict: a per-request
-	// VIEW over another registry's collections rather than an owner of
-	// them. Close is a no-op on a derived registry, because the
+	// derived marks a registry produced by Restrict or ViewedBy: a
+	// per-request VIEW over another registry's collections rather than an
+	// owner of them. Close is a no-op on a derived registry, because the
 	// *Collection values (and the built indexes inside them) belong to
 	// the registry it was derived from and outlive this request.
 	derived bool
+	// viewer is WHO this view reads as, for per-page visibility. nil
+	// means no per-page policy is in force — the same thing a nil
+	// *authz.Grants means for collections, and the state the CLI, `mk
+	// http serve` and every pre-existing caller are in.
+	//
+	// It is a pointer rather than a kb.Viewer so that "nobody set one"
+	// (unrestricted, the back-compat answer) is distinguishable from
+	// kb.AsOwner("") (a caller who owns nothing and may see no private
+	// page at all). Collapsing the two would either break single-user
+	// surfaces or silently unhide private pages from anonymous callers,
+	// depending on which way the zero value fell.
+	viewer *kb.Viewer
 }
 
 // PageRef is a page together with the collection it came from.
@@ -469,6 +604,11 @@ func Open(ctx context.Context, resolved []contentsource.ResolvedCollection) (*Re
 			}
 			c.fsys = fsys
 		}
+		// Personal-read visibility is set even when there is no memory:
+		// block (Spec.Visibility answers private for a nil Spec), because
+		// the reserved page-ID prefix means the same thing in every
+		// collection whether or not this one happens to accept writes.
+		c.SetPersonalVisibility(rc.Source.Memory.Visibility())
 		if rc.Source.Memory != nil {
 			store, err := rc.Source.Memory.Open(ctx, rc.Dir)
 			if err != nil {
@@ -577,6 +717,7 @@ func (r *Registry) Restrict(allow func(name string) bool) *Registry {
 		list:    make([]*Collection, 0, len(r.list)),
 		by:      make(map[string]*Collection, len(r.list)),
 		derived: true,
+		viewer:  r.viewer,
 	}
 	for _, c := range r.list {
 		if !allow(c.Name) {
@@ -586,6 +727,42 @@ func (r *Registry) Restrict(allow func(name string) bool) *Registry {
 		out.by[c.Name] = c
 	}
 	return out
+}
+
+// ViewedBy returns a VIEW of r whose reads are performed as v: every
+// page-returning operation below (Pages, Search, Show, and therefore the
+// ambiguity error's count) drops the pages v may not see, before any
+// caller sees a title, a snippet, an ID or a number.
+//
+// It is the per-page counterpart of Restrict, and it is deliberately the
+// same shape: authorization is attached ONCE to a per-request view, and
+// every operation downstream inherits it without knowing it exists.
+// There is no per-operation viewer argument to forget, and no read path
+// on this type that can bypass it — including any added later, so long
+// as it routes through Pages/Search/Show.
+//
+// The two compose in either order: Restrict decides which collections
+// are in view, ViewedBy decides which pages within them are.
+//
+// A registry with no viewer attached reads unrestricted, which is what
+// every surface serving a single principal (the CLI, `mk http serve`)
+// gets by never calling this.
+func (r *Registry) ViewedBy(v kb.Viewer) *Registry {
+	out := &Registry{
+		list:    r.list,
+		by:      r.by,
+		derived: true,
+		viewer:  &v,
+	}
+	return out
+}
+
+// viewer returns the viewer in force for reads through this registry.
+func (r *Registry) viewerOf() kb.Viewer {
+	if r.viewer == nil {
+		return kb.Unfiltered()
+	}
+	return *r.viewer
 }
 
 // target resolves a collection argument to the collections to act on:
@@ -737,15 +914,17 @@ func (r *Registry) Ready() (bool, []Health) {
 }
 
 // Pages returns the pages of the named collection, or of every
-// collection in configuration order when collection is empty.
+// collection in configuration order when collection is empty — as seen
+// by this view's viewer (see ViewedBy).
 func (r *Registry) Pages(collection string) ([]PageRef, error) {
 	targets, err := r.target(collection)
 	if err != nil {
 		return nil, err
 	}
+	v := r.viewerOf()
 	var out []PageRef
 	for _, c := range targets {
-		pages, err := c.Pages()
+		pages, err := c.PagesFor(v)
 		if err != nil {
 			return nil, fmt.Errorf("collection %q: %w", c.Name, err)
 		}
@@ -775,13 +954,20 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 	for i, c := range r.list {
 		order[c.Name] = i
 	}
+	v := r.viewerOf()
 	var out []Hit
 	for _, c := range targets {
 		idx, err := c.Index()
 		if err != nil {
 			return nil, fmt.Errorf("collection %q: %w", c.Name, err)
 		}
-		results, err := idx.QueryContext(ctx, query, limit)
+		// The viewer goes INTO the query, not over its results. Each
+		// collection is asked for its best `limit` documents that this
+		// caller may see, so a collection full of somebody else's private
+		// memories contributes its best visible hits rather than
+		// contributing nothing — which is what a post-filter over the
+		// per-collection top-N would do, and it would do it invisibly.
+		results, err := idx.QueryAs(ctx, c.viewerFor(v), query, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -830,6 +1016,11 @@ func (r *Registry) SplitQualified(id string) (collection, pageID string) {
 // configuration order: exactly one match is returned, several is an
 // error wrapping ErrAmbiguous that lists the qualified IDs to pick
 // from, and none is kb.ErrNotFound.
+//
+// "Match" means "match this view's viewer can see". A page hidden by
+// per-page visibility is not counted, not named in the ambiguity error,
+// and not distinguishable from a page that was never written — the same
+// property Restrict gives a hidden collection, one level down.
 func (r *Registry) Show(collection, id string) (PageRef, error) {
 	qualified, pageID := r.SplitQualified(id)
 	switch {
@@ -843,9 +1034,14 @@ func (r *Registry) Show(collection, id string) (PageRef, error) {
 	if err != nil {
 		return PageRef{}, err
 	}
+	v := r.viewerOf()
 	var found []PageRef
 	for _, c := range targets {
-		page, err := c.Load(pageID)
+		// LoadFor, so a page this caller may not see is not merely
+		// withheld — it is not FOUND. That is what keeps the ambiguity
+		// error below from counting invisible pages, and what makes a
+		// guessed private ID answer exactly as a fictional one.
+		page, err := c.LoadFor(v, pageID)
 		if errors.Is(err, kb.ErrNotFound) {
 			continue
 		}

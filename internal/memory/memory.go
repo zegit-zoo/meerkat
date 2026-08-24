@@ -16,6 +16,20 @@
 // blocked by a check that could be forgotten; there is simply no input
 // path from the request to the namespace.
 //
+// # Reading, not just writing
+//
+// The namespace decides who may READ a personal memory as well as who
+// wrote it. A personal memory is visible to the principal whose
+// namespace it is in and to nobody else: absent from another caller's
+// search, list and show, absent from the count in an ambiguity error,
+// and answered exactly as a page that does not exist. That is enforced
+// one layer up, by internal/kb's Viewer and the visibility clause
+// internal/search puts in every restricted query — this package's part
+// is that the namespace is in the page ID, so the owner travels with
+// the document and cannot be claimed by its bytes. An operator who
+// needs the old, collection-wide behaviour asks for it by name:
+// `personal_visibility: collection` (see Spec).
+//
 // # Layout
 //
 // A store is a directory (or a GCS prefix) that is NOT part of the
@@ -52,7 +66,9 @@ import (
 type Scope string
 
 const (
-	// ScopePersonal writes into the caller's own namespace. Requires
+	// ScopePersonal writes into the caller's own namespace, and is
+	// readable by that principal alone (unless the collection opts into
+	// Spec.PersonalVisibility == VisibilityCollection). Requires
 	// authz.CapPersonalWrite.
 	ScopePersonal Scope = "personal"
 	// ScopeTeam writes into the collection's shared team space. Requires
@@ -114,6 +130,15 @@ const StagingPrefix = "_staging"
 // Keeping memories under one reserved prefix is what lets a reader tell
 // a saved memory from an ingested wiki page at a glance, and what makes
 // `mk_list --prefix memory/` a listing of exactly the memories.
+//
+// For personal memories it is load-bearing in a second way: the ID it
+// produces, "memory/personal/<namespace>/<slug>", is what every read
+// surface derives the document's OWNER from (kb.PrivateOwner). The
+// namespace is identity-derived and no caller input reaches it, so the
+// ID is an unforgeable carrier for "whose memory is this" — which is why
+// visibility is read off the ID rather than off a frontmatter field the
+// document's own bytes could claim. kb.PrivatePrefix is the other half
+// of that agreement, and memory_test.go pins the two together.
 const PageIDPrefix = "memory"
 
 // anonymousNamespace is the personal namespace used when there is no

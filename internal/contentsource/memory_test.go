@@ -60,8 +60,62 @@ func TestParseConfig_MemoryBlockOnASingleSource(t *testing.T) {
 	}
 }
 
+// TestParseConfig_PersonalVisibility covers the read-policy key: that
+// it parses, that omitting it is the SECURE answer rather than a
+// missing one, and that an unrecognised value fails the process at load
+// time instead of being ignored.
+func TestParseConfig_PersonalVisibility(t *testing.T) {
+	cfg, err := parseConfig([]byte(`
+collections:
+  - name: notes
+    type: local
+    path: ../notes
+    memory:
+      type: local
+      path: /srv/notes-memory
+      personal_visibility: collection
+  - name: shared
+    type: local
+    path: ../shared
+    memory:
+      type: local
+      path: /srv/shared-memory
+      personal_visibility: private
+  - name: quiet
+    type: local
+    path: ../quiet
+    memory:
+      type: local
+      path: /srv/quiet-memory
+  - name: archive
+    type: local
+    path: ../archive
+`), "content-source.yaml")
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	for i, want := range []string{
+		memory.VisibilityCollection,
+		memory.VisibilityPrivate,
+		// Omitted: private, so a memory: block written before the key
+		// existed keeps personal memories private without being edited.
+		memory.VisibilityPrivate,
+		// No memory: block at all: private too.
+		memory.VisibilityPrivate,
+	} {
+		if got := cfg.Collections[i].Memory.Visibility(); got != want {
+			t.Errorf("collections[%d] (%s) visibility = %q, want %q",
+				i, cfg.Collections[i].Name, got, want)
+		}
+	}
+}
+
 func TestParseConfig_MemoryValidationRunsAtLoadTime(t *testing.T) {
 	for name, tc := range map[string]struct{ body, want string }{
+		"unknown personal_visibility": {
+			"content:\n  type: local\n  path: kb\n  memory:\n    type: local\n    personal_visibility: public\n",
+			"personal_visibility must be private or collection",
+		},
 		"no type": {
 			"content:\n  type: local\n  path: kb\n  memory:\n    path: m\n",
 			"memory.type is required",

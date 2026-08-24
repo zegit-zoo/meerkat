@@ -76,7 +76,7 @@ func TestTools_SingleCollectionDescriptionsStayQuiet(t *testing.T) {
 func TestSearchHandler_CollectionArgumentNarrows(t *testing.T) {
 	reg := multiRegistry(t)
 
-	all, err := searchHandler(reg)(context.Background(), callTool(map[string]any{"query": "incidents"}))
+	all, err := searchHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{"query": "incidents"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestSearchHandler_CollectionArgumentNarrows(t *testing.T) {
 		t.Errorf("omitting collection should span all, reached %v", seen)
 	}
 
-	one, err := searchHandler(reg)(context.Background(), callTool(map[string]any{"query": "incidents", "collection": "runbooks"}))
+	one, err := searchHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{"query": "incidents", "collection": "runbooks"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestSearchHandler_CollectionArgumentNarrows(t *testing.T) {
 }
 
 func TestSearchHandler_UnknownCollectionIsToolError(t *testing.T) {
-	res, err := searchHandler(multiRegistry(t))(context.Background(),
+	res, err := searchHandler(multiRegistry(t), stdioTransport())(context.Background(),
 		callTool(map[string]any{"query": "x", "collection": "nope"}))
 	if err != nil {
 		t.Fatalf("handler returned a transport error: %v", err)
@@ -115,7 +115,7 @@ func TestSearchHandler_UnknownCollectionIsToolError(t *testing.T) {
 
 func TestListHandler_CollectionArgumentNarrows(t *testing.T) {
 	reg := multiRegistry(t)
-	res, err := listHandler(reg)(context.Background(), callTool(map[string]any{"collection": "architecture"}))
+	res, err := listHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{"collection": "architecture"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestListHandler_CollectionArgumentNarrows(t *testing.T) {
 // the model something it can retry with, not a transport failure.
 func TestShowHandler_AmbiguousIsAnActionableToolError(t *testing.T) {
 	reg := multiRegistry(t)
-	res, err := showHandler(reg)(context.Background(), callTool(map[string]any{"id": "shared/overview"}))
+	res, err := showHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{"id": "shared/overview"}))
 	if err != nil {
 		t.Fatalf("handler returned a transport error: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestShowHandler_AmbiguousIsAnActionableToolError(t *testing.T) {
 func TestShowHandler_QualifiedIDAndCollectionArgumentBothResolve(t *testing.T) {
 	reg := multiRegistry(t)
 
-	byQualified, err := showHandler(reg)(context.Background(), callTool(map[string]any{"id": "architecture:shared/overview"}))
+	byQualified, err := showHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{"id": "architecture:shared/overview"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestShowHandler_QualifiedIDAndCollectionArgumentBothResolve(t *testing.T) {
 		t.Errorf("qualified id resolved to %v", got)
 	}
 
-	byArg, err := showHandler(reg)(context.Background(), callTool(map[string]any{"id": "shared/overview", "collection": "runbooks"}))
+	byArg, err := showHandler(reg, stdioTransport())(context.Background(), callTool(map[string]any{"id": "shared/overview", "collection": "runbooks"}))
 	if err != nil {
 		t.Fatalf("handler: %v", err)
 	}

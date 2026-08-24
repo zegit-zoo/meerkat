@@ -156,6 +156,32 @@ content:
   #   # replicas can share one store and still never lose a write.
   #   # Grant storage.objects.get/list/create/delete on the prefix.
   #
+  #   # --- who may READ a personal memory ---------------------------------
+  #   personal_visibility: private   # private (DEFAULT) | collection
+  #
+  #   # private (the default, and what a block that omits this key gets):
+  #   #   a personal memory is readable ONLY by the principal who saved it,
+  #   #   identified by the verified OIDC (iss, sub) pair its namespace was
+  #   #   derived from. To every other caller — including holders of `read`
+  #   #   on this collection, including `admin` — it is not refused, it is
+  #   #   ABSENT: missing from mk_search, mk_list and the page counts, and
+  #   #   mk_show answers a guessed ID exactly as it answers an ID nobody
+  #   #   ever wrote. Ownership follows (iss, sub) only, so changing email,
+  #   #   groups or tenant never moves a memory.
+  #   #
+  #   # collection:
+  #   #   the pre-#27 behaviour — every reader of this collection can read
+  #   #   every personal memory in it, and `personal` describes only who may
+  #   #   WRITE. Configuring this alongside auth.providers logs a startup
+  #   #   WARNING naming the collection: under OIDC meerkat knows exactly
+  #   #   whose each memory is and has been told to show it to everyone
+  #   #   anyway. Use it only if a deployment genuinely relied on that.
+  #   #
+  #   # team and global memories are unaffected either way: both are
+  #   # readable by every reader of the collection, as they always were.
+  #   # Locally (mk search/list/show, and stdio `mk mcp serve`) there is one
+  #   # user who owns their own memories, so nothing changes.
+  #
   # Who may write what is the auth: block's business (see the bottom of this
   # file): personal-write / team-write / global-write, per collection. An
   # unauthorized team or global write becomes a pending artifact under
@@ -336,6 +362,8 @@ content:
 #       type: gcs
 #       bucket: my-org-knowledge
 #       prefix: notes/memory/
+#       # personal_visibility defaults to `private`: a personal memory is
+#       # readable only by the principal who saved it.
 #
 #   - name: vendor-docs
 #     type: url
@@ -421,7 +449,10 @@ content:
 #   # team or global write by someone who holds a DIFFERENT write
 #   # capability is staged for review rather than refused.
 #   #
-#   # `admin` implies every capability, including ones added later.
+#   # `admin` implies every capability, including ones added later. It does
+#   # NOT confer read access to another principal's PERSONAL memories:
+#   # capabilities are held over a collection, and ownership is not a
+#   # capability. See memory.personal_visibility above.
 #   rules:
 #     - name: sre
 #       groups: [sre, oncall]
