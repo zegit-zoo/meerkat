@@ -136,6 +136,38 @@ jobs:
           labels: |
             org.opencontainers.image.licenses=Apache-2.0
 
+      # Guards the published-tag contract documented in
+      # docs/CONTAINER.md / README.md / docs/RELEASE.md: a vX.Y.Z git
+      # tag must publish exactly the three image aliases X.Y.Z, X.Y,
+      # and latest — no leading `v`. Fails loudly (rather than
+      # silently pushing an undocumented tag set) if metadata-action's
+      # `tags` output ever changes shape upstream. Dependency-free
+      # shell only — no jq/yq.
+      - name: Assert computed image tags match the documented contract
+        env:
+          COMPUTED_TAGS: ${{ steps.meta.outputs.tags }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          version="${REF_NAME#v}"
+          major_minor="${version%.*}"
+          image="ghcr.io/zegit-zoo/meerkat"
+
+          expected="$(printf '%s:%s\n%s:%s\n%s:latest' "$image" "$version" "$image" "$major_minor" "$image")"
+
+          if [ "$COMPUTED_TAGS" != "$expected" ]; then
+            echo "::error::docker/metadata-action produced a tag set that no longer matches the documented contract (docs/CONTAINER.md, README.md, docs/RELEASE.md)."
+            echo "expected:"
+            echo "$expected"
+            echo "got:"
+            echo "$COMPUTED_TAGS"
+            exit 1
+          fi
+
+          echo "Computed image tags match the documented contract:"
+          echo "$COMPUTED_TAGS"
+
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
 
