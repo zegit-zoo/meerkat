@@ -274,7 +274,9 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	if cfg.Auth != nil {
 		metadataURL = authn.MetadataURL(cfg.Auth.Resource)
 	}
-	s.gate = authn.NewGate(verifier, metadataURL, authn.WithDenyHook(s.onDeny))
+	s.gate = authn.NewGate(verifier, metadataURL,
+		authn.WithDenyHook(s.onDeny),
+		authn.WithAnonymousHook(s.onAnonymous))
 
 	hooks := &mcpserver.Hooks{}
 	hooks.AddOnRegisterSession(func(context.Context, mcpserver.ClientSession) {
@@ -285,12 +287,18 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	})
 
 	// AllowAnonymousPersonal is deliberately false on this transport,
-	// including under allow_unauthenticated: a hosted server that cannot
-	// name its caller must not let them write into a personal namespace,
-	// because every anonymous caller would share the same one — and, by
-	// the same token, must not let them READ one either. An anonymous
-	// caller here owns nothing, so they see every public page and no
-	// personal memory at all (see transportOptions.viewer).
+	// including under allow_unauthenticated and including for a caller
+	// admitted by an `anonymous: true` rule (#36): a hosted server that
+	// cannot name its caller must not let them write into a personal
+	// namespace, because every anonymous caller would share the same one
+	// — and, by the same token, must not let them READ one either. An
+	// anonymous caller here owns nothing, so they see every public page
+	// and no personal memory at all (see transportOptions.viewer).
+	//
+	// Publishing a COLLECTION to anonymous callers does not move this
+	// line and cannot: ownership is a property of who the caller is, and
+	// an anonymous caller is still nobody. Their grants are read-only by
+	// validation, so they are not offered the memory tool at all.
 	mcpSrv := newServer(reg, transportOptions{},
 		mcpserver.WithHooks(hooks),
 		// The per-request tool filter is what keeps tools/list from
@@ -483,7 +491,18 @@ func (s *HostedServer) EndpointPath() string { return s.cfg.EndpointPath }
 // AuthEnabled reports whether OIDC bearer authentication is in force.
 // It is false both when no auth: block is configured at all and when
 // one sets allow_unauthenticated — in either case no token is checked.
+//
+// It stays true when the policy also publishes collections to anonymous
+// callers: those are a carve-out INSIDE an authenticated deployment, not
+// a different posture. Ask AnonymousEnabled for the carve-out.
 func (s *HostedServer) AuthEnabled() bool { return s.auth != nil && len(s.auth.Providers) > 0 }
+
+// AnonymousEnabled reports whether any policy rule publishes
+// collections to callers with no bearer token. It is what the startup
+// banner says out loud, because "this server answers unauthenticated
+// requests" is not something an operator should have to infer from a
+// config file they wrote months ago.
+func (s *HostedServer) AnonymousEnabled() bool { return s.auth.HasAnonymousRules() }
 
 // ServeStreamableHTTP builds a hosted server from cfg and serves it
 // until ctx is cancelled — the Streamable HTTP counterpart of
@@ -729,9 +748,18 @@ func (s *HostedServer) handleRoot(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "  %-34s readiness probe\n", ReadinessPath)
 	fmt.Fprintf(w, "  %-34s Prometheus metrics\n", MetricsPath)
 	fmt.Fprintln(w, "")
-	if s.AuthEnabled() {
+	switch {
+	case s.AuthEnabled() && s.AnonymousEnabled():
+		// No count and no names: this page is unauthenticated, and the
+		// mounted set is not public information. That selected collections
+		// are published is a fact about the deployment's posture; WHICH
+		// ones is for mk_list_collections, which answers each caller with
+		// their own set.
+		fmt.Fprintln(w, "Authentication: OIDC bearer token required on the MCP endpoint,")
+		fmt.Fprintln(w, "except for selected collections published to unauthenticated callers.")
+	case s.AuthEnabled():
 		fmt.Fprintln(w, "Authentication: OIDC bearer token required on the MCP endpoint.")
-	} else {
+	default:
 		fmt.Fprintln(w, "Authentication: none configured — every mounted collection is readable by any caller.")
 	}
 }
@@ -787,9 +815,19 @@ func (s *HostedServer) accessLog(next http.Handler) http.Handler {
 			attrs = append(attrs, "mcp_session", sid)
 		}
 		if id, ok := holder.get(); ok {
-			attrs = append(attrs, "sub", id.Subject, "issuer", id.Issuer)
-			if id.Tenant != "" {
-				attrs = append(attrs, "tenant", id.Tenant)
+			if id.Subject == "" {
+				// An admitted ANONYMOUS request (#36). It gets a bounded
+				// classification and nothing else: no sub, no issuer, no
+				// tenant — not even empty ones. There is no identity here,
+				// and a log line that printed `"sub":""` would be inventing
+				// a principal that does not exist, which is exactly the
+				// thing an audit trail must not do.
+				attrs = append(attrs, "auth", string(authn.ReasonAnonymous))
+			} else {
+				attrs = append(attrs, "sub", id.Subject, "issuer", id.Issuer)
+				if id.Tenant != "" {
+					attrs = append(attrs, "tenant", id.Tenant)
+				}
 			}
 		}
 		attrs = append(attrs, s.tel.LogAttrs(r.Context())...)
@@ -837,6 +875,13 @@ const identityHolderKey ctxKey = iota
 // captureIdentity records the authenticated identity for the access
 // log. It sits directly below the authentication gate, so by the time
 // it runs the grants are in the request context.
+//
+// An anonymous admission (#36) also installs grants — over an Identity
+// with no subject — so the holder is set with a zero identity and the
+// access log renders that as one bounded field rather than as a set of
+// empty identity fields. A request with NO grants at all (no auth: block
+// configured, or allow_unauthenticated) leaves the holder untouched and
+// the log line exactly as it always was.
 func captureIdentity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h, ok := r.Context().Value(identityHolderKey).(*identityHolder); ok {
@@ -858,6 +903,24 @@ func (s *HostedServer) onDeny(r *http.Request, reason authn.Reason, err error) {
 	}
 	attrs = append(attrs, s.tel.LogAttrs(r.Context())...)
 	s.log.Warn("mcp.auth_denied", attrs...)
+}
+
+// onAnonymous records a request admitted without a token, on the
+// strength of the policy's anonymous rules.
+//
+// It is Debug, not Warn: on a deployment that publishes a collection,
+// anonymous traffic is the intended traffic and a per-request warning
+// would be noise an operator learns to ignore. The line is here at all
+// so that "who reached the public collections" is answerable from the
+// same stderr as everything else — the ACCESS log below carries the same
+// classification on every request, this one just makes the gate's own
+// decision greppable. Neither invents an identity: there is none.
+func (s *HostedServer) onAnonymous(r *http.Request, reason authn.Reason) {
+	s.metrics.authAnonymous.Inc()
+	attrs := append([]any{
+		"outcome", string(reason), "path", r.URL.Path, "remote", clientIP(r),
+	}, s.tel.LogAttrs(r.Context())...)
+	s.log.Debug("mcp.auth_anonymous", attrs...)
 }
 
 // statusRecorder captures the status and byte count for the access log.

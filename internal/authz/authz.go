@@ -29,6 +29,17 @@
 // admin implies all of them. Every capability is enforced: see
 // internal/mcp/memory.go for the write side and docs/design/memory.md
 // for the scope->capability table.
+//
+// # The anonymous principal
+//
+// A rule may carry `anonymous: true`, which publishes its collections to
+// the caller who presented no token at all. That caller is NOT a special
+// case downstream: Policy.EvaluateAnonymous synthesizes ordinary Grants
+// over an Identity with no subject, and every surface above filters,
+// enumerates and refuses by the code it already had. What is special is
+// only which rules are eligible — anonymous rules contribute to
+// everybody, and no other rule contributes to the anonymous principal.
+// See Rule.Anonymous and docs/design/hosted-mcp.md.
 package authz
 
 import (

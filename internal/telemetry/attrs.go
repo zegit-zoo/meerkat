@@ -57,7 +57,19 @@ const (
 	// does not. See the package comment.
 
 	// KeyAuthnResult is why the gate let a request through or did not:
-	// ok | missing_token | invalid_token | no_grants | disabled.
+	// ok | anonymous | missing_token | invalid_token | no_grants |
+	// disabled.
+	//
+	// `anonymous` (#36) is the one admitted-without-a-token value: the
+	// request carried no Authorization header and the policy publishes
+	// at least one collection to unauthenticated callers, so it proceeds
+	// with the synthesized anonymous grants. It is a sixth value in a
+	// closed set of six — the same bounded discipline the rest of this
+	// file states, and deliberately NOT a new key, a new dimension, or
+	// anything that could carry which collections were published.
+	//
+	// It is emphatically not reachable from a token that failed to
+	// verify: see internal/authn.Gate.Middleware.
 	KeyAuthnResult = attribute.Key("meerkat.authn.result")
 	// KeyAuthnProviders is how many OIDC providers were configured — a
 	// count, so a "which issuer" question is answerable as "there is

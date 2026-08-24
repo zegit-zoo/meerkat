@@ -211,7 +211,9 @@ Streamable HTTP transport, with concurrent sessions, plus:
 
 With **no `auth:` block configured** it is unauthenticated and serves every
 mounted collection to any caller — the same posture as `mk mcp serve`, just
-over HTTP. Bind loopback (the default) or put a gateway in front.
+over HTTP. Bind loopback (the default) or put a gateway in front. With one
+configured, every collection needs a token unless it is
+[explicitly published](#publishing-a-collection-to-unauthenticated-callers).
 
 ### Authentication and per-collection authorization
 
@@ -256,6 +258,41 @@ Capabilities are `read`, `personal-write`, `team-write`, `global-write` and
 `admin`. `read` decides visibility; the three write capabilities gate
 [`mk_save_memory`](#memory-mk_save_memory), one per scope; `admin` implies
 every capability, including ones a later meerkat adds — grant it sparingly.
+
+#### Publishing a collection to unauthenticated callers
+
+Selected collections can be served to callers with **no token at all** —
+a handbook, a published policy set — while everything else on the same
+endpoint keeps requiring one. Add an `anonymous: true` rule:
+
+```yaml
+  rules:
+    - name: public-handbook
+      anonymous: true
+      collections: [handbook, published-policies]
+      capabilities: [read]        # anonymous rules are read-only
+```
+
+- **Explicit only.** With no such rule, a token-less request gets the
+  same `401` it always did. A rule with *no* selector still means "every
+  **authenticated** caller", so existing policies publish nothing.
+- **Read-only.** Write capabilities on an anonymous rule fail the process
+  at load. An anonymous caller is offered no write tool and owns no
+  personal memories.
+- **Everything else stays invisible**, not denied — a guessed page ID, a
+  `<collection>:<id>` qualification and an ambiguity count all answer as
+  if the collection were never mounted.
+- **Authenticated callers get it too**, unioned with their own rules, so
+  a published collection never needs restating.
+- **A bad token is still `401`.** Expired, forged or malformed tokens are
+  never silently downgraded to anonymous access.
+- Cannot be combined with `allow_unauthenticated`, which publishes
+  *everything*; the combination is refused at load.
+
+A published collection is an **intentional disclosure surface**: its
+pages, IDs, frontmatter and its `update:` contract — including a
+`merge-request` repo URL — are readable by anyone who can reach the
+endpoint. See [docs/SECURITY.md](docs/SECURITY.md#published-collections-are-an-intentional-disclosure-surface).
 
 Full schema: [content-source.example.yaml](content-source.example.yaml).
 Design and threat reasoning: [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md).

@@ -28,6 +28,16 @@ const (
 	// matched, so it holds no capability over any collection: it may
 	// neither read nor write anything.
 	ReasonNoGrants Reason = "no_grants"
+	// ReasonAnonymous — no bearer token, and the policy publishes at
+	// least one collection to unauthenticated callers, so the request
+	// was ADMITTED with the synthesized anonymous grants.
+	//
+	// It is the one value here that is not a refusal. It shares the type
+	// so that "how did the gate classify this request" has one bounded
+	// vocabulary for a metric, a span and a log line to agree on — and it
+	// is deliberately never handed to the deny path or to the
+	// auth-FAILURES counter.
+	ReasonAnonymous Reason = "anonymous"
 )
 
 // MetadataPath is the RFC 9728 well-known path for OAuth 2.0 Protected
@@ -45,6 +55,9 @@ type Gate struct {
 	metadataURL string
 	// onDeny is called for every refusal, for metrics/logging. Optional.
 	onDeny func(r *http.Request, reason Reason, err error)
+	// onAnonymous is called for every request admitted WITHOUT a token,
+	// on the strength of the policy's anonymous rules. Optional.
+	onAnonymous func(r *http.Request, reason Reason)
 }
 
 // GateOption configures a Gate.
@@ -53,6 +66,16 @@ type GateOption func(*Gate)
 // WithDenyHook registers a callback invoked on every refused request.
 func WithDenyHook(fn func(r *http.Request, reason Reason, err error)) GateOption {
 	return func(g *Gate) { g.onDeny = fn }
+}
+
+// WithAnonymousHook registers a callback invoked on every request
+// admitted as the anonymous principal. It is separate from the deny
+// hook because an admitted request is not a failure and must not land
+// in a failure counter, and separate from ordinary success because an
+// operator publishing collections to the internet wants that traffic
+// countable on its own.
+func WithAnonymousHook(fn func(r *http.Request, reason Reason)) GateOption {
+	return func(g *Gate) { g.onAnonymous = fn }
 }
 
 // NewGate builds the authentication gate for a verifier. metadataURL is
@@ -78,11 +101,14 @@ func NewGate(v *Verifier, metadataURL string, opts ...GateOption) *Gate {
 //
 // Otherwise:
 //
-//	no token          -> 401, WWW-Authenticate: Bearer resource_metadata=...
-//	token won't verify-> 401, ... error="invalid_token"
-//	verifies, no rule -> 403 (the caller exists and holds no capability
-//	                     at all; this says nothing about what exists)
-//	verifies, matched -> next, with *authz.Grants in the context
+//	no header, anon rules -> next, with the ANONYMOUS grants in context
+//	no header, none       -> 401, WWW-Authenticate: Bearer resource_metadata=...
+//	unusable header       -> 401, as above (an attempted credential is not
+//	                         an absent one, whatever the policy publishes)
+//	token won't verify    -> 401, ... error="invalid_token"
+//	verifies, no rule     -> 403 (the caller exists and holds no capability
+//	                         at all; this says nothing about what exists)
+//	verifies, matched     -> next, with *authz.Grants in the context
 //
 // The 403 case is worth being precise about: it is a statement about
 // the CALLER, not about the collections. It leaks nothing, because the
@@ -95,6 +121,28 @@ func NewGate(v *Verifier, metadataURL string, opts ...GateOption) *Gate {
 // capability-agnostic, so a principal granted only `personal-write`
 // passes the gate and reaches the memory tool, even though every read
 // surface will show them an empty registry.
+//
+// # A BAD token is never downgraded to anonymous
+//
+// The anonymous branch is reachable only from "no Authorization header
+// at all". A token that is expired, malformed, forged, or minted for
+// another audience gets 401 whether or not the policy publishes
+// anything — including when the anonymous grants would have been WIDER
+// than what the 401 gives. Two reasons, and both are worth the
+// inconvenience:
+//
+//   - an expiry that silently degrades into partial data is an outage
+//     nobody sees. The client keeps working, keeps getting answers, and
+//     the answers keep quietly missing the collections the caller is
+//     actually entitled to.
+//   - the 401 + WWW-Authenticate challenge is the ONLY thing that tells
+//     a client to go and refresh its token. Answering 200 to a bad token
+//     removes the signal that would have fixed it.
+//
+// So the ordering below is load-bearing: the token is extracted first,
+// and the anonymous path is entered only when there was nothing to
+// verify.
+//
 // # What the two spans say, and what they must not
 //
 // Verification and the policy decision each get a span, because they
@@ -122,6 +170,31 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 
 		raw := BearerToken(r)
 		if raw == "" {
+			// No usable token: the ONE place anonymous grants can be
+			// reached — and only when the caller sent NO Authorization
+			// header at all.
+			//
+			// `Authorization: Bearer ` with nothing after it, or a scheme
+			// meerkat does not accept, is a caller who ATTEMPTED to
+			// authenticate and whose credential meerkat could not use. That
+			// is a broken client or a truncated token, and it keeps the 401
+			// it has always had: admitting it as anonymous would be the
+			// same silent downgrade an expired token is refused for, just
+			// arriving through a shorter path.
+			//
+			// The grants are computed and checked for emptiness rather than
+			// trusted from a flag: a policy whose anonymous rules grant
+			// nothing is the same as no anonymous rules at all, and must
+			// still 401.
+			if r.Header.Get("Authorization") == "" {
+				if anon := g.verifier.Policy().EvaluateAnonymous(); !anon.Empty() {
+					span.SetAttributes(telemetry.KeyAuthnResult.String(string(ReasonAnonymous)),
+						telemetry.Outcome(telemetry.OutcomeOK))
+					span.End()
+					g.admitAnonymous(next, w, r, anon)
+					return
+				}
+			}
 			span.SetAttributes(telemetry.KeyAuthnResult.String(string(ReasonMissingToken)))
 			telemetry.Fail(span, string(ReasonMissingToken))
 			g.deny(w, r, http.StatusUnauthorized, ReasonMissingToken, "invalid_request",
@@ -163,6 +236,37 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 		decision.End()
 		next.ServeHTTP(w, r.WithContext(authz.NewContext(ctx, grants)))
 	})
+}
+
+// admitAnonymous lets a token-less request through with the policy's
+// anonymous grants.
+//
+// It records the SAME authorization-decision span an authenticated
+// request gets, with the same two attributes, so a trace of an anonymous
+// call is shaped like every other call rather than being a hole where
+// the decision should be. Both attributes stay bounded: a boolean and a
+// count, never a collection name.
+//
+// The grants installed here are ordinary *authz.Grants over an
+// Identity{} with no subject — which is precisely what
+// internal/memory.Anonymous already recognises and refuses personal
+// writes for, and what internal/mcp's viewer already resolves to "owns
+// nothing". No downstream surface learns that this request took a
+// different route to its grants, and none of them needs to.
+func (g *Gate) admitAnonymous(next http.Handler, w http.ResponseWriter, r *http.Request, grants *authz.Grants) {
+	ctx, decision := telemetry.Span(r.Context(), telemetry.SpanAuthzDecide,
+		telemetry.KeyAuthzRules.Int(g.verifier.Policy().Len()))
+	decision.SetAttributes(
+		telemetry.KeyAuthzGranted.Bool(true),
+		telemetry.KeyAuthzCollections.Int(grants.Len()),
+		telemetry.KeyAuthnResult.String(string(ReasonAnonymous)),
+		telemetry.Outcome(telemetry.OutcomeOK),
+	)
+	decision.End()
+	if g.onAnonymous != nil {
+		g.onAnonymous(r, ReasonAnonymous)
+	}
+	next.ServeHTTP(w, r.WithContext(authz.NewContext(ctx, grants)))
 }
 
 // deny writes an RFC 6750 §3 challenge and a small JSON body.

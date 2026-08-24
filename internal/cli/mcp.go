@@ -138,6 +138,24 @@ global memory a caller may not write is saved as a pending review
 artifact under the store's _staging/ prefix, which is never indexed or
 served. See docs/design/memory.md.
 
+Selected collections can be published to callers with NO token at all,
+with an "anonymous: true" rule:
+
+  rules:
+    - name: public-handbook
+      anonymous: true
+      collections: [handbook]
+      capabilities: [read]         # anonymous rules are read-only
+
+Everything else still requires a verified token. An anonymous caller
+sees exactly the published collections and nothing else — the rest stay
+indistinguishable from collections this deployment never mounted — and
+is offered no write tool and owns no personal memories. A token that is
+present but expired, malformed or forged is still 401: it is NEVER
+downgraded to anonymous access, because an expiry that silently degrades
+into partial data is an outage nobody sees. Cannot be combined with
+allow_unauthenticated.
+
 With NO auth: block configured the server is unauthenticated and every
 mounted collection is readable by any caller — the same posture as
 'mcp serve'. Bind loopback (the default) or put a gateway in front.
@@ -204,7 +222,10 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 
 			err := mcp.ServeStreamableHTTP(ctx, cfg, func(s *mcp.HostedServer) {
 				mode := "none (every mounted collection is public to any caller)"
-				if s.AuthEnabled() {
+				switch {
+				case s.AuthEnabled() && s.AnonymousEnabled():
+					mode = "oidc + anonymous access to the collections published by an 'anonymous: true' rule"
+				case s.AuthEnabled():
 					mode = "oidc"
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(),

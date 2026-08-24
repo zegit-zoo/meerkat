@@ -461,6 +461,11 @@ func TestObservability_AuthDenialLogCarriesTheTraceToo(t *testing.T) {
 // zero-config case, "these specific names still present" for the
 // traffic-driven one.
 var baselineMetricFamilies = []string{
+	// Registered unconditionally by the hosted server's own metrics
+	// struct, exactly as meerkat_auth_failures_total is — it is part of
+	// the CORE surface, not of the opt-in observability one, so a server
+	// with no observability: block still exposes it (at 0). Added by #36.
+	"meerkat_auth_anonymous_total",
 	"meerkat_auth_failures_total",
 	"meerkat_build_info",
 	"meerkat_collections_degraded",
