@@ -209,6 +209,15 @@ const (
 	KeyOutcomeTierReached = attribute.Key("meerkat.outcome.tier_reached")
 	KeyOutcomeHasQuality  = attribute.Key("meerkat.outcome.has_quality")
 
+	// --- cache and lazy mounts (issue E) -------------------------------
+	//
+	// A mount trigger (lazy | eager | warmstart), a tier number, a byte
+	// count and a cull reason. Never a collection name.
+	KeyMountTrigger = attribute.Key("meerkat.mount.trigger")
+	KeyMountTier    = attribute.Key("meerkat.mount.tier")
+	KeyMountBytes   = attribute.Key("meerkat.mount.bytes")
+	KeyCullReason   = attribute.Key("meerkat.cache.cull_reason")
+
 	// KeyTreeDepth is the deepest knowledge base in a tree deployment
 	// (root = 0); 0 for a flat one. A number, never a name.
 	KeyTreeDepth           = attribute.Key("meerkat.tree.depth")
@@ -242,6 +251,7 @@ const (
 	SpanRefreshPhase     = "meerkat.refresh.phase"
 	SpanReadiness        = "meerkat.readiness"
 	SpanOutcomeReport    = "meerkat.outcome.report"
+	SpanMount            = "meerkat.mount"
 )
 
 // Refresh phase span names. The six steps ReloadContent/ReloadMemory
@@ -286,6 +296,17 @@ const (
 	SourceS3Object  = "s3-object"
 	SourceS3Prefix  = "s3-prefix"
 	SourceOther     = "other"
+)
+
+// Mount triggers and cull reasons — closed sets for KeyMountTrigger,
+// KeyCullReason and the cache metrics' labels.
+const (
+	MountLazy       = "lazy"
+	MountEager      = "eager"
+	MountWarmStart  = "warmstart"
+	CullTemperature = "temperature"
+	CullAge         = "age"
+	CullEvict       = "evict"
 )
 
 // Search planner stages — the closed set KeySearchStage and the

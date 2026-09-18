@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"fmt"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -43,25 +45,32 @@ import (
 // contexts, so Record returns nil and each call below is a nil check
 // and a return.
 type Metrics struct {
-	indexBuilds     *prometheus.CounterVec
-	indexDuration   *prometheus.HistogramVec
-	indexPages      prometheus.Gauge
-	treeDepth       prometheus.Gauge
-	outcomes        *prometheus.CounterVec
-	sourceResolves  *prometheus.CounterVec
-	sourceDuration  *prometheus.HistogramVec
-	sourceCache     *prometheus.CounterVec
-	sourceBytes     *prometheus.CounterVec
-	searches        *prometheus.CounterVec
-	searchDuration  *prometheus.HistogramVec
-	searchResults   prometheus.Histogram
-	ambiguous       prometheus.Counter
-	memorySaves     *prometheus.CounterVec
-	memoryDuration  *prometheus.HistogramVec
-	memoryErrors    *prometheus.CounterVec
-	toolPayload     *prometheus.HistogramVec
-	exportFailures  *prometheus.CounterVec
-	exportSpansDrop prometheus.Counter
+	indexBuilds      *prometheus.CounterVec
+	indexDuration    *prometheus.HistogramVec
+	indexPages       prometheus.Gauge
+	treeDepth        prometheus.Gauge
+	outcomes         *prometheus.CounterVec
+	cacheResident    prometheus.Gauge
+	cacheFill        prometheus.Gauge
+	cacheCollections prometheus.Gauge
+	cacheCulls       *prometheus.CounterVec
+	mounts           *prometheus.CounterVec
+	mountDuration    *prometheus.HistogramVec
+	pathTemperature  prometheus.Histogram
+	sourceResolves   *prometheus.CounterVec
+	sourceDuration   *prometheus.HistogramVec
+	sourceCache      *prometheus.CounterVec
+	sourceBytes      *prometheus.CounterVec
+	searches         *prometheus.CounterVec
+	searchDuration   *prometheus.HistogramVec
+	searchResults    prometheus.Histogram
+	ambiguous        prometheus.Counter
+	memorySaves      *prometheus.CounterVec
+	memoryDuration   *prometheus.HistogramVec
+	memoryErrors     *prometheus.CounterVec
+	toolPayload      *prometheus.HistogramVec
+	exportFailures   *prometheus.CounterVec
+	exportSpansDrop  prometheus.Counter
 }
 
 // Bucket sets. Named so the choice behind each is reviewable.
@@ -111,6 +120,36 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "meerkat_retrieval_outcomes_total",
 			Help: "Retrieval sessions reported through mk_report_outcome, by outcome (found, not_found, gave_up), fallback kind (none, web, source, human) and whether the report itself was recorded (ok, error).",
 		}, []string{"outcome", "fallback", "recorded"}),
+		cacheResident: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "meerkat_cache_resident_bytes",
+			Help: "Estimated bytes held by lazily mounted knowledge bases (page bytes plus an index estimate); eager collections are not counted.",
+		}),
+		cacheFill: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "meerkat_cache_fill_ratio",
+			Help: "meerkat_cache_resident_bytes over cache.max_bytes; 0 when the budget is unbounded. Culling starts at cache.high_watermark.",
+		}),
+		cacheCollections: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "meerkat_collections_resident",
+			Help: "Lazily mounted knowledge bases currently resident.",
+		}),
+		cacheCulls: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "meerkat_cache_cull_total",
+			Help: "Knowledge bases culled from the cache, by reason (temperature: coldest first; age: oldest first traversal; evict: explicit).",
+		}, []string{"reason"}),
+		mounts: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "meerkat_mount_total",
+			Help: "Knowledge-base mounts, by trigger (lazy, eager, warmstart) and outcome (ok, error).",
+		}, []string{"trigger", "outcome"}),
+		mountDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "meerkat_mount_duration_seconds",
+			Help:    "Time to resolve, enumerate and index a knowledge base on mount, by tree tier.",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+		}, []string{"tier"}),
+		pathTemperature: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "meerkat_path_temperature",
+			Help:    "Distribution of collection temperatures (traversals since mount) at each flush.",
+			Buckets: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000},
+		}),
 		treeDepth: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "meerkat_tree_depth",
 			Help: "Deepest knowledge base declared in the tree this process serves (root = 0; 0 for a flat deployment; the hard cap is 5).",
@@ -180,6 +219,7 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 	if reg != nil {
 		reg.MustRegister(
 			m.indexBuilds, m.indexDuration, m.indexPages, m.treeDepth, m.outcomes,
+			m.cacheResident, m.cacheFill, m.cacheCollections, m.cacheCulls, m.mounts, m.mountDuration, m.pathTemperature,
 			m.sourceResolves, m.sourceDuration, m.sourceCache, m.sourceBytes,
 			m.searches, m.searchDuration, m.searchResults, m.ambiguous,
 			m.memorySaves, m.memoryDuration, m.memoryErrors,
@@ -206,6 +246,65 @@ func (m *Metrics) SetIndexedPages(n int) {
 		return
 	}
 	m.indexPages.Set(float64(n))
+}
+
+// Mounted records one knowledge-base mount by trigger, outcome and
+// tier.
+func (m *Metrics) Mounted(trigger, outcome string, tier int, seconds float64) {
+	if m == nil {
+		return
+	}
+	m.mounts.WithLabelValues(boundedTrigger(trigger), outcome).Inc()
+	if outcome == OutcomeOK {
+		m.mountDuration.WithLabelValues(fmt.Sprintf("%d", tier)).Observe(seconds)
+	}
+}
+
+// Culled counts one cache cull by reason.
+func (m *Metrics) Culled(reason string) {
+	if m == nil {
+		return
+	}
+	m.cacheCulls.WithLabelValues(boundedCull(reason)).Inc()
+}
+
+// SetCache publishes the cache's resident bytes, fill ratio and
+// resident collection count.
+func (m *Metrics) SetCache(resident, max int64, collections int) {
+	if m == nil {
+		return
+	}
+	m.cacheResident.Set(float64(resident))
+	if max > 0 {
+		m.cacheFill.Set(float64(resident) / float64(max))
+	} else {
+		m.cacheFill.Set(0)
+	}
+	m.cacheCollections.Set(float64(collections))
+}
+
+// ObserveTemperature records one collection's temperature at a flush.
+func (m *Metrics) ObserveTemperature(t int64) {
+	if m == nil {
+		return
+	}
+	m.pathTemperature.Observe(float64(t))
+}
+
+func boundedTrigger(s string) string {
+	switch s {
+	case MountLazy, MountEager, MountWarmStart:
+		return s
+	}
+	return "other"
+}
+
+func boundedCull(s string) string {
+	switch s {
+	case CullTemperature, CullAge, CullEvict:
+		return s
+	}
+	return "other"
 }
 
 // RetrievalOutcome counts one mk_report_outcome call. outcome and

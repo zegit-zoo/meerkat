@@ -99,6 +99,17 @@ type Collection struct {
 	// a flat one.
 	Tree *contentsource.TreeNode
 
+	// Lazy-mount state (cache.go). cold: declared, not resident. lazy:
+	// may be culled. temperature/firstTraversal/lastTraversal: the
+	// plasticity counters. residentBytes: what this snapshot costs.
+	cold           atomic.Bool
+	lazy           bool
+	mountMu        sync.Mutex
+	temperature    atomic.Int64
+	firstTraversal atomic.Int64
+	lastTraversal  atomic.Int64
+	residentBytes  atomic.Int64
+
 	// snapMu guards snap. A read lock is taken for exactly as long as it
 	// takes to read the pointer and add a reference; the write lock only
 	// by a snapshot swap. See acquire/install in reload.go.
@@ -285,6 +296,11 @@ func (c *Collection) PagesFor(v kb.Viewer) ([]kb.Page, error) {
 // that needs the pages AND the index sees one coherent generation of
 // both.
 func (c *Collection) pagesOf(s *snapshot, v kb.Viewer) ([]kb.Page, error) {
+	if c.IsCold() {
+		// A cold collection has no pages — and must never fall through
+		// to the embedded build a nil filesystem would otherwise mean.
+		return nil, nil
+	}
 	pages, err := c.contentPagesFrom(s.fsys)
 	if err != nil {
 		return nil, err
@@ -426,6 +442,9 @@ func (c *Collection) Load(id string) (kb.Page, error) {
 	norm := strings.TrimSuffix(strings.TrimPrefix(id, "/"), ".md")
 	if p, ok := c.overlayPage(norm); ok {
 		return p, nil
+	}
+	if c.IsCold() {
+		return kb.Page{}, kb.ErrNotFound
 	}
 	if c.byID != nil {
 		p, ok := c.byID[norm]
@@ -703,6 +722,9 @@ type Registry struct {
 	// tree is set when the registry was opened from a `tree:`; see
 	// tree.go. Views read it through base().
 	tree *tree
+	// cache is the lazy-mount budget state (cache.go); root only.
+	cache     *cache
+	cacheOnce sync.Once
 	// derived marks a registry produced by Restrict or ViewedBy: a
 	// per-request VIEW over another registry's collections rather than an
 	// owner of them. Close is a no-op on a derived registry, because the
@@ -837,12 +859,52 @@ func Open(ctx context.Context, resolved []contentsource.ResolvedCollection) (*Re
 		c.Tree = rc.Tree
 		cols = append(cols, c)
 	}
+	// Declared-but-unmounted children become cold collections: named
+	// and placed now, mounted on first request (cache.go).
+	for _, rc := range resolved {
+		if rc.Tree == nil {
+			continue
+		}
+		for _, child := range rc.Tree.Children {
+			if child.Mounted {
+				continue
+			}
+			node := findTreeNode(resolved, child.Name)
+			if node == nil {
+				continue
+			}
+			if src, _ := node.LazySource(); src == nil {
+				continue
+			}
+			cols = append(cols, newColdCollection(node))
+		}
+	}
 	r, err := New(cols...)
 	if err != nil {
 		return nil, err
 	}
 	r.tree = buildTree(resolved)
 	return r, nil
+}
+
+// findTreeNode returns the declared node for name from the resolved
+// collections' tree metadata: a mounted child is a resolved collection,
+// an unmounted one is reachable through its parent's tree.
+func findTreeNode(resolved []contentsource.ResolvedCollection, name string) *contentsource.TreeNode {
+	for _, rc := range resolved {
+		if rc.Tree != nil && rc.Tree.Name == name {
+			return rc.Tree
+		}
+	}
+	for _, rc := range resolved {
+		if rc.Tree == nil {
+			continue
+		}
+		if n, ok := rc.Tree.ChildNode(name); ok {
+			return n
+		}
+	}
+	return nil
 }
 
 // Len reports how many collections are mounted.
@@ -989,6 +1051,10 @@ func (r *Registry) ViewedBy(v kb.Viewer) *Registry {
 }
 
 // viewer returns the viewer in force for reads through this registry.
+// Viewer returns the viewer this registry view filters by (unfiltered
+// for the root).
+func (r *Registry) Viewer() kb.Viewer { return r.viewerOf() }
+
 func (r *Registry) viewerOf() kb.Viewer {
 	if r.viewer == nil {
 		return kb.Unfiltered()
@@ -1004,6 +1070,12 @@ func (r *Registry) viewerOf() kb.Viewer {
 // the whole enforcement mechanism; no operation below re-checks
 // anything.
 func (r *Registry) target(name string) ([]*Collection, error) {
+	return r.targetCtx(context.Background(), name)
+}
+
+// targetCtx is target with a context for a lazy mount: naming a cold
+// collection mounts it under the cold policy (cache.go).
+func (r *Registry) targetCtx(ctx context.Context, name string) ([]*Collection, error) {
 	if name == "" {
 		// In a tree, an unqualified search asks the ROOT hub: it routes,
 		// and its pointer hits name the next hop. A flat deployment
@@ -1017,6 +1089,9 @@ func (r *Registry) target(name string) ([]*Collection, error) {
 	}
 	c, err := r.Get(name)
 	if err != nil {
+		return nil, err
+	}
+	if err := r.ensureMounted(ctx, c); err != nil {
 		return nil, err
 	}
 	return []*Collection{c}, nil
@@ -1084,6 +1159,9 @@ type Health struct {
 	// is a content bug to fix, not an outage.
 	DanglingLinks int      `json:"dangling_links,omitempty"`
 	Warnings      []string `json:"warnings,omitempty"`
+	// Cold marks a lazily mounted collection that is currently not
+	// resident. Ready is true: it will mount on first request.
+	Cold bool `json:"cold,omitempty"`
 }
 
 // contentRootReachable reports whether the collection's content root
@@ -1122,6 +1200,12 @@ func (c *Collection) health(dangling []Dangling) Health {
 
 	h := Health{Name: c.Name}
 	h.DanglingLinks, h.Warnings = linkWarnings(dangling)
+	if c.IsCold() {
+		// Declared, not mounted: nothing to be unready about. It is
+		// mounted on first request (cache.go).
+		h.Ready, h.Cold = true, true
+		return h
+	}
 	pages, err := c.Pages()
 	if err != nil {
 		h.Error = fmt.Sprintf("list pages: %v", err)
@@ -1242,7 +1326,7 @@ func (r *Registry) Pages(collection string) ([]PageRef, error) {
 // isolation this whole abstraction exists to provide. Ties break on
 // configuration order, then page ID, so output is deterministic.
 func (r *Registry) Search(ctx context.Context, collection, query string, limit int) ([]Hit, error) {
-	targets, err := r.target(collection)
+	targets, err := r.targetCtx(ctx, collection)
 	if err != nil {
 		return nil, err
 	}
@@ -1264,6 +1348,7 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 		// memories contributes its best visible hits rather than
 		// contributing nothing — which is what a post-filter over the
 		// per-collection top-N would do, and it would do it invisibly.
+		r.touch(c)
 		results, stage, err := c.searchAs(ctx, v, query, limit)
 		if err != nil {
 			// Classified rather than recorded: the error wraps bleve's own
@@ -1388,6 +1473,7 @@ func (r *Registry) Show(collection, id string) (PageRef, error) {
 		// withheld — it is not FOUND. That is what keeps the ambiguity
 		// error below from counting invisible pages, and what makes a
 		// guessed private ID answer exactly as a fictional one.
+		r.touch(c)
 		page, err := c.LoadFor(v, pageID)
 		if errors.Is(err, kb.ErrNotFound) {
 			continue

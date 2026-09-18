@@ -75,20 +75,14 @@ Guards, all load errors with a message that names the offending path:
 
 ## Cold children
 
-`mount: lazy` (and, once the operator honours it, `placement:
-dedicated`) children are **declared but not mounted**: they appear in
-`mk_list_collections`, `GET /collections` and `mk list --collections`
-with `mounted: false`, no pages and no capabilities, so an agent knows
-the name exists. A search or show that names one fails with
-`collections.ErrColdCollection`, which is also an
-`ErrUnknownCollection`, so every surface that already maps unknown
-collections to a client error keeps working; the message names the
-mount mode and the parent hub to search instead.
-
-Mounting a cold child on first traversal, under a cache budget with
-temperature culling, is **issue E**. A `status: cold` response with an
-ETA belongs there too. Until then a deployment that needs a child
-served marks it `mount: eager`.
+`mount: lazy` children are **declared but not mounted** at startup:
+they appear in `mk_list_collections`, `GET /collections` and `mk list
+--collections` with `mounted: false`, `source: cold` and no pages, so
+an agent knows the name exists. The first request that names one
+mounts it under the cache's cold policy — blocking by default, or an
+immediate `{status: cold, retry_after_ms}` answer with `cold_policy:
+async` — and the resident budget decides how long it stays warm. See
+[docs/design/cache.md](cache.md).
 
 ## What the registry does differently in tree mode
 

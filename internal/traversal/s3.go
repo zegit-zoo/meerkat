@@ -3,6 +3,7 @@ package traversal
 import (
 	"bytes"
 	"context"
+	"io"
 	"path"
 	"strings"
 
@@ -65,6 +66,37 @@ func (s *s3Sink) Days(ctx context.Context) ([]string, error) {
 	}
 	return days, nil
 }
+
+func (s *s3Sink) ReadDay(ctx context.Context, day string) ([][]byte, error) {
+	if !isDay(day) {
+		return nil, nil
+	}
+	var out [][]byte
+	pager := s3.NewListObjectsV2Paginator(s.c, &s3.ListObjectsV2Input{Bucket: aws.String(s.bucket), Prefix: aws.String(s.prefix + day + "/")})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range page.Contents {
+			obj, err := s.c.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: o.Key})
+			if err != nil {
+				return nil, err
+			}
+			b, err := io.ReadAll(io.LimitReader(obj.Body, maxLogObjectBytes))
+			_ = obj.Body.Close()
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
+// maxLogObjectBytes bounds a single log object read back at warm
+// start.
+const maxLogObjectBytes = 4 << 20
 
 func (s *s3Sink) DeleteDay(ctx context.Context, day string) error {
 	if !isDay(day) {

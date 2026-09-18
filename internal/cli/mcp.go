@@ -317,6 +317,7 @@ func outcomeOptions(ctx context.Context) (mcp.OutcomeOptions, error) {
 		}
 		out.Log = log
 	}
+	registry().SetCache(activeCache, out.Log)
 	if spec := activeIntake; spec != nil {
 		store, err := spec.Open(ctx, "")
 		if err != nil {

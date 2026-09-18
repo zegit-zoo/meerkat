@@ -547,17 +547,13 @@ func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
 			e.Pages = len(pages)
 		}
 		if n := c.Tree; n != nil {
-			tier, mounted := n.Depth, true
+			tier, mounted := n.Depth, !c.IsCold()
 			e.Path, e.Tier, e.Parent, e.Children, e.Mounted = n.Path, &tier, n.Parent, n.Children, &mounted
+			if c.IsCold() {
+				e.Source = "cold"
+			}
 		}
 		out = append(out, e)
-	}
-	for _, t := range s.reg.TreeEntries() {
-		if t.Mounted {
-			continue
-		}
-		tier, mounted := t.Depth, false
-		out = append(out, collectionEntry{Name: t.Name, Type: t.SourceType, Source: "unmounted", Path: t.Path, Tier: &tier, Parent: t.Parent, Mounted: &mounted})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

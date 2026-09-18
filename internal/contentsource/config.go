@@ -119,6 +119,9 @@ type Config struct {
 	// local | gcs | s3 — because it is the same kind of writable store,
 	// but it is NOT a collection and is never served or indexed.
 	Intake *memory.Spec `yaml:"intake,omitempty"`
+	// Cache is the resident budget and cold policy for lazily mounted
+	// knowledge bases in a tree: deployment. See cache.go.
+	Cache *CacheSpec `yaml:"cache,omitempty"`
 }
 
 // Collection is one named entry of a `collections:` list — a Source
@@ -355,6 +358,9 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 	// operator is looking at the file — rather than silently producing a
 	// server that exports nothing and says so nowhere.
 	if _, err := telemetry.Resolve(cfg.Observability); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
+	}
+	if err := cfg.Cache.Validate("cache"); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
 	}
 	if cfg.Intake != nil {

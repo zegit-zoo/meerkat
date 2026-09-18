@@ -168,6 +168,34 @@ type TreeNode struct {
 	Access        *Access `json:"access,omitempty"`
 	Limits        *Limits `json:"limits,omitempty"`
 	Description   string  `json:"description,omitempty"`
+
+	// source and configPath let a declared-but-unmounted child be
+	// mounted later (issue E). Never serialised.
+	source     *Source
+	configPath string
+	// childNodes holds the unmounted children's nodes by name.
+	childNodes map[string]*TreeNode
+}
+
+// ChildNode returns the declared node for a direct child, mounted or
+// not, when this node carries it (unmounted children are attached to
+// their parent; see ResolveTree).
+func (n *TreeNode) ChildNode(name string) (*TreeNode, bool) {
+	if n == nil {
+		return nil, false
+	}
+	c, ok := n.childNodes[name]
+	return c, ok
+}
+
+// LazySource returns the source a cold child is mounted from, and the
+// config path relative local paths resolve against; nil for a node
+// that was resolved at startup.
+func (n *TreeNode) LazySource() (*Source, string) {
+	if n == nil {
+		return nil, ""
+	}
+	return n.source, n.configPath
 }
 
 // ChildRef is a child as its parent lists it.
@@ -436,7 +464,13 @@ func resolveTreeNode(ctx context.Context, src Source, cfgPath, parent, parentPat
 			if depth+1 > MaxTreeDepth || depth+1 > childLimit {
 				return fmt.Errorf("tree: knowledge base %q would be at depth %d, over the cap", cpath, depth+1)
 			}
-			t.Nodes[c.Name] = &TreeNode{Name: c.Name, Path: cpath, Depth: depth + 1, Parent: m.Name, Mounted: false, Mount: cm, Placement: PlacementShared, SourceType: c.Source.Type}
+			lazy := csrc
+			coldNode := &TreeNode{Name: c.Name, Path: cpath, Depth: depth + 1, Parent: m.Name, Mounted: false, Mount: cm, Placement: PlacementShared, SourceType: c.Source.Type, source: &lazy, configPath: cfgPath}
+			t.Nodes[c.Name] = coldNode
+			if node.childNodes == nil {
+				node.childNodes = map[string]*TreeNode{}
+			}
+			node.childNodes[c.Name] = coldNode
 			if depth+1 > t.MaxDepth {
 				t.MaxDepth = depth + 1
 			}

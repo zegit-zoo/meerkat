@@ -168,6 +168,9 @@ type HostedServer struct {
 	metrics *metrics
 	gate    *authn.Gate
 	auth    *authz.Config
+	// stopCache stops the temperature flusher (cache.go); set by
+	// NewHosted, called by Close.
+	stopCache func()
 	// refresh reconciles mutable GCS sources and GCS memory stores on
 	// their configured schedules. nil when nothing opted in, which is
 	// every deployment that has not written a `refresh:` block; every
@@ -243,6 +246,9 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	// Everything below this line runs with telemetry in its context, so
 	// startup work is traced by the same code that traces a request.
 	ctx = telemetry.NewContext(ctx, s.tel)
+	// Lazy-mount cache: warm start from the traversal log and flush
+	// temperatures until shutdown (both no-ops without a log).
+	s.stopCache = startCache(ctx, reg)
 
 	if err := indexAll(ctx, reg); err != nil {
 		abandon()
@@ -583,6 +589,10 @@ func (s *HostedServer) ListenAndServe(ctx context.Context) error {
 // in-flight cycle: a cycle that is mid-swap is about to install a
 // snapshot into a registry we are about to tear down.
 func (s *HostedServer) Close() error {
+	if s.stopCache != nil {
+		s.stopCache()
+		s.stopCache = nil
+	}
 	_ = s.refresh.Close()
 	// Telemetry after the controller and before the registry: a cycle
 	// that was still finishing may have ended spans, and they should get

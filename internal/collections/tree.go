@@ -143,6 +143,15 @@ func (r *Registry) TreeNode(name string) (*contentsource.TreeNode, bool) {
 	return n, ok
 }
 
+// treeMounted reports live residency for a name: a cold collection is
+// declared but not resident.
+func (r *Registry) treeMounted(name string) bool {
+	if c, ok := r.base().by[name]; ok {
+		return !c.IsCold()
+	}
+	return false
+}
+
 // TreeEntries lists every declared knowledge base in the tree — the
 // mounted collections in this view plus the declared-but-unmounted
 // children of those — ordered by path. Empty for a flat deployment.
@@ -162,7 +171,9 @@ func (r *Registry) TreeEntries() []TreeEntry {
 				continue // its parent is outside this view; so is it
 			}
 		}
-		out = append(out, TreeEntry{TreeNode: *n})
+		e := TreeEntry{TreeNode: *n}
+		e.Mounted = r.treeMounted(n.Name)
+		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out

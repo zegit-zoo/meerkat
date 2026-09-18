@@ -13,6 +13,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"sync"
 
@@ -493,6 +494,32 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 // Close releases resources held by the index. Cheap for in-memory
 // indexes but kept for symmetry with the persistent variant we may add
 // later.
+// SizeEstimate returns an estimate of the bytes this index and its
+// pages hold in memory: the page bytes (title + body) plus what bleve
+// reports for its in-memory segments, or twice the page bytes when it
+// reports nothing. An estimate — the cache budget (meerkat-mob issue
+// E) needs a number that moves with content size, not an exact one.
+func (i *Index) SizeEstimate() int64 {
+	i.mu.RLock()
+	var pages int64
+	for _, p := range i.pages {
+		pages += int64(len(p.Title) + len(p.Body))
+	}
+	i.mu.RUnlock()
+	var index int64
+	if i.bleve != nil {
+		if m, ok := i.bleve.StatsMap()["index"].(map[string]any); ok {
+			if n, ok := m["num_bytes_used_disk"].(uint64); ok && n <= math.MaxInt64 {
+				index = int64(n)
+			}
+		}
+	}
+	if index <= 0 {
+		index = 2 * pages
+	}
+	return pages + index
+}
+
 func (i *Index) Close() error {
 	if i.bleve == nil {
 		return nil
