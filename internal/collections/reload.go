@@ -257,6 +257,7 @@ func (c *Collection) publishMemory(p kb.Page) error {
 		c.overlay = make(map[string]kb.Page, 1)
 	}
 	c.overlay[p.ID] = p
+	c.overlayGen.Add(1)
 	c.overlayMu.Unlock()
 
 	if c.pending != nil {
@@ -322,6 +323,7 @@ func (c *Collection) commit(s *snapshot, overlay map[string]kb.Page) error {
 	if overlay != nil {
 		c.overlayMu.Lock()
 		c.overlay = overlay
+		c.overlayGen.Add(1)
 		c.overlayMu.Unlock()
 	}
 	c.install(s)

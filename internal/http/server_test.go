@@ -518,7 +518,7 @@ func TestNewShowResponse_Shape(t *testing.T) {
 			Verified:    kb.VerifiedList{{By: "human:ahormati"}},
 		},
 	}
-	raw, err := json.Marshal(newShowResponse(collections.PageRef{Collection: collections.DefaultName, Page: page}))
+	raw, err := json.Marshal(newShowResponse(collections.Global("test"), collections.PageRef{Collection: collections.DefaultName, Page: page}))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

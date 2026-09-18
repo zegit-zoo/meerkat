@@ -176,6 +176,19 @@ type Frontmatter struct {
 	// common core (e.g. regulator, tier, superseded_by), and any OKF
 	// field deliberately not promoted (resource, sources, okf_version).
 	// Values are preserved as parsed YAML scalars or structures.
+	// Routing fields for the page types introduced by the meerkat mob
+	// design (see links.go): a `type: pointer` page names where the
+	// answer lives (Target) and tells the agent in one sentence why to
+	// go there (Hint); an external target may enumerate the MCP
+	// server's capabilities in the protocol's own vocabulary (Tools,
+	// Resources, Prompts, Toolsets). Ignored on every other type.
+	Target    string   `yaml:"target,omitempty"    json:"target,omitempty"`
+	Hint      string   `yaml:"hint,omitempty"      json:"hint,omitempty"`
+	Tools     []string `yaml:"tools,omitempty"     json:"tools,omitempty"`
+	Resources []string `yaml:"resources,omitempty" json:"resources,omitempty"`
+	Prompts   []string `yaml:"prompts,omitempty"   json:"prompts,omitempty"`
+	Toolsets  []string `yaml:"toolsets,omitempty"  json:"toolsets,omitempty"`
+
 	Extra map[string]any `yaml:"extra,omitempty" json:"extra,omitempty"`
 }
 
@@ -649,6 +662,12 @@ var coreKeys = map[string]bool{
 	"generated":      true,
 	"verified":       true,
 	"stale_after":    true,
+	"target":         true,
+	"hint":           true,
+	"tools":          true,
+	"resources":      true,
+	"prompts":        true,
+	"toolsets":       true,
 }
 
 // splitFrontmatter returns parsed frontmatter, the body with any

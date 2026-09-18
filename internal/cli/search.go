@@ -63,6 +63,19 @@ Examples:
 					"%d. %s  (score %.2f)\n   %s\n",
 					i+1, displayID(reg, collections.PageRef{Collection: r.Collection, Page: r.Page}), r.Score, r.Page.Title,
 				)
+				if r.Kind == collections.KindPointer {
+					target := r.Target
+					if target == "" {
+						target = "(invalid pointer)"
+					} else if !r.TargetResolved {
+						target += " (unresolved)"
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "   -> %s", target)
+					if r.Hint != "" {
+						fmt.Fprintf(cmd.OutOrStdout(), " — %s", r.Hint)
+					}
+					fmt.Fprintln(cmd.OutOrStdout())
+				}
 				if r.Snippet != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "   %s\n", oneLine(r.Snippet))
 				}

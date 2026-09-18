@@ -360,7 +360,7 @@ func TestReloadContent_FailedResolveKeepsServingTheLastGood(t *testing.T) {
 
 	// ... and it is reported as degraded, while staying READY: it is
 	// answering queries correctly, just not with current content.
-	h := c.health()
+	h := c.health(nil)
 	if !h.Degraded {
 		t.Error("a failed refresh did not mark the collection degraded")
 	}
@@ -379,7 +379,7 @@ func TestReloadContent_FailedResolveKeepsServingTheLastGood(t *testing.T) {
 	if _, err := c.ReloadContent(context.Background()); err != nil {
 		t.Fatalf("ReloadContent after recovery: %v", err)
 	}
-	if h := c.health(); h.Degraded {
+	if h := c.health(nil); h.Degraded {
 		t.Errorf("a successful refresh did not clear the degraded state: %+v", h)
 	}
 	if !contains(searchIDs(t, c, "pangolin"), "a") {
@@ -402,7 +402,7 @@ func TestReloadContent_FailedProbeIsDegraded(t *testing.T) {
 	if _, resolves := f.counts(); resolves != 0 {
 		t.Error("a failed probe must not go on to resolve anything")
 	}
-	h := c.health()
+	h := c.health(nil)
 	if !h.Degraded || !h.Ready {
 		t.Errorf("health = %+v, want degraded but still serving", h)
 	}
@@ -420,7 +420,7 @@ func TestReloadContent_UnreadyPolicyFailsReadiness(t *testing.T) {
 	if _, err := c.ReloadContent(context.Background()); err == nil {
 		t.Fatal("expected the failed resolve to be reported")
 	}
-	h := c.health()
+	h := c.health(nil)
 	if !h.Degraded {
 		t.Error("the collection should be degraded")
 	}
@@ -704,7 +704,7 @@ func TestReloadMemory_FailedLoadKeepsTheOverlay(t *testing.T) {
 	if !contains(searchIDs(t, c, "survive"), "memory/team/keep") {
 		t.Error("a failed reconcile emptied the index")
 	}
-	h := c.health()
+	h := c.health(nil)
 	if !h.Degraded || !h.Ready {
 		t.Errorf("health = %+v, want degraded but still serving", h)
 	}
