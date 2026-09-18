@@ -970,6 +970,17 @@ search syntax are never rewritten. A hub collection can set
 `layout.analyzer: ngram` to index titles as edge n-grams. See
 [docs/SEARCH.md](docs/SEARCH.md).
 
+### Reporting outcomes (`mk_report_outcome`)
+
+At the end of a retrieval an agent reports how it went: the outcome,
+its first query verbatim, the pages that answered, the collections it
+tried, quality scores, and what it did instead when meerkat did not
+have it. Every report is counted; with `observability.traversal_log`
+configured it is also written as an HMAC-hashed path record, and with an
+`intake:` store and the `intake-write` capability a fallback summary
+becomes a draft page for review. See
+[docs/design/observability.md](docs/design/observability.md#retrieval-outcomes-and-the-traversal-log).
+
 ### The knowledge-base tree (`tree:`)
 
 `tree:` names a root knowledge base whose `manifest.yaml` declares its

@@ -47,6 +47,7 @@ type Metrics struct {
 	indexDuration   *prometheus.HistogramVec
 	indexPages      prometheus.Gauge
 	treeDepth       prometheus.Gauge
+	outcomes        *prometheus.CounterVec
 	sourceResolves  *prometheus.CounterVec
 	sourceDuration  *prometheus.HistogramVec
 	sourceCache     *prometheus.CounterVec
@@ -106,6 +107,10 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "meerkat_index_pages",
 			Help: "Pages indexed across every mounted collection (a total, not a per-collection series).",
 		}),
+		outcomes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "meerkat_retrieval_outcomes_total",
+			Help: "Retrieval sessions reported through mk_report_outcome, by outcome (found, not_found, gave_up), fallback kind (none, web, source, human) and whether the report itself was recorded (ok, error).",
+		}, []string{"outcome", "fallback", "recorded"}),
 		treeDepth: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "meerkat_tree_depth",
 			Help: "Deepest knowledge base declared in the tree this process serves (root = 0; 0 for a flat deployment; the hard cap is 5).",
@@ -174,7 +179,7 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 	}
 	if reg != nil {
 		reg.MustRegister(
-			m.indexBuilds, m.indexDuration, m.indexPages, m.treeDepth,
+			m.indexBuilds, m.indexDuration, m.indexPages, m.treeDepth, m.outcomes,
 			m.sourceResolves, m.sourceDuration, m.sourceCache, m.sourceBytes,
 			m.searches, m.searchDuration, m.searchResults, m.ambiguous,
 			m.memorySaves, m.memoryDuration, m.memoryErrors,
@@ -201,6 +206,31 @@ func (m *Metrics) SetIndexedPages(n int) {
 		return
 	}
 	m.indexPages.Set(float64(n))
+}
+
+// RetrievalOutcome counts one mk_report_outcome call. outcome and
+// fallback are bounded to their closed sets before they become labels.
+func (m *Metrics) RetrievalOutcome(outcome, fallback, recorded string) {
+	if m == nil {
+		return
+	}
+	m.outcomes.WithLabelValues(boundedOutcome(outcome), boundedFallback(fallback), recorded).Inc()
+}
+
+func boundedOutcome(s string) string {
+	switch s {
+	case "found", "not_found", "gave_up":
+		return s
+	}
+	return "other"
+}
+
+func boundedFallback(s string) string {
+	switch s {
+	case "none", "web", "source", "human":
+		return s
+	}
+	return "other"
 }
 
 // SetTreeDepth publishes the deepest knowledge base in the tree this

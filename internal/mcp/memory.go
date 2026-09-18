@@ -64,6 +64,9 @@ type transportOptions struct {
 	// (#36): in those deployments meerkat genuinely does not know who is
 	// calling, and every caller would otherwise share one namespace.
 	AllowAnonymousPersonal bool
+
+	// Outcome configures mk_report_outcome's sinks. See outcome.go.
+	Outcome OutcomeOptions
 }
 
 // viewer derives the per-page read viewer for the caller behind g. It is

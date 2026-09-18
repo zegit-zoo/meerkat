@@ -107,6 +107,10 @@ const (
 	// never the query: an operator debugging "queries over 4KB are slow"
 	// gets their answer without the query text leaving the process.
 	KeySearchQueryLength = attribute.Key("meerkat.search.query_length")
+	// KeySearchSessionProvided reports that the caller grouped this call
+	// under an explicit retrieval session. A boolean — the ID itself
+	// never reaches a span.
+	KeySearchSessionProvided = attribute.Key("meerkat.search.session_provided")
 	// KeySearchStage is the planner stage that answered: exact | fuzzy
 	// | prefix. A stage name, never the query. See SearchStage.
 	KeySearchStage = attribute.Key("meerkat.search.stage")
@@ -193,6 +197,18 @@ const (
 
 	// KeyReady / KeyCollectionsReady / KeyCollectionsDegraded mirror what
 	// /readyz's body says: counts and state, never names.
+	// --- retrieval outcomes (mk_report_outcome) -----------------------
+	//
+	// Closed-set values and counts only: the outcome, the fallback KIND,
+	// how many pages and hops, the deepest tier. Never the query, a page
+	// ID or a collection name — those go to the hashed traversal log.
+	KeyOutcomeResult      = attribute.Key("meerkat.outcome.result")
+	KeyOutcomeFallback    = attribute.Key("meerkat.outcome.fallback")
+	KeyOutcomePages       = attribute.Key("meerkat.outcome.pages")
+	KeyOutcomeHops        = attribute.Key("meerkat.outcome.hops")
+	KeyOutcomeTierReached = attribute.Key("meerkat.outcome.tier_reached")
+	KeyOutcomeHasQuality  = attribute.Key("meerkat.outcome.has_quality")
+
 	// KeyTreeDepth is the deepest knowledge base in a tree deployment
 	// (root = 0); 0 for a flat one. A number, never a name.
 	KeyTreeDepth           = attribute.Key("meerkat.tree.depth")
@@ -225,6 +241,7 @@ const (
 	SpanRefreshCycle     = "meerkat.refresh.cycle"
 	SpanRefreshPhase     = "meerkat.refresh.phase"
 	SpanReadiness        = "meerkat.readiness"
+	SpanOutcomeReport    = "meerkat.outcome.report"
 )
 
 // Refresh phase span names. The six steps ReloadContent/ReloadMemory

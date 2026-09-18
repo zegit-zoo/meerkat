@@ -78,13 +78,18 @@ const (
 	// it sparingly: a rule that grants admin today also grants whatever
 	// capability a later meerkat adds.
 	CapAdmin Capability = "admin"
+	// CapIntakeWrite lets a caller deposit research it did outside
+	// meerkat into the intake store through mk_report_outcome (meerkat-mob
+	// issue G). It is not a collection write: granting it changes nothing
+	// about what the caller may read or save into a collection.
+	CapIntakeWrite Capability = "intake-write"
 )
 
 // AllCapabilities lists every capability in the order they are reported.
 // Order is least- to most-privileged, which is also the order a human
 // reads them in.
 func AllCapabilities() []Capability {
-	return []Capability{CapRead, CapPersonalWrite, CapTeamWrite, CapGlobalWrite, CapAdmin}
+	return []Capability{CapRead, CapPersonalWrite, CapTeamWrite, CapGlobalWrite, CapAdmin, CapIntakeWrite}
 }
 
 // WriteCapabilities lists the capabilities that permit writing
@@ -360,6 +365,25 @@ func (g *Grants) Len() int {
 }
 
 // Wildcarded reports whether the caller holds c over every collection.
+// CanIntake reports whether the caller may write to the intake store:
+// intake-write (or admin) on the wildcard or on any collection. No
+// grants at all (stdio, no auth: block) means yes — the local user is
+// trusted with their own intake, as with personal memory.
+func (g *Grants) CanIntake() bool {
+	if g == nil {
+		return true
+	}
+	if g.wildcard.Has(CapIntakeWrite) {
+		return true
+	}
+	for _, set := range g.byCollection {
+		if set.Has(CapIntakeWrite) {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *Grants) Wildcarded(c Capability) bool {
 	if g == nil {
 		return true

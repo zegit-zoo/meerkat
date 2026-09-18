@@ -761,6 +761,12 @@ func TestObservability_NoSpanOrMetricCarriesAForbiddenValue(t *testing.T) {
 	callText(t, ctx, c, toolList, map[string]any{"prefix": "payroll/"})             //nolint:errcheck // exercising
 	callText(t, ctx, c, toolListCollections, map[string]any{})                      //nolint:errcheck // exercising
 	callText(t, ctx, c, toolShow, map[string]any{"id": "secrets:payroll/salaries"}) //nolint:errcheck // qualified
+	callText(t, ctx, c, toolReportOutcome, map[string]any{                          //nolint:errcheck // exercising
+		"outcome": "gave_up", "initial_query": queryText, "session_id": "alice-the-subject@example.com",
+		"pages": []any{"secrets:payroll/salaries"}, "attempted": []any{"runbooks", "architecture", "secrets"},
+		"quality":  map[string]any{"accuracy": 0.1, "completeness": 0.2, "answer_quality": 0.3, "notes": "confidential compensation"},
+		"fallback": map[string]any{"kind": "web", "summary": "confidential compensation details", "sources": []any{"https://example.com/payroll/salaries"}},
+	})
 	resp := f.get(t, "/wp-admin/setup-config.php?scan=1", map[string]string{"User-Agent": "sqlmap/1.0"})
 	_ = resp.Body.Close()
 	resp = f.get(t, ReadinessPath, nil)

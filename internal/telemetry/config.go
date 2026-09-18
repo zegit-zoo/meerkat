@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"github.com/zegit-zoo/meerkat/internal/traversal"
+
 	"fmt"
 	"net/url"
 	"os"
@@ -63,6 +65,12 @@ type Config struct {
 	Traces  TraceConfig  `yaml:"traces,omitempty"`
 	OTLP    OTLPConfig   `yaml:"otlp,omitempty"`
 	Limits  ExportLimits `yaml:"limits,omitempty"`
+
+	// TraversalLog is the opt-in hashed path log (meerkat-mob issue G):
+	// one object per reported retrieval session with HMAC-hashed
+	// collection names and page IDs. Absent, nothing is logged. See
+	// internal/traversal and docs/design/observability.md.
+	TraversalLog *traversal.Config `yaml:"traversal_log,omitempty"`
 }
 
 // LogConfig tunes the structured logs that already exist. It cannot turn
@@ -273,6 +281,9 @@ func Resolve(cfg *Config) (Resolved, error) {
 		cfg = &Config{}
 	}
 	var r Resolved
+	if err := cfg.TraversalLog.Validate("observability.traversal_log"); err != nil {
+		return Resolved{}, err
+	}
 
 	// OTEL_SDK_DISABLED is the standard kill switch and it beats
 	// everything, including an explicit `enabled: true`. That inversion

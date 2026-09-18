@@ -113,6 +113,12 @@ type Config struct {
 	Tree          *Source           `yaml:"tree,omitempty"`
 	Auth          *authz.Config     `yaml:"auth,omitempty"`
 	Observability *telemetry.Config `yaml:"observability,omitempty"`
+	// Intake is the store mk_report_outcome deposits an agent's outside
+	// research into as raw pages (meerkat-mob issue G; the pipeline that
+	// consumes them is issue H). Same schema as a memory: block —
+	// local | gcs | s3 — because it is the same kind of writable store,
+	// but it is NOT a collection and is never served or indexed.
+	Intake *memory.Spec `yaml:"intake,omitempty"`
 }
 
 // Collection is one named entry of a `collections:` list — a Source
@@ -350,6 +356,17 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 	// server that exports nothing and says so nowhere.
 	if _, err := telemetry.Resolve(cfg.Observability); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
+	}
+	if cfg.Intake != nil {
+		if err := cfg.Intake.Validate("intake", false); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", displayPath, err)
+		}
+		if cfg.Intake.Type == memory.BackendLocal && !filepath.IsAbs(cfg.Intake.Path) {
+			return Config{}, fmt.Errorf("%s: intake.path must be absolute (it is not inside any collection's content)", displayPath)
+		}
+		if cfg.Intake.Refresh != nil {
+			return Config{}, fmt.Errorf("%s: intake takes no refresh: block — it is written, never served", displayPath)
+		}
 	}
 	if cfg.Tree != nil {
 		if cfg.Content.Type != TypeNone || len(cfg.Collections) > 0 {

@@ -789,3 +789,44 @@ content:
 #                                    # when it expires, so a collector that
 #                                    # is down cannot hold a pod in
 #                                    # Terminating
+
+# --- intake: where mk_report_outcome deposits an agent's research -----------
+#
+# When an agent gives up on meerkat and does its own research, it reports
+# through mk_report_outcome; with an intake store configured and the
+# intake-write capability granted, the report's fallback summary becomes a
+# raw page here (type: research-raw, status: unverified, source:
+# agent-fallback) for the librarian pipeline to validate and place. Same
+# schema as a memory: block (local | gcs | s3) because it is the same kind
+# of writable store — but it is NOT a collection: never served, never
+# indexed. A local path must be absolute.
+#
+# intake:
+#   type: s3
+#   bucket: kb
+#   prefix: intake/
+#   endpoint: https://s3.example.net
+#   region: garage
+#   path_style: true
+
+# --- observability.traversal_log: the hashed path log (opt-in) -------------
+#
+# One object per mk_report_outcome under telemetry/paths/<yyyy-mm-dd>/ with
+# every collection name and page ID replaced by HMAC-SHA256 under the key
+# held in the environment variable hmac_key_env names (never the key
+# itself; startup fails if it is unset or shorter than 16 bytes). Keeps the
+# path shape, timings, quality scores and the initial query in plaintext.
+# Retention is an application job: retention_days (default 0 = keep all)
+# deletes older day prefixes on startup and hourly. See
+# docs/design/observability.md, "Retrieval outcomes and the traversal log".
+#
+# observability:
+#   traversal_log:
+#     backend: s3                  # local | s3
+#     bucket: kb
+#     prefix: telemetry/
+#     endpoint: https://s3.example.net
+#     region: garage
+#     path_style: true
+#     hmac_key_env: MEERKAT_PATH_LOG_KEY
+#     retention_days: 0

@@ -13,6 +13,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/mcp"
+	"github.com/zegit-zoo/meerkat/internal/traversal"
 )
 
 func newMCPCmd() *cobra.Command {
@@ -69,7 +70,11 @@ The server runs until stdin closes or it receives SIGINT/SIGTERM.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
-			if err := mcp.ServeStdio(ctx, registry()); err != nil {
+			outcome, err := outcomeOptions(ctx)
+			if err != nil {
+				return err
+			}
+			if err := mcp.ServeStdioWith(ctx, registry(), outcome); err != nil {
 				return fmt.Errorf("mcp serve: %w", err)
 			}
 			return nil
@@ -200,7 +205,15 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				auth = loaded
 			}
 
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			outcome, err := outcomeOptions(ctx)
+			if err != nil {
+				return err
+			}
+
 			cfg := mcp.HostedConfig{
+				Outcome:                       outcome,
 				Addr:                          mcp.ResolveListenAddr(host, port),
 				EndpointPath:                  endpointPath,
 				Collections:                   registry(),
@@ -217,10 +230,7 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				SetOTelGlobals: true,
 			}
 
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-			defer cancel()
-
-			err := mcp.ServeStreamableHTTP(ctx, cfg, func(s *mcp.HostedServer) {
+			err = mcp.ServeStreamableHTTP(ctx, cfg, func(s *mcp.HostedServer) {
 				mode := "none (every mounted collection is public to any caller)"
 				switch {
 				case s.AuthEnabled() && s.AnonymousEnabled():
@@ -291,4 +301,28 @@ func watchReloadSignal(ctx context.Context, s *mcp.HostedServer, w io.Writer) {
 			fmt.Fprintln(w, "meerkat: reload complete")
 		}
 	}
+}
+
+// outcomeOptions opens mk_report_outcome's sinks from the runtime
+// content-source.yaml: the traversal log named under
+// observability.traversal_log (its HMAC key read from the environment
+// variable the block names) and the intake store under intake:. Either
+// may be absent; the tool then records telemetry only and says so.
+func outcomeOptions(ctx context.Context) (mcp.OutcomeOptions, error) {
+	var out mcp.OutcomeOptions
+	if activeObservability != nil && activeObservability.TraversalLog != nil {
+		log, err := traversal.Open(ctx, activeObservability.TraversalLog, traversal.NewS3Sink)
+		if err != nil {
+			return out, fmt.Errorf("observability.traversal_log: %w", err)
+		}
+		out.Log = log
+	}
+	if spec := activeIntake; spec != nil {
+		store, err := spec.Open(ctx, "")
+		if err != nil {
+			return out, fmt.Errorf("intake: %w", err)
+		}
+		out.Intake = store
+	}
+	return out, nil
 }

@@ -289,8 +289,8 @@ func TestHosted_HiddenCollectionIsInvisibleEverywhere(t *testing.T) {
 		if err != nil {
 			t.Fatalf("tools/list: %v", err)
 		}
-		if len(res.Tools) != 4 {
-			t.Fatalf("got %d tools, want 4", len(res.Tools))
+		if len(res.Tools) != 5 {
+			t.Fatalf("got %d tools, want the 4 read tools plus mk_report_outcome", len(res.Tools))
 		}
 		for _, tool := range res.Tools {
 			blob, _ := json.Marshal(tool)

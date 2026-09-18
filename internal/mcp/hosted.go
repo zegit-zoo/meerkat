@@ -131,6 +131,11 @@ type HostedConfig struct {
 	// byte-identical to what it was before tracing existed. See
 	// internal/telemetry and docs/design/observability.md.
 	Observability *telemetry.Config
+
+	// Outcome configures mk_report_outcome's sinks: the traversal log
+	// (opened from Observability.TraversalLog by the CLI) and the intake
+	// store. Zero values leave the tool recording telemetry only.
+	Outcome OutcomeOptions
 	// Telemetry injects an already-built telemetry instance, bypassing
 	// Observability.
 	//
@@ -299,7 +304,7 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	// line and cannot: ownership is a property of who the caller is, and
 	// an anonymous caller is still nobody. Their grants are read-only by
 	// validation, so they are not offered the memory tool at all.
-	mcpSrv := newServer(reg, transportOptions{},
+	mcpSrv := newServer(reg, transportOptions{Outcome: cfg.Outcome},
 		mcpserver.WithHooks(hooks),
 		// The per-request tool filter is what keeps tools/list from
 		// naming collections the caller may not read — see toolFilter.

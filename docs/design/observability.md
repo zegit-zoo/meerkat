@@ -455,6 +455,88 @@ returns the caller's own context and a non-recording span.
   span/label asymmetry), every outcome classified, error text not
   recorded.
 
+## Retrieval outcomes and the traversal log
+
+meerkat-mob issue G (#7). Per-call telemetry cannot see whether a
+retrieval *helped*. `mk_report_outcome` is how an agent says so, and
+how a miss becomes the knowledge base's next page.
+
+### `mk_report_outcome`
+
+One call at the end of a retrieval session: `outcome` (found |
+not_found | gave_up), `initial_query` (the agent's first query,
+verbatim), `pages` that answered, `attempted` collections in order,
+`quality` (accuracy, completeness, answer_quality in [0, 1], notes),
+and `fallback` (kind web | source | human | none, a summary of what the
+agent learned instead, its sources). `mk_search` accepts the same
+`session_id` so a stateless caller can group its calls; a caller with
+an MCP session need not pass one. The tool's description frames a miss
+as a contribution ("every report improves the next agent's
+retrieval") because the most valuable signal in the design is an agent
+that gave up on meerkat and did base research.
+
+Three sinks, each independently configured and each named in the
+response (`{recorded, logged, intake, intake_id?}`):
+
+| Sink | Configured by | Carries |
+|---|---|---|
+| telemetry (always) | — | `meerkat.outcome.report` span with `result`, `fallback` (kinds), `pages`, `hops`, `tier_reached`, `has_quality`; `meerkat_retrieval_outcomes_total{outcome,fallback,recorded}` |
+| traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality; fallback; **the initial query in plaintext** |
+| intake store | `intake:` + the `intake-write` capability | the fallback summary as a raw page: `type: research-raw`, `status: unverified`, `source: agent-fallback`, with the question and the attempted path in its frontmatter |
+
+The disclosure rule holds exactly as before: the span and the metric
+labels carry closed-set values and counts. The disclosure test
+exercises the tool with a query, page IDs, collection names and
+confidential summary text and asserts none of it reaches a span or a
+label.
+
+### The traversal log (brief §5, option A)
+
+Path analysis needs to know *which* collection and *which* page a hop
+landed on; the disclosure rule forbids exporting either. The traversal
+log squares the two: it is a **separate, opt-in** store under
+`telemetry/paths/<yyyy-mm-dd>/`, local directory or S3-compatible
+bucket, and every collection name and page ID in it is replaced by
+`HMAC-SHA256(key, value)`. The key comes from the environment variable
+`hmac_key_env` names — never from configuration — and startup fails if
+it is unset or shorter than 16 bytes. The librarian agent holds the key
+and joins the log against the manifest; nobody else can.
+
+What the log keeps in plaintext, by decision (2026-09-17): the outcome,
+timings, path shape, quality scores, the fallback kind, summary and
+sources, and the **initial query**. The query is what a librarian reads
+to judge how well the client asked and how well meerkat routed weak
+prompting; it is the primary input for improving tool descriptions and
+link wording. It is therefore data an operator must treat as
+sensitive: the log lives beside the intake store, not beside the
+exported telemetry.
+
+Threat model:
+
+- *An exported span or metric leaks a name.* Cannot happen through
+  this feature: hashing is done inside `traversal.Log.Record`, which
+  takes plaintext and never writes it; spans get only what the
+  telemetry table above lists.
+- *The log itself leaks.* It contains hashes and queries. Without the
+  key the hashes are opaque; the queries are what an agent typed and
+  should be handled like a query log anywhere: keep the bucket private,
+  rotate the key when a librarian leaves (old entries become
+  unjoinable, which is the intended effect).
+- *A caller floods the log.* Every field is bounded (query 2 KiB,
+  summary 16 KiB, 50 list items, 20 sources), each report is one object
+  with a unique key (single-writer-per-key, so any provider is safe),
+  and anonymous callers can report but never write intake.
+- *Retention.* An application job, not bucket lifecycle (Garage has
+  none): `retention_days` deletes day prefixes older than the window,
+  on startup and at most hourly on the write path. The default is
+  **unbounded** — this log is the training data for the self-improving
+  loop, and we deliberately produce a lot of it.
+
+Not in this change: a session span that parents the per-call spans and
+the SLI histograms (issue F), the warm-start feed that pre-mounts the
+most-travelled collections from the last N days (issue E), and the
+pipeline that validates and places intake pages (issue H).
+
 ## Deferred
 
 - **OTLP log export.** Traces and metrics export; logs stay on stderr as
