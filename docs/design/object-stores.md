@@ -84,7 +84,11 @@ fails the test and must be updated here in the same change.
 | request checksums (`x-amz-checksum-*`, aws-chunked) | required-only | required-only | required-only | n/a |
 
 "Observed" cells were measured against `dxflrs/garage:v2.4.1` on
-2026-09-18. Columns without "observed" are the provider's documented
+2026-09-18; the Garage write gap is expected to close in a future
+release — when the conformance test starts failing on the Garage row,
+lift the row, the `providerEnforcesWrites` table in
+`internal/memory/s3_conformance_test.go`, and the refusal message in
+`internal/memory/s3.go` together. Columns without "observed" are the provider's documented
 behaviour; MinIO and AWS rows are asserted by the same tests when the
 CI matrix runs them (`MEERKAT_TEST_S3_PROVIDER=minio|aws`).
 
@@ -115,6 +119,22 @@ more — correct within one process, racy across two. `refresh:` and
 exists so several writers converge and `single_writer` asserts there
 is only this one. The conditional headers are still sent in that mode:
 a Garage release that starts honouring them costs nothing.
+
+## The rule for every other shared S3 state
+
+Issues E (temperature counters), G (traversal log) and H (intake) put
+more shared state in the same buckets. On Garage they all work under
+one rule, which the memory store is the first instance of:
+
+> **Shared S3 state is single-writer-per-key.** Give every writer its
+> own keys — a ULID per intake item, one log object per session, one
+> flusher per collection instance — and never have two processes update
+> one key. Multi-writer on a single key needs backend-enforced
+> conditional writes, and therefore AWS S3, MinIO or GCS.
+
+Designs that respect it are provider-neutral for free; designs that
+need a shared counter or an append-in-place object are AWS/GCS-only and
+must say so.
 
 ## Retention is an application job
 

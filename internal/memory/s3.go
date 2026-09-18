@@ -158,9 +158,11 @@ func newS3StoreWithAPI(api s3MemoryAPI, bucket, prefix, sse string) *S3Store {
 // deletes the probe. Any accepted write means the backend would also
 // accept a stale memory update, and the store refuses to open.
 //
-// The probe costs three PUTs and a DELETE per process start, and needs
-// delete permission on the prefix — which a memory store's principal
-// is granted anyway (see content-source.example.yaml).
+// The probe costs three PUTs and a DELETE per process start. The key
+// carries a random suffix and the delete is best-effort, so a policy
+// without s3:DeleteObject leaves one small object under _staging/_probe/
+// per start and never wedges startup; it is skipped entirely under
+// single_writer, where it would prove nothing.
 func (s *S3Store) verifyConditionalWrites(ctx context.Context) error {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -179,8 +181,9 @@ func (s *S3Store) verifyConditionalWrites(ctx context.Context) error {
 			return fmt.Errorf("probe create-only rewrite failed unexpectedly: %w", err)
 		}
 		return fmt.Errorf("%w: %s accepted a create-only write (If-None-Match: *) over an existing object — "+
-			"a shared memory store would lose updates here; set single_writer: true if exactly one meerkat process writes this store, "+
-			"or use a backend that enforces conditional writes (see docs/design/object-stores.md)",
+			"a shared memory store would lose updates here (Garage 2.4 is known to do this: it honours If-Match on GET but ignores "+
+			"If-None-Match: * and a stale If-Match on PUT); set single_writer: true if exactly one meerkat process writes this store, "+
+			"or use a backend that enforces conditional writes — AWS S3, MinIO, GCS (see docs/design/object-stores.md)",
 			ErrConditionalWritesNotEnforced, s.Describe())
 	}
 	// If-Match against an ETag that is not current.
@@ -193,8 +196,9 @@ func (s *S3Store) verifyConditionalWrites(ctx context.Context) error {
 			return fmt.Errorf("probe stale update failed unexpectedly: %w", err)
 		}
 		return fmt.Errorf("%w: %s accepted an update (If-Match) against a stale ETag — "+
-			"a shared memory store would lose updates here; set single_writer: true if exactly one meerkat process writes this store, "+
-			"or use a backend that enforces conditional writes (see docs/design/object-stores.md)",
+			"a shared memory store would lose updates here (Garage 2.4 is known to do this: it honours If-Match on GET but ignores "+
+			"If-None-Match: * and a stale If-Match on PUT); set single_writer: true if exactly one meerkat process writes this store, "+
+			"or use a backend that enforces conditional writes — AWS S3, MinIO, GCS (see docs/design/object-stores.md)",
 			ErrConditionalWritesNotEnforced, s.Describe())
 	}
 	return nil
