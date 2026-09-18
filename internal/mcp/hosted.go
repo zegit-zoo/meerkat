@@ -725,6 +725,7 @@ func (s *HostedServer) readinessFor(ctx context.Context) (bool, []collections.He
 	// where the pages were just enumerated — computing it separately
 	// would double the most expensive thing a probe does.
 	telemetry.FromContext(ctx).Metrics().SetIndexedPages(pages)
+	telemetry.FromContext(ctx).Metrics().SetTreeDepth(s.reg.TreeDepth())
 	span.SetAttributes(
 		telemetry.KeyReady.Bool(ready),
 		telemetry.KeyCollectionsReady.Int(nReady),

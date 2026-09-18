@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/zegit-zoo/meerkat/internal/collections"
+	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/search"
@@ -319,6 +320,12 @@ type collectionEntry struct {
 	// is why the detailed freshness provenance belongs here rather than
 	// in the unauthenticated probes. See docs/design/hot-reload.md.
 	Refresh []collections.ReloadStatus `json:"refresh,omitempty"`
+	// Tree fields, present in a `tree:` deployment. See docs/design/tree.md.
+	Path     string                   `json:"path,omitempty"`
+	Tier     *int                     `json:"tier,omitempty"`
+	Parent   string                   `json:"parent,omitempty"`
+	Children []contentsource.ChildRef `json:"children,omitempty"`
+	Mounted  *bool                    `json:"mounted,omitempty"`
 }
 
 // showResponse is the POST /show wire shape: the page's stored fields
@@ -539,7 +546,18 @@ func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
 		if pages, err := c.Pages(); err == nil {
 			e.Pages = len(pages)
 		}
+		if n := c.Tree; n != nil {
+			tier, mounted := n.Depth, true
+			e.Path, e.Tier, e.Parent, e.Children, e.Mounted = n.Path, &tier, n.Parent, n.Children, &mounted
+		}
 		out = append(out, e)
+	}
+	for _, t := range s.reg.TreeEntries() {
+		if t.Mounted {
+			continue
+		}
+		tier, mounted := t.Depth, false
+		out = append(out, collectionEntry{Name: t.Name, Type: t.SourceType, Source: "unmounted", Path: t.Path, Tier: &tier, Parent: t.Parent, Mounted: &mounted})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

@@ -193,6 +193,9 @@ const (
 
 	// KeyReady / KeyCollectionsReady / KeyCollectionsDegraded mirror what
 	// /readyz's body says: counts and state, never names.
+	// KeyTreeDepth is the deepest knowledge base in a tree deployment
+	// (root = 0); 0 for a flat one. A number, never a name.
+	KeyTreeDepth           = attribute.Key("meerkat.tree.depth")
 	KeyReady               = attribute.Key("meerkat.ready")
 	KeyCollectionsReady    = attribute.Key("meerkat.collections.ready")
 	KeyCollectionsDegraded = attribute.Key("meerkat.collections.degraded")

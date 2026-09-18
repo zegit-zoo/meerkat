@@ -970,6 +970,18 @@ search syntax are never rewritten. A hub collection can set
 `layout.analyzer: ngram` to index titles as edge n-grams. See
 [docs/SEARCH.md](docs/SEARCH.md).
 
+### The knowledge-base tree (`tree:`)
+
+`tree:` names a root knowledge base whose `manifest.yaml` declares its
+children (each an ordinary content source with its own manifest). The
+loader mounts every eager child, lists lazy ones as declared but
+unmounted, and refuses a tree deeper than five levels, a cycle or a
+duplicate name. In a tree, `mk_search` with no collection asks the root
+hub only and its pointer pages route; `root/platform/flux` names the
+collection at that path. `mk_list_collections` carries `path`, `tier`,
+`parent`, `children` and `mounted`. See
+[docs/design/tree.md](docs/design/tree.md).
+
 ### Links, pointer pages and `mk lint`
 
 `related:` entries are resolved across the mounted collections

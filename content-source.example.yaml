@@ -443,6 +443,30 @@ content:
 # collection-aware yet: `mk ingest`, the ingestion source registry, and
 # shell completion.
 #
+# --- tree: a TREE of knowledge bases (runtime only) ----------------------
+#
+# The third, mutually exclusive form. tree: names the ROOT knowledge base
+# (any runtime-capable source); its resolved directory carries a
+# manifest.yaml naming its children, each of which carries its own. The
+# loader walks them depth-first, mounts every `mount: eager` child as a
+# collection, records `mount: lazy` children as declared-but-unmounted
+# (mk_list_collections shows them with mounted: false; naming one in a
+# search is refused with a message pointing at the parent hub), and
+# REFUSES a tree deeper than 5 levels below the root, a cycle, or a
+# duplicate name. In a tree, mk_search with no collection asks the ROOT
+# only — its pointer pages route — and `root/platform/flux` is an alias
+# for the collection at that path. See docs/design/tree.md for the
+# manifest schema (tier, parent, children, contract, placement, access,
+# limits, depth_limit).
+#
+# tree:
+#   type: s3
+#   bucket: kb
+#   prefix: kb/root/
+#   endpoint: https://s3.example.net
+#   region: garage
+#   path_style: true
+#
 # collections:
 #   - name: runbooks
 #     type: local
