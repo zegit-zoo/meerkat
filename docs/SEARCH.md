@@ -105,15 +105,67 @@ some power without needing docs:
 Field targeting against `id` and `title` works alongside the boost,
 so `title:retry` returns only pages whose title contains "retry".
 
-## Frontmatter as fields (planned)
+## The staged planner: exact, then fuzzy, then prefix
 
-Frontmatter (`category`, `owner`, `status`, `tags`, `type`, …) is parsed
-into `kb.Page.Front` but **not yet indexed by search**. The CLI/MCP/HTTP
-filters (including `type` — OKF's concept-kind field, see
-[OKF.md](OKF.md#type-as-a-filter)) compose post-search via
-`kb.Filter` helpers. The day we need `mk search "owner:team-payments
-tier-1"` to work in the search syntax itself is when we extend
-`buildMapping()` with a low-boost keyword field per Frontmatter key.
+A query runs through up to three stages (`internal/search/planner.go`),
+each only when the previous one found **nothing**:
+
+| Stage | What runs | Reported as |
+|---|---|---|
+| `exact` | the BM25 query above — title ×5, id ×3, body, category boosts | `meerkat.search.stage="exact"` |
+| `fuzzy` | per term: one edit allowed from 5 characters, two from 8; shorter terms stay exact | `"fuzzy"` |
+| `prefix` | per term of 3+ characters: prefix match on title/id/body | `"prefix"` |
+
+So `datadgo monitor serach` finds the Datadog page at the fuzzy stage,
+`pager` finds PagerDuty at the prefix stage, and a query that hits
+exactly costs exactly what it always cost. The stage is on every
+result (`Result.Stage`), on the search span, and on
+`meerkat_search_total{outcome,stage}` — the fallback rate
+(`fuzzy + prefix` over the total) is the signal that a vendor name or a
+Swedish/English compound is missing from the content and should be
+added at the source.
+
+Queries that use bleve syntax — field targeting, quoted phrases,
+wildcards, `~`, `+`/`-` operators — are **never rewritten**: the author
+asked for precision. An in-word hyphen (`drift-detektering`) is a
+joiner, not an operator.
+
+Cost, 500 synthetic pages of ~120 words, `go test -bench
+QueryStaged` on an 8-core laptop:
+
+| Case | Time per query |
+|---|---|
+| exact hit | 0.57 ms |
+| exact miss → fuzzy hit | 0.41 ms |
+| exact and fuzzy miss → prefix | 0.36 ms |
+
+A fallback pass costs about as much as the exact pass it follows,
+well inside the 5 ms p95 budget; a miss is cheaper than a hit because
+there are no snippets to build.
+
+## Frontmatter as fields
+
+`type`, `status`, `subcategory` and `tags` are indexed as **keyword
+fields** beside `category` and `owner` (exact values, not tokens,
+excluded from `_all` so they never match free text). `Index.Match`
+answers `mk_list`-style filters — type, status, category,
+subcategory, tags (all must be present), owner, ID prefix — as query
+clauses instead of a post-list walk: ~16 µs on the 500-page corpus
+above (`BenchmarkMatch`). The `mk_list`/`POST /list`/`mk list`
+surfaces still filter through `kb.Filter` today; switching them to
+`Match` is a small follow-up once the index is guaranteed built before
+`list` is served.
+
+## Title analyzer for a hub tier (`layout.analyzer: ngram`)
+
+A hub tier is a small collection of routing pages whose titles are
+vendor and system names. With `layout.analyzer: ngram` in
+`content-source.yaml`, titles are indexed as edge n-grams of 3–8
+characters, so `datadg` — or the first letters of a name someone
+half-remembers — matches "Datadog" at the exact stage. It multiplies
+the title term count, so it is refused for a corpus over 1 MiB
+(`search.MaxNgramCorpusBytes`, the hub tier size the mob design sets).
+Bodies keep the standard analyzer.
 
 ## Cold-start budget
 

@@ -357,7 +357,7 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 			case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 				outcome = telemetry.OutcomeTimeout
 			}
-			telemetry.Record(ctx).Searched(outcome, time.Since(started).Seconds(), 0)
+			telemetry.Record(ctx).Searched(outcome, time.Since(started).Seconds(), 0, telemetry.StageExact)
 			// Fail, not End(span, err): a search error's text quotes the
 			// caller's own query ("search %q: ...") and an unknown-collection
 			// error names the mounted set. Neither may be exported.
@@ -375,9 +375,11 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 				return nil, fmt.Errorf("search: %w", err)
 			}
 		}
-		telemetry.Record(ctx).Searched(telemetry.OutcomeOK, time.Since(started).Seconds(), len(results))
+		stage := string(collections.StageOf(results))
+		telemetry.Record(ctx).Searched(telemetry.OutcomeOK, time.Since(started).Seconds(), len(results), stage)
 		span.SetAttributes(
 			telemetry.KeySearchResults.Int(len(results)),
+			telemetry.KeySearchStage.String(stage),
 			telemetry.Outcome(telemetry.OutcomeOK),
 		)
 		span.End()

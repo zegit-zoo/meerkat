@@ -721,6 +721,15 @@ type Hit struct {
 	search.Result
 }
 
+// searchOptions derives the index options from the collection's
+// source layout: the title analyzer (standard | ngram).
+func (c *Collection) searchOptions() []search.Option {
+	if a := c.Source.Layout.Analyzer; a != "" {
+		return []search.Option{search.WithTitleAnalyzer(a)}
+	}
+	return nil
+}
+
 // New builds a registry over cols, which must be non-empty and
 // uniquely named.
 func New(cols ...*Collection) (*Registry, error) {
@@ -1167,6 +1176,7 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 		telemetry.KeySearchFiltered.Bool(!v.IsUnfiltered()),
 	)
 	var out []Hit
+	deepest := search.StageExact
 	for _, c := range targets {
 		// The viewer goes INTO the query, not over its results. Each
 		// collection is asked for its best `limit` documents that this
@@ -1174,12 +1184,15 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 		// memories contributes its best visible hits rather than
 		// contributing nothing — which is what a post-filter over the
 		// per-collection top-N would do, and it would do it invisibly.
-		results, err := c.searchAs(ctx, v, query, limit)
+		results, stage, err := c.searchAs(ctx, v, query, limit)
 		if err != nil {
 			// Classified rather than recorded: the error wraps bleve's own
 			// `search %q: ...`, which quotes the caller's query verbatim.
 			telemetry.Fail(span, telemetry.OutcomeError)
 			return nil, err
+		}
+		if stageRank(stage) > stageRank(deepest) {
+			deepest = stage
 		}
 		for _, res := range results {
 			out = append(out, Hit{Collection: c.Name, Result: res})
@@ -1194,6 +1207,7 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 	span.SetAttributes(
 		telemetry.KeyCollectionCount.Int(len(targets)),
 		telemetry.KeySearchResults.Int(len(out)),
+		telemetry.KeySearchStage.String(string(deepest)),
 	)
 	span.End()
 	sort.SliceStable(out, func(a, b int) bool {
@@ -1216,6 +1230,30 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 // recognised when it names a collection that is actually mounted:
 // anything else is returned untouched as a bare page ID, so an ID that
 // happens to contain a colon can never be mistaken for a qualification.
+// stageRank orders planner stages by how far the planner had to fall
+// back; a merged search reports the deepest stage any collection used.
+func stageRank(s search.Stage) int {
+	switch s {
+	case search.StageFuzzy:
+		return 1
+	case search.StagePrefix:
+		return 2
+	}
+	return 0
+}
+
+// StageOf returns the deepest planner stage among hits: what a caller
+// reports as meerkat.search.stage for a merged result set.
+func StageOf(hits []Hit) search.Stage {
+	deepest := search.StageExact
+	for _, h := range hits {
+		if stageRank(h.Stage) > stageRank(deepest) {
+			deepest = h.Stage
+		}
+	}
+	return deepest
+}
+
 func (r *Registry) SplitQualified(id string) (collection, pageID string) {
 	name, rest, found := strings.Cut(id, ":")
 	if !found || rest == "" {

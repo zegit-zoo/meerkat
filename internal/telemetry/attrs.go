@@ -107,6 +107,9 @@ const (
 	// never the query: an operator debugging "queries over 4KB are slow"
 	// gets their answer without the query text leaving the process.
 	KeySearchQueryLength = attribute.Key("meerkat.search.query_length")
+	// KeySearchStage is the planner stage that answered: exact | fuzzy
+	// | prefix. A stage name, never the query. See SearchStage.
+	KeySearchStage = attribute.Key("meerkat.search.stage")
 	// KeySearchFiltered reports that a per-page visibility clause was
 	// conjoined into the query (i.e. the caller is a restricted viewer).
 	KeySearchFiltered = attribute.Key("meerkat.search.filtered")
@@ -251,6 +254,26 @@ const (
 	SourceGCSPrefix = "gcs-prefix"
 	SourceOther     = "other"
 )
+
+// Search planner stages — the closed set KeySearchStage and the
+// search_total{stage} label range over.
+const (
+	StageExact  = "exact"
+	StageFuzzy  = "fuzzy"
+	StagePrefix = "prefix"
+	StageOther  = "other"
+)
+
+// SearchStage bounds a planner stage name to the closed set above.
+func SearchStage(stage string) string {
+	switch stage {
+	case StageExact, StageFuzzy, StagePrefix:
+		return stage
+	case "":
+		return StageExact
+	}
+	return StageOther
+}
 
 // Cache results.
 const (

@@ -17,6 +17,10 @@ import (
 	"sync"
 
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/analysis/analyzer/custom"
+	"github.com/blevesearch/bleve/v2/analysis/token/edgengram"
+	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
+	"github.com/blevesearch/bleve/v2/analysis/tokenizer/unicode"
 	"github.com/blevesearch/bleve/v2/mapping"
 	"github.com/blevesearch/bleve/v2/search/query"
 
@@ -28,6 +32,9 @@ type Result struct {
 	Page    kb.Page
 	Score   float64
 	Snippet string // plain-text excerpt around the first match (best-effort)
+	// Stage is the planner stage that produced this result: exact,
+	// fuzzy or prefix. See planner.go.
+	Stage Stage
 }
 
 // Index wraps a Bleve in-memory index over all KB pages.
@@ -39,6 +46,35 @@ type Index struct {
 	mu             sync.RWMutex
 	pages          map[string]kb.Page
 	categoryBoosts map[string]float64
+	titleAnalyzer  string
+}
+
+// Title analyzers a collection may choose (Layout.Analyzer in
+// content-source.yaml).
+const (
+	// AnalyzerStandard is bleve's standard analyzer: unicode
+	// tokenisation, lowercase, English stop words. The default.
+	AnalyzerStandard = "standard"
+	// AnalyzerNgram indexes titles as edge n-grams (3–8 characters) so
+	// a partial or misspelt word still matches its beginning
+	// ("datadg" → "datadog"). It multiplies the title term count and is
+	// meant for a hub tier: a small collection of routing pages. It is
+	// refused for a corpus over MaxNgramCorpusBytes.
+	AnalyzerNgram = "ngram"
+	// ngramAnalyzerName is the registered custom analyzer.
+	ngramAnalyzerName = "meerkat_title_ngram"
+)
+
+// MaxNgramCorpusBytes bounds the corpus an n-gram title analyzer may be
+// used on: 1 MiB, the hub tier size the mob design sets.
+const MaxNgramCorpusBytes = 1 << 20
+
+// WithTitleAnalyzer selects the analyzer for the title field:
+// AnalyzerStandard (default) or AnalyzerNgram.
+func WithTitleAnalyzer(name string) Option {
+	return func(idx *Index) {
+		idx.titleAnalyzer = name
+	}
 }
 
 // Option is a functional option for configuring an Index at construction time.
@@ -89,7 +125,31 @@ func New(opts ...Option) (*Index, error) {
 // hold pages from a non-embedded source index them directly, without the
 // build-time content embed. New is NewFromPages(kb.List(), opts...).
 func NewFromPages(pages []kb.Page, opts ...Option) (*Index, error) {
-	idx, err := bleve.NewMemOnly(buildMapping())
+	// Options that shape the mapping must be known before the index
+	// exists; apply them to a scratch value first.
+	var pre Index
+	for _, opt := range opts {
+		opt(&pre)
+	}
+	switch pre.titleAnalyzer {
+	case "", AnalyzerStandard:
+		pre.titleAnalyzer = AnalyzerStandard
+	case AnalyzerNgram:
+		var size int
+		for _, p := range pages {
+			size += len(p.Title) + len(p.Body)
+		}
+		if size > MaxNgramCorpusBytes {
+			return nil, fmt.Errorf("title analyzer %q is for a hub tier: this corpus is %d bytes, over the %d-byte cap", AnalyzerNgram, size, MaxNgramCorpusBytes)
+		}
+	default:
+		return nil, fmt.Errorf("unknown title analyzer %q (want %s or %s)", pre.titleAnalyzer, AnalyzerStandard, AnalyzerNgram)
+	}
+	mapping, err := buildMapping(pre.titleAnalyzer)
+	if err != nil {
+		return nil, err
+	}
+	idx, err := bleve.NewMemOnly(mapping)
 	if err != nil {
 		return nil, fmt.Errorf("create bleve index: %w", err)
 	}
@@ -110,6 +170,7 @@ func NewFromPages(pages []kb.Page, opts ...Option) (*Index, error) {
 		bleve:          idx,
 		pages:          pageMap,
 		categoryBoosts: make(map[string]float64),
+		titleAnalyzer:  pre.titleAnalyzer,
 	}
 	for _, opt := range opts {
 		opt(result)
@@ -123,11 +184,15 @@ func NewFromPages(pages []kb.Page, opts ...Option) (*Index, error) {
 // present at startup.
 func indexDoc(p kb.Page) map[string]any {
 	return map[string]any{
-		"id":       p.ID,
-		"title":    p.Title,
-		"body":     p.Body,
-		"category": p.Front.Category,
-		ownerField: ownerToken(p),
+		"id":             p.ID,
+		"title":          p.Title,
+		"body":           p.Body,
+		"category":       p.Front.Category,
+		subcategoryField: p.Front.Subcategory,
+		statusField:      p.Front.Status,
+		typeField:        p.Front.Type,
+		tagsField:        p.Front.Tags,
+		ownerField:       ownerToken(p),
 	}
 }
 
@@ -140,6 +205,16 @@ func indexDoc(p kb.Page) map[string]any {
 // are a slug plus a 16-hex digest, or the fixed "local" — and the
 // private form is prefixed anyway, so the two spaces cannot overlap even
 // if that ever changed.
+// Keyword fields indexed from frontmatter (meerkat-mob issue C) so
+// mk_list's filters can be query clauses instead of a post-list walk.
+// Each is a keyword: the exact value, never a token of it.
+const (
+	subcategoryField = "subcategory"
+	statusField      = "status"
+	typeField        = "type"
+	tagsField        = "tags"
+)
+
 const (
 	ownerField  = "owner"
 	publicToken = "public"
@@ -305,19 +380,14 @@ func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result
 //	metadata and silently shrink the result set. An unfiltered viewer
 //	adds no clause, and scores are unchanged either way.
 func (i *Index) QueryAs(ctx context.Context, v kb.Viewer, q string, limit int) ([]Result, error) {
-	if q == "" {
-		return nil, nil
-	}
-	if err := validateQuery(q); err != nil {
-		return nil, err
-	}
-	limit = clampLimit(limit)
+	out, _, err := i.QueryStaged(ctx, v, q, limit)
+	return out, err
+}
 
-	// Build a disjunction across (boosted title) OR (boosted id) OR
-	// (body) OR (per-category boost clauses). The body fallback lets us
-	// still match on free-text terms while strongly preferring documents
-	// whose title or path matches. Category boost clauses only fire when
-	// the doc is in the relevant category AND another clause matched.
+// exactQuery builds the exact stage: the BM25 query meerkat has always
+// run — title (×5) and id (×3) match queries plus the bleve query-string
+// form over the body, plus one boosted clause per configured category.
+func (i *Index) exactQuery(q string) query.Query {
 	titleQ := bleve.NewMatchQuery(q)
 	titleQ.SetField("title")
 	titleQ.SetBoost(5.0)
@@ -326,16 +396,11 @@ func (i *Index) QueryAs(ctx context.Context, v kb.Viewer, q string, limit int) (
 	idQ.SetField("id")
 	idQ.SetBoost(3.0)
 
-	// Body uses query string so phrase/syntax features still work
-	// for free-text queries.
 	bodyQ := bleve.NewQueryStringQuery(q)
 
-	clauses := []query.Query{titleQ, idQ, bodyQ}
+	clauses := make([]query.Query, 0, 3+len(i.categoryBoosts))
+	clauses = append(clauses, titleQ, idQ, bodyQ)
 
-	// For each configured category→weight, add a conjunction clause that
-	// fires only when the document belongs to that category AND matches
-	// the query content. This keeps non-boosted categories scoring
-	// naturally via the title/id/body clauses above.
 	for category, weight := range i.categoryBoosts {
 		catQ := bleve.NewTermQuery(category)
 		catQ.SetField("category")
@@ -346,8 +411,12 @@ func (i *Index) QueryAs(ctx context.Context, v kb.Viewer, q string, limit int) (
 		catBoost.SetBoost(weight)
 		clauses = append(clauses, catBoost)
 	}
+	return bleve.NewDisjunctionQuery(clauses...)
+}
 
-	var combined query.Query = bleve.NewDisjunctionQuery(clauses...)
+// run executes one stage's query under the viewer's visibility clause
+// and assembles results with snippets.
+func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limit int) ([]Result, error) {
 	if vis := visibilityClause(v); vis != nil {
 		combined = bleve.NewConjunctionQuery(vis, combined)
 	}
@@ -357,7 +426,7 @@ func (i *Index) QueryAs(ctx context.Context, v kb.Viewer, q string, limit int) (
 
 	res, err := i.bleve.SearchInContext(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("search %q: %w", q, err)
+		return nil, fmt.Errorf("search: %w", err)
 	}
 
 	out := make([]Result, 0, len(res.Hits))
@@ -367,14 +436,6 @@ func (i *Index) QueryAs(ctx context.Context, v kb.Viewer, q string, limit int) (
 			continue // index/page map drift - shouldn't happen
 		}
 		if !v.CanSee(page) {
-			// Unreachable: visibilityClause already excluded this document
-			// from the search. It is here as a second, independent line of
-			// defence — the clause is built from the same viewer, but this
-			// check reads the page rather than an index field, so a future
-			// mapping/analysis mistake that made the clause match too much
-			// fails closed instead of disclosing. It is NOT the mechanism:
-			// a post-filter cannot undo truncation, which is why the clause
-			// exists.
 			continue
 		}
 		snippet := ""
@@ -388,7 +449,7 @@ func (i *Index) QueryAs(ctx context.Context, v kb.Viewer, q string, limit int) (
 		})
 	}
 	// Bleve already sorts by score, but be explicit so callers can
-	// trust the contract regardless of backend.
+	// rely on the order.
 	sort.SliceStable(out, func(a, b int) bool { return out[a].Score > out[b].Score })
 	return out, nil
 }
@@ -405,14 +466,28 @@ func (i *Index) Close() error {
 
 // buildMapping configures Bleve's analysis pipeline. Title gets a
 // higher boost than body so page-name matches outrank casual mentions.
-func buildMapping() *mapping.IndexMappingImpl {
+func buildMapping(titleAnalyzer string) (*mapping.IndexMappingImpl, error) {
 	im := bleve.NewIndexMapping()
 
 	docMap := bleve.NewDocumentMapping()
 
 	titleField := bleve.NewTextFieldMapping()
 	titleField.Analyzer = "standard"
+	if titleAnalyzer == AnalyzerNgram {
+		if err := registerNgramAnalyzer(im); err != nil {
+			return nil, err
+		}
+		titleField.Analyzer = ngramAnalyzerName
+	}
 	docMap.AddFieldMappingsAt("title", titleField)
+
+	for _, f := range []string{subcategoryField, statusField, typeField, tagsField} {
+		kw := bleve.NewTextFieldMapping()
+		kw.Analyzer = keywordAnalyzer
+		kw.IncludeInAll = false
+		kw.IncludeTermVectors = false
+		docMap.AddFieldMappingsAt(f, kw)
+	}
 
 	idField := bleve.NewTextFieldMapping()
 	idField.Analyzer = "standard"
@@ -447,5 +522,26 @@ func buildMapping() *mapping.IndexMappingImpl {
 	docMap.AddFieldMappingsAt(ownerField, ownerFieldMapping)
 
 	im.AddDocumentMapping("_default", docMap)
-	return im
+	return im, nil
+}
+
+// registerNgramAnalyzer adds the edge n-gram title analyzer to a
+// mapping: unicode tokens, lowercased, expanded to their 3–8 character
+// prefixes.
+func registerNgramAnalyzer(im *mapping.IndexMappingImpl) error {
+	if err := im.AddCustomTokenFilter("meerkat_edge_ngram", map[string]any{
+		"type": edgengram.Name,
+		"min":  3.0,
+		"max":  8.0,
+	}); err != nil {
+		return fmt.Errorf("register edge n-gram filter: %w", err)
+	}
+	if err := im.AddCustomAnalyzer(ngramAnalyzerName, map[string]any{
+		"type":          custom.Name,
+		"tokenizer":     unicode.Name,
+		"token_filters": []any{lowercase.Name, "meerkat_edge_ngram"},
+	}); err != nil {
+		return fmt.Errorf("register n-gram analyzer: %w", err)
+	}
+	return nil
 }
