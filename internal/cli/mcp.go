@@ -13,6 +13,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/mcp"
+	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/traversal"
 )
 
@@ -318,6 +319,15 @@ func outcomeOptions(ctx context.Context) (mcp.OutcomeOptions, error) {
 		out.Log = log
 	}
 	registry().SetCache(activeCache, out.Log)
+	idle := contentsource.DefaultSessionIdleTimeout
+	if activeSessions != nil {
+		idle = activeSessions.IdleTimeout
+	}
+	limits := registry().TreeLimits()
+	if limits == (contentsource.Limits{}) {
+		limits = contentsource.DefaultLimits
+	}
+	out.Sessions = retrieval.New(idle, retrieval.Limits{MaxHops: limits.MaxHops, MaxSteps: limits.MaxSteps, MaxAttempts: limits.MaxAttempts})
 	if spec := activeIntake; spec != nil {
 		store, err := spec.Open(ctx, "")
 		if err != nil {

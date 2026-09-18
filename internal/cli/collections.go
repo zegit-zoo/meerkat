@@ -47,6 +47,9 @@ var activeIntake *memory.Spec
 // activeCache is the runtime `cache:` block, or nil (defaults).
 var activeCache *contentsource.CacheSpec
 
+// activeSessions is the runtime `sessions:` block, or nil (defaults).
+var activeSessions *contentsource.SessionsSpec
+
 // registry returns the collections this invocation serves, falling back
 // to a single collection over the process-global KB filesystem.
 func registry() *collections.Registry {

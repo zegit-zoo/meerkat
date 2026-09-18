@@ -970,6 +970,16 @@ search syntax are never rewritten. A hub collection can set
 `layout.analyzer: ngram` to index titles as edge n-grams. See
 [docs/SEARCH.md](docs/SEARCH.md).
 
+### Retrieval sessions and SLIs
+
+Calls sharing a `session_id` (or an MCP session) form a retrieval
+session: one `meerkat.retrieval.session` span parenting the calls, and
+histograms for time to first context, time to first relevant context,
+time to give up, hops, steps and wrong turns, plus quality per tier from
+`mk_report_outcome`. The tree's traversal limits are enforced per
+session with a structured `limit_reached` answer. See
+[docs/design/observability.md](docs/design/observability.md#retrieval-sessions-and-slis).
+
 ### Reporting outcomes (`mk_report_outcome`)
 
 At the end of a retrieval an agent reports how it went: the outcome,

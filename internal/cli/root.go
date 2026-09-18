@@ -155,6 +155,7 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 				activeObservability = nil
 				activeIntake = nil
 				activeCache = nil
+				activeSessions = nil
 				return nil
 			}
 			resolved, err := contentsource.ResolveRuntimeCollections(cmd.Context(), contentSourceFlag)
@@ -186,6 +187,11 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 				return err
 			}
 			activeCache = cacheSpec
+			sessionsSpec, err := contentsource.LoadRuntimeSessions(contentSourceFlag)
+			if err != nil {
+				return err
+			}
+			activeSessions = sessionsSpec
 			// Point the process-global KB filesystem at the FIRST resolved
 			// collection. For every single-collection configuration (which
 			// is every configuration that predates collections) that is

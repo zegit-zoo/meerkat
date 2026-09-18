@@ -57,20 +57,32 @@ type Metrics struct {
 	mounts           *prometheus.CounterVec
 	mountDuration    *prometheus.HistogramVec
 	pathTemperature  prometheus.Histogram
-	sourceResolves   *prometheus.CounterVec
-	sourceDuration   *prometheus.HistogramVec
-	sourceCache      *prometheus.CounterVec
-	sourceBytes      *prometheus.CounterVec
-	searches         *prometheus.CounterVec
-	searchDuration   *prometheus.HistogramVec
-	searchResults    prometheus.Histogram
-	ambiguous        prometheus.Counter
-	memorySaves      *prometheus.CounterVec
-	memoryDuration   *prometheus.HistogramVec
-	memoryErrors     *prometheus.CounterVec
-	toolPayload      *prometheus.HistogramVec
-	exportFailures   *prometheus.CounterVec
-	exportSpansDrop  prometheus.Counter
+
+	retrievalFirstContext  *prometheus.HistogramVec
+	retrievalFirstRelevant *prometheus.HistogramVec
+	retrievalGiveUp        prometheus.Histogram
+	retrievalHops          prometheus.Histogram
+	retrievalSteps         prometheus.Histogram
+	retrievalWrongTurns    prometheus.Histogram
+	retrievalSessions      *prometheus.CounterVec
+	retrievalAccuracy      *prometheus.HistogramVec
+	retrievalCompleteness  *prometheus.HistogramVec
+	retrievalAnswerQuality *prometheus.HistogramVec
+	retrievalLimitReached  *prometheus.CounterVec
+	sourceResolves         *prometheus.CounterVec
+	sourceDuration         *prometheus.HistogramVec
+	sourceCache            *prometheus.CounterVec
+	sourceBytes            *prometheus.CounterVec
+	searches               *prometheus.CounterVec
+	searchDuration         *prometheus.HistogramVec
+	searchResults          prometheus.Histogram
+	ambiguous              prometheus.Counter
+	memorySaves            *prometheus.CounterVec
+	memoryDuration         *prometheus.HistogramVec
+	memoryErrors           *prometheus.CounterVec
+	toolPayload            *prometheus.HistogramVec
+	exportFailures         *prometheus.CounterVec
+	exportSpansDrop        prometheus.Counter
 }
 
 // Bucket sets. Named so the choice behind each is reviewable.
@@ -150,6 +162,59 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 			Help:    "Distribution of collection temperatures (traversals since mount) at each flush.",
 			Buckets: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000},
 		}),
+		retrievalFirstContext: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "meerkat_retrieval_time_to_first_context_seconds",
+			Help:    "Seconds from a retrieval session's first call to its first search hit or shown page, by deepest tier reached and whether every path was already resident (hot).",
+			Buckets: latencyBuckets,
+		}, []string{"tier_reached", "hot"}),
+		retrievalFirstRelevant: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "meerkat_retrieval_time_to_first_relevant_context_seconds",
+			Help:    "Seconds from a retrieval session's first call to the shown page that answered it (the last show not followed by a search, confirmed by a found report), by tier reached and hot.",
+			Buckets: latencyBuckets,
+		}, []string{"tier_reached", "hot"}),
+		retrievalGiveUp: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "meerkat_retrieval_time_to_give_up_seconds",
+			Help:    "Seconds from a retrieval session's first call to its end when nothing was found (not_found, gave_up, timeout).",
+			Buckets: latencyBuckets,
+		}),
+		retrievalHops: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "meerkat_retrieval_collection_hops",
+			Help:    "Collection boundaries crossed per retrieval session.",
+			Buckets: []float64{0, 1, 2, 3, 4, 5, 8, 12, 20},
+		}),
+		retrievalSteps: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "meerkat_retrieval_steps",
+			Help:    "Tool calls per retrieval session.",
+			Buckets: []float64{1, 2, 3, 5, 8, 12, 20, 40, 80},
+		}),
+		retrievalWrongTurns: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "meerkat_retrieval_wrong_turns",
+			Help:    "Hops into a collection that was never shown from, per retrieval session.",
+			Buckets: []float64{0, 1, 2, 3, 5, 8, 12},
+		}),
+		retrievalSessions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "meerkat_retrieval_sessions_total",
+			Help: "Retrieval sessions ended, by outcome (found, not_found, gave_up, timeout).",
+		}, []string{"outcome"}),
+		retrievalAccuracy: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "meerkat_retrieval_accuracy",
+			Help:    "Consumer-reported accuracy (0..1) of a retrieval session's answer, by deepest tier reached.",
+			Buckets: qualityBuckets,
+		}, []string{"tier"}),
+		retrievalCompleteness: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "meerkat_retrieval_completeness",
+			Help:    "Consumer-reported completeness (0..1), by deepest tier reached.",
+			Buckets: qualityBuckets,
+		}, []string{"tier"}),
+		retrievalAnswerQuality: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "meerkat_retrieval_answer_quality",
+			Help:    "Consumer-reported answer quality (0..1), by deepest tier reached.",
+			Buckets: qualityBuckets,
+		}, []string{"tier"}),
+		retrievalLimitReached: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "meerkat_retrieval_limit_reached_total",
+			Help: "Retrieval sessions that hit a traversal limit, by limit (hops, steps, attempts).",
+		}, []string{"limit"}),
 		treeDepth: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "meerkat_tree_depth",
 			Help: "Deepest knowledge base declared in the tree this process serves (root = 0; 0 for a flat deployment; the hard cap is 5).",
@@ -220,6 +285,9 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 		reg.MustRegister(
 			m.indexBuilds, m.indexDuration, m.indexPages, m.treeDepth, m.outcomes,
 			m.cacheResident, m.cacheFill, m.cacheCollections, m.cacheCulls, m.mounts, m.mountDuration, m.pathTemperature,
+			m.retrievalFirstContext, m.retrievalFirstRelevant, m.retrievalGiveUp, m.retrievalHops, m.retrievalSteps,
+			m.retrievalWrongTurns, m.retrievalSessions, m.retrievalAccuracy, m.retrievalCompleteness,
+			m.retrievalAnswerQuality, m.retrievalLimitReached,
 			m.sourceResolves, m.sourceDuration, m.sourceCache, m.sourceBytes,
 			m.searches, m.searchDuration, m.searchResults, m.ambiguous,
 			m.memorySaves, m.memoryDuration, m.memoryErrors,
@@ -246,6 +314,70 @@ func (m *Metrics) SetIndexedPages(n int) {
 		return
 	}
 	m.indexPages.Set(float64(n))
+}
+
+// latencyBuckets span a fast hot path (tens of ms) to a slow give-up
+// (minutes).
+var latencyBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300}
+
+// qualityBuckets cover a 0..1 score.
+var qualityBuckets = []float64{0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1}
+
+// RetrievalSession observes one ended session. Durations are seconds;
+// a zero first-context or first-relevant duration means "never" and is
+// not observed.
+func (m *Metrics) RetrievalSession(outcome string, tier int, hot bool, hops, steps, wrongTurns int, firstContext, firstRelevant, total float64) {
+	if m == nil {
+		return
+	}
+	outcome = boundedRetrievalOutcome(outcome)
+	t, h := fmt.Sprintf("%d", tier), fmt.Sprintf("%t", hot)
+	m.retrievalSessions.WithLabelValues(outcome).Inc()
+	m.retrievalHops.Observe(float64(hops))
+	m.retrievalSteps.Observe(float64(steps))
+	m.retrievalWrongTurns.Observe(float64(wrongTurns))
+	if firstContext > 0 {
+		m.retrievalFirstContext.WithLabelValues(t, h).Observe(firstContext)
+	}
+	if firstRelevant > 0 {
+		m.retrievalFirstRelevant.WithLabelValues(t, h).Observe(firstRelevant)
+	}
+	if outcome != "found" {
+		m.retrievalGiveUp.Observe(total)
+	}
+}
+
+// RetrievalQuality observes the consumer-reported quality of a session
+// by the deepest tier it reached.
+func (m *Metrics) RetrievalQuality(tier int, accuracy, completeness, answerQuality float64) {
+	if m == nil {
+		return
+	}
+	t := fmt.Sprintf("%d", tier)
+	m.retrievalAccuracy.WithLabelValues(t).Observe(accuracy)
+	m.retrievalCompleteness.WithLabelValues(t).Observe(completeness)
+	m.retrievalAnswerQuality.WithLabelValues(t).Observe(answerQuality)
+}
+
+// RetrievalLimitReached counts a session hitting a traversal limit.
+func (m *Metrics) RetrievalLimitReached(limit string) {
+	if m == nil {
+		return
+	}
+	switch limit {
+	case "hops", "steps", "attempts":
+	default:
+		limit = "other"
+	}
+	m.retrievalLimitReached.WithLabelValues(limit).Inc()
+}
+
+func boundedRetrievalOutcome(s string) string {
+	switch s {
+	case "found", "not_found", "gave_up", "timeout":
+		return s
+	}
+	return "other"
 }
 
 // Mounted records one knowledge-base mount by trigger, outcome and

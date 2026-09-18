@@ -209,6 +209,19 @@ const (
 	KeyOutcomeTierReached = attribute.Key("meerkat.outcome.tier_reached")
 	KeyOutcomeHasQuality  = attribute.Key("meerkat.outcome.has_quality")
 
+	// --- retrieval sessions (issue F) ----------------------------------
+	//
+	// Counts, a closed-set outcome, a boolean and a tier number. No
+	// session ID, no collection name, no page ID.
+	KeyRetrievalOutcome     = attribute.Key("meerkat.retrieval.outcome")
+	KeyRetrievalHops        = attribute.Key("meerkat.retrieval.hops")
+	KeyRetrievalSteps       = attribute.Key("meerkat.retrieval.steps")
+	KeyRetrievalAttempts    = attribute.Key("meerkat.retrieval.attempts")
+	KeyRetrievalWrongTurns  = attribute.Key("meerkat.retrieval.wrong_turns")
+	KeyRetrievalHotPath     = attribute.Key("meerkat.retrieval.hot_path")
+	KeyRetrievalTierReached = attribute.Key("meerkat.retrieval.tier_reached")
+	KeyRetrievalLimit       = attribute.Key("meerkat.retrieval.limit")
+
 	// --- cache and lazy mounts (issue E) -------------------------------
 	//
 	// A mount trigger (lazy | eager | warmstart), a tier number, a byte
@@ -252,6 +265,7 @@ const (
 	SpanReadiness        = "meerkat.readiness"
 	SpanOutcomeReport    = "meerkat.outcome.report"
 	SpanMount            = "meerkat.mount"
+	SpanRetrievalSession = "meerkat.retrieval.session"
 )
 
 // Refresh phase span names. The six steps ReloadContent/ReloadMemory

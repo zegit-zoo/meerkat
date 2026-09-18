@@ -122,6 +122,8 @@ type Config struct {
 	// Cache is the resident budget and cold policy for lazily mounted
 	// knowledge bases in a tree: deployment. See cache.go.
 	Cache *CacheSpec `yaml:"cache,omitempty"`
+	// Sessions bounds retrieval sessions in time. See sessions.go.
+	Sessions *SessionsSpec `yaml:"sessions,omitempty"`
 }
 
 // Collection is one named entry of a `collections:` list — a Source
@@ -361,6 +363,9 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
 	}
 	if err := cfg.Cache.Validate("cache"); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
+	}
+	if err := cfg.Sessions.Validate("sessions"); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
 	}
 	if cfg.Intake != nil {

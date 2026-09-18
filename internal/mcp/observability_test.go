@@ -27,6 +27,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kb"
+	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
@@ -159,6 +160,9 @@ func newTracedFixture(t *testing.T, opts tracedOptions) *tracedFixture {
 		Logger:      logger,
 		Metrics:     f.reg,
 		Telemetry:   tel,
+		// Retrieval sessions (issue F) on, so every traced test also
+		// exercises the session span and its SLIs.
+		Outcome: OutcomeOptions{Sessions: retrieval.New(0, retrieval.Limits{MaxHops: 12, MaxSteps: 40, MaxAttempts: 20})},
 	})
 	if err != nil {
 		t.Fatalf("NewHosted: %v", err)

@@ -847,3 +847,17 @@ content:
 #   retry_after: 2s              # what an async cold answer asks the caller to wait
 #   warm_start_days: 7           # read temperature flushes from the traversal log
 #   flush_interval: 5m           # write temperatures to the traversal log
+
+# --- sessions: retrieval-session bounds --------------------------------------
+#
+# Every tool call sharing a session_id (or the MCP client session) within
+# the idle window is one retrieval session: one meerkat.retrieval.session
+# span and one observation of each SLI histogram when it ends (on
+# mk_report_outcome, idle timeout, or the MCP session closing). Traversal
+# limits come from the tree root's manifest limits: (12 hops / 40 steps /
+# 20 attempts when unset). See docs/design/observability.md, "Retrieval
+# sessions and SLIs".
+#
+# sessions:
+#   idle_timeout: 120s           # >= 5s; a quiet session ends as gave_up
+#                                # (nothing shown) or timeout

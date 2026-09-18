@@ -22,6 +22,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/memory"
 	"github.com/zegit-zoo/meerkat/internal/refresh"
+	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
@@ -249,6 +250,9 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	// Lazy-mount cache: warm start from the traversal log and flush
 	// temperatures until shutdown (both no-ops without a log).
 	s.stopCache = startCache(ctx, reg)
+	stopSessions := startSessions(ctx, cfg.Outcome.Sessions)
+	prevStop := s.stopCache
+	s.stopCache = func() { prevStop(); stopSessions() }
 
 	if err := indexAll(ctx, reg); err != nil {
 		abandon()
@@ -293,8 +297,11 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	hooks.AddOnRegisterSession(func(context.Context, mcpserver.ClientSession) {
 		s.metrics.sessions.Inc()
 	})
-	hooks.AddOnUnregisterSession(func(context.Context, mcpserver.ClientSession) {
+	hooks.AddOnUnregisterSession(func(hctx context.Context, cs mcpserver.ClientSession) {
 		s.metrics.sessions.Dec()
+		// A client that went away without reporting ends its retrieval
+		// session as a timeout (issue F).
+		cfg.Outcome.Sessions.End(telemetry.NewContext(hctx, s.tel), cs.SessionID(), retrieval.OutcomeTimeout, nil)
 	})
 
 	// AllowAnonymousPersonal is deliberately false on this transport,
