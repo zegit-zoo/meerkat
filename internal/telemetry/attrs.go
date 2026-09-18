@@ -127,7 +127,7 @@ const (
 	// --- content sources ----------------------------------------------
 
 	// KeySourceType is the bounded source type: embedded | local | url |
-	// gcs-object | gcs-prefix. See SourceType.
+	// gcs-object | gcs-prefix | s3-object | s3-prefix. See SourceType.
 	KeySourceType = attribute.Key("meerkat.source.type")
 	// KeyCacheResult is hit | miss.
 	KeyCacheResult = attribute.Key("meerkat.source.cache")
@@ -138,6 +138,11 @@ const (
 	// KeyGCSOperation is the storage operation: attrs | list | read.
 	// Never the bucket, never the object name.
 	KeyGCSOperation = attribute.Key("meerkat.gcs.operation")
+	// KeyS3Operation is the same vocabulary for an S3-compatible store
+	// (AWS, Garage, MinIO): attrs | list | read. Never the bucket, the
+	// key, or the endpoint — an endpoint names a deployment's storage
+	// topology as surely as a bucket does.
+	KeyS3Operation = attribute.Key("meerkat.s3.operation")
 
 	// --- memory --------------------------------------------------------
 
@@ -205,6 +210,7 @@ const (
 	SpanSourceResolve    = "meerkat.source.resolve"
 	SpanSourceProbe      = "meerkat.source.probe"
 	SpanGCS              = "meerkat.gcs"
+	SpanS3               = "meerkat.s3"
 	SpanMemorySave       = "meerkat.memory.save"
 	SpanMemoryStage      = "meerkat.memory.stage"
 	SpanMemoryStore      = "meerkat.memory.store"
@@ -252,6 +258,8 @@ const (
 	SourceURL       = "url"
 	SourceGCSObject = "gcs-object"
 	SourceGCSPrefix = "gcs-prefix"
+	SourceS3Object  = "s3-object"
+	SourceS3Prefix  = "s3-prefix"
 	SourceOther     = "other"
 )
 
@@ -285,6 +293,7 @@ const (
 const (
 	BackendLocal = "local"
 	BackendGCS   = "gcs"
+	BackendS3    = "s3"
 	BackendOther = "other"
 )
 
@@ -326,8 +335,8 @@ func BoundedTool(name string) string {
 	return "other"
 }
 
-// SourceType maps a content-source type plus its GCS mode to the bounded
-// vocabulary above. It takes the raw strings rather than importing
+// SourceType maps a content-source type plus its object-store mode
+// (bundle object or prefix tree) to the bounded vocabulary above. It takes the raw strings rather than importing
 // internal/contentsource, which would be a dependency cycle (that
 // package embeds this one's Config).
 func SourceType(typ string, hasObject, hasPrefix bool) string {
@@ -344,6 +353,14 @@ func SourceType(typ string, hasObject, hasPrefix bool) string {
 			return SourceGCSObject
 		case hasPrefix:
 			return SourceGCSPrefix
+		}
+		return SourceOther
+	case "s3":
+		switch {
+		case hasObject:
+			return SourceS3Object
+		case hasPrefix:
+			return SourceS3Prefix
 		}
 		return SourceOther
 	}

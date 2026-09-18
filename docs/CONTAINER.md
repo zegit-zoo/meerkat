@@ -83,8 +83,9 @@ pod security context fields express the same thing declaratively; see
 
 The one case that **does** need a writable path: pointing the running
 container at external content via `--content-source`/
-`MEERKAT_CONTENT_SOURCE` with `content.type: url` (or discovery of a
-`type: local`/`url` `content-source.yaml` under `$XDG_CONFIG_HOME`). See
+`MEERKAT_CONTENT_SOURCE` with `content.type: url`, `gcs` or `s3` (or
+discovery of a `type: local`/`url`/`gcs`/`s3` `content-source.yaml` under
+`$XDG_CONFIG_HOME`). See
 the README's ["Serving content at
 runtime"](../README.md#serving-content-at-runtime) for the full
 resolution order and `type: url`'s cache semantics.
@@ -117,6 +118,15 @@ rather avoid a volume entirely — swap `-v meerkat-cache:...` for
 `type: local` (a bind-mounted directory) needs no cache mount at all —
 only a read-only bind mount of the content directory itself, plus the
 `content-source.yaml` pointing at it.
+
+`type: gcs` and `type: s3` cache under the same `/home/nonroot/.cache`
+path (`meerkat/content/gcs/…` and `meerkat/content/s3/…`) and take their
+credentials from the environment only: Application Default Credentials
+for GCS, the AWS default chain for S3 — `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` (plus `AWS_REGION` if the source has no
+`region:`) for a Garage or MinIO key, or an IRSA / web-identity token on
+EKS. Pass them with `-e` or a secret mount; there is no field for them
+in `content-source.yaml`. See `docs/design/object-stores.md`.
 
 ## Verifying the image (cosign)
 

@@ -92,6 +92,8 @@ func Backend(s Store) string {
 		return "local"
 	case *GCSStore:
 		return "gcs"
+	case *S3Store:
+		return "s3"
 	default:
 		return "other"
 	}

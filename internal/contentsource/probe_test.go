@@ -177,9 +177,9 @@ func TestGCSVersion_PrefixIsQuietAboutUnsafeNames(t *testing.T) {
 func TestGCSVersion_PrefixHonoursTheObjectCountCap(t *testing.T) {
 	fake := newFakeGCS()
 	useFakeGCS(t, fake)
-	orig := maxGCSObjects
-	maxGCSObjects = 2
-	t.Cleanup(func() { maxGCSObjects = orig })
+	orig := maxStoreObjects
+	maxStoreObjects = 2
+	t.Cleanup(func() { maxStoreObjects = orig })
 	for i := range 3 {
 		fake.put(fmt.Sprintf("kb/wiki/p%d.md", i), []byte("---\nid: p\n---\nx\n"))
 	}
@@ -324,7 +324,7 @@ func TestConfig_RefreshRejections(t *testing.T) {
     path: ./kb
     refresh: {interval: 60s}
 `,
-			wantErr: "refresh applies to type: gcs only",
+			wantErr: "refresh applies to type: gcs or",
 		},
 		{
 			name: "refresh on a url source",
@@ -335,7 +335,7 @@ func TestConfig_RefreshRejections(t *testing.T) {
     sha256: "` + strings.Repeat("a", 64) + `"
     refresh: {interval: 60s}
 `,
-			wantErr: "refresh applies to type: gcs only",
+			wantErr: "refresh applies to type: gcs or",
 		},
 		{
 			name: "interval below the minimum",
@@ -371,7 +371,7 @@ func TestConfig_RefreshRejections(t *testing.T) {
       path: /srv/memory
       refresh: {interval: 60s}
 `,
-			wantErr: "refresh applies to type: gcs only",
+			wantErr: "refresh applies to type: gcs or",
 		},
 		{
 			name: "interval without a unit",

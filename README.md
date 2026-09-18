@@ -593,8 +593,8 @@ When `--kb-dir`/`MEERKAT_KB_DIR` is unset, meerkat looks for a
 `content-source.yaml` (steps 2-4 above). An explicit `--content-source`/
 `MEERKAT_CONTENT_SOURCE` path that doesn't exist is a hard error — same
 reasoning as `--kb-dir`: the operator named it, so silently falling through
-would be confusing. Only `content.type: none`, `local`, `url`, and `gcs` are
-valid at runtime:
+would be confusing. Only `content.type: none`, `local`, `url`, `gcs` and `s3`
+are valid at runtime:
 
 ```bash
 meerkat --content-source ./content-source.yaml list
@@ -611,14 +611,16 @@ MEERKAT_CONTENT_SOURCE=./content-source.yaml meerkat list
 - **`url`** fetches and caches an HTTPS archive — see below.
 - **`gcs`** loads a Google Cloud Storage `.tar.gz` object or bucket prefix —
   see below.
+- **`s3`** does the same from an S3-compatible bucket — AWS S3, Garage,
+  MinIO — see below.
 - **`git`** and **`submodule`** are build-time only (they need git and a
   working tree, which a shipped binary can't assume): naming one here fails
   with an explicit error rather than silently serving nothing. Run `make
   sync` to embed it at build time instead, or switch to `type: local`/
-  `type: url`/`type: gcs` for a runtime-resolved source.
+  `type: url`/`type: gcs`/`type: s3` for a runtime-resolved source.
 
 A `layout:` block in this file **is** honoured at runtime for `type: local`,
-`type: url` and `type: gcs` sources — unlike `--kb-dir`, above.
+`type: url`, `type: gcs` and `type: s3` sources — unlike `--kb-dir`, above.
 
 The same file can instead declare **several named collections**, mounted at
 once — see [Multiple collections](#multiple-collections) below.
@@ -712,9 +714,58 @@ cannot be some other generation's. Setting `generation:` explicitly pins the
 deployment — the current generation is then never even looked up, so a later
 overwrite cannot change what this binary serves.
 
+### `type: s3`
+
+Loads content from an S3-compatible bucket — AWS S3, or a self-hosted
+store such as [Garage](https://garagehq.deuxfleurs.fr/) or MinIO — in the
+same two modes as `type: gcs`. Runtime-only.
+
+```yaml
+# (a) bundle mode — one .tar.gz object, keyed by its ETag
+content:
+  type: s3
+  bucket: my-org-knowledge          # bucket NAME, not an s3:// URL
+  object: bundles/kb-v1.2.3.tar.gz
+  # etag: "d41d8cd98f00b204e9800998ecf8427e"   # optional: pin one exact ETag
+
+# (b) prefix mode — an object prefix served as a directory tree, on Garage
+content:
+  type: s3
+  bucket: my-org-knowledge
+  prefix: kb/live/                  # stripped: kb/live/wiki/x.md -> wiki/x.md
+  endpoint: https://s3.example.net  # required for anything that is not AWS
+  region: garage                    # Garage checks it against its s3_region
+  path_style: true                  # Garage/MinIO: <endpoint>/<bucket>/…; not AWS
+```
+
+**Credentials: the AWS default chain, and nothing else.**
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in the environment, a
+`~/.aws/config` profile, IRSA / web identity on EKS, or instance metadata.
+As with `gcs`, there is **no key field in the schema**. Grant the principal
+`s3:GetObject`, plus `s3:ListBucket` for prefix mode.
+
+**Caching is by ETag.** S3 has no generation counter; the ETag is the
+provider's token for "these bytes", and meerkat treats it as **opaque** —
+compared, cached under, and sent back as `If-Match` so the fetch fails
+rather than serving a newer object under the old name. It is never
+assumed to be a content hash (multipart uploads and SSE-KMS make it
+something else), which is why `sha256:` is still available and still
+verified before extraction if you set it:
+
+```
+<user cache dir>/meerkat/content/s3/<hash(endpoint,bucket,object)>/<etag>/
+<user cache dir>/meerkat/content/s3/<hash(endpoint,bucket,prefix)>/<listing-fingerprint>/
+```
+
+In prefix mode the fingerprint covers every listed object's
+`(key, ETag, size)`. Setting `etag:` pins a bundle exactly as
+`generation:` pins a GCS one. Which providers enforce which
+preconditions — and what that means for a `memory:` store on Garage — is
+recorded in [docs/design/object-stores.md](docs/design/object-stores.md).
+
 #### `refresh:` — follow the bucket without a restart
 
-By default a GCS source is resolved **once**, at startup: publishing a new
+By default a GCS or S3 source is resolved **once**, at startup: publishing a new
 generation needs a restart or a rollout. Add a `refresh:` block and a running
 `mk mcp serve-http` follows the bucket instead.
 
@@ -931,11 +982,13 @@ search syntax are never rewritten. A hub collection can set
 | `url:<url>@<digest12>` | A `type: url` `content-source.yaml` source — `<digest12>` is the first 12 hex characters of the verified `sha256` (e.g. `url:https://example.com/kb/v1.2.3.tar.gz@e3b0c44298fc`). |
 | `gcs://<bucket>/<object>@<gen>` | A `type: gcs` bundle source — `<gen>` is the object generation actually fetched. |
 | `gcs://<bucket>/<prefix>*@<fp>` | A `type: gcs` prefix source — `<fp>` fingerprints the listing's `(name, generation)` pairs. |
+| `s3://<bucket>/<object>@<etag>` | A `type: s3` bundle source — `<etag>` is the ETag actually fetched (opaque; read with `If-Match`). |
+| `s3://<bucket>/<prefix>*@<fp>` | A `type: s3` prefix source — `<fp>` fingerprints the listing's `(key, ETag, size)` tuples. |
 | `collections:<n>` | Several collections are mounted; each one's own provenance is reported in the `collections` array (see below). |
 
-Like `url:`, the token after `@` on a `gcs:` line is a *checked* property of
-what's being served — the conditional read cannot return another generation
-— not a label, unlike `disk:`.
+Like `url:`, the token after `@` on a `gcs:` or `s3:` line is a *checked*
+property of what's being served — the conditional read cannot return another
+generation or ETag — not a label, unlike `disk:`.
 
 With several collections mounted, `mk version --json` also carries a
 `collections` array (`name`, `type`, `source`) in configuration order, and

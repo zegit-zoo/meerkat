@@ -107,7 +107,7 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 		}),
 		sourceResolves: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "meerkat_source_resolves_total",
-			Help: "Content-source resolutions, by bounded source type (embedded, local, url, gcs-object, gcs-prefix) and outcome.",
+			Help: "Content-source resolutions, by bounded source type (embedded, local, url, gcs-object, gcs-prefix, s3-object, s3-prefix) and outcome.",
 		}, []string{"type", "outcome"}),
 		sourceDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "meerkat_source_resolve_duration_seconds",
@@ -146,7 +146,7 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 		}, []string{"scope", "outcome"}),
 		memoryDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "meerkat_memory_backend_duration_seconds",
-			Help:    "Memory store latency, by bounded backend (local, gcs) and operation (save, stage, load, stat, fingerprint).",
+			Help:    "Memory store latency, by bounded backend (local, gcs, s3) and operation (save, stage, load, stat, fingerprint).",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"backend", "operation"}),
 		memoryErrors: prometheus.NewCounterVec(prometheus.CounterOpts{

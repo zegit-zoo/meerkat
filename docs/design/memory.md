@@ -521,13 +521,18 @@ replace: true      →  read the current revision, then update from it
 neither            →  create-only
 ```
 
-| | local | GCS |
-| --- | --- | --- |
-| version token | `sha256(bytes)[:16]` | object generation |
-| create | `O_EXCL`-style check under the store lock | `ifGenerationMatch: 0` |
-| update | compare hash under the store lock | `ifGenerationMatch: <n>` |
-| enforced by | this process | **the backend** |
-| durability | temp file + `fsync` + atomic rename | GCS |
+| | local | GCS | S3 |
+| --- | --- | --- | --- |
+| version token | `sha256(bytes)[:16]` | object generation | ETag (opaque) |
+| create | `O_EXCL`-style check under the store lock | `ifGenerationMatch: 0` | `If-None-Match: *` |
+| update | compare hash under the store lock | `ifGenerationMatch: <n>` | `If-Match: "<etag>"` |
+| enforced by | this process | **the backend** | **the backend** — proven at open; or this process with `single_writer: true` |
+| durability | temp file + `fsync` + atomic rename | GCS | the provider |
+
+Not every S3 implementation enforces write preconditions (Garage 2.4
+does not), so `OpenS3` probes for the property before trusting it and
+refuses to open a shared store on a provider that lacks it; see
+`docs/design/object-stores.md`.
 
 A failed precondition is a `*ConflictError` wrapping `ErrConflict`,
 carrying the revision that is actually there, and the tool renders it as

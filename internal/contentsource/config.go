@@ -62,6 +62,14 @@ const (
 	// Credentials / Workload Identity Federation — the schema carries no
 	// key material of any kind. Runtime-only, like TypeURL. See FetchGCS.
 	TypeGCS = "gcs"
+	// TypeS3 loads content from an S3-compatible bucket — AWS S3, or a
+	// self-hosted store such as Garage or MinIO — in the same two modes
+	// as TypeGCS: a single .tar.gz object (keyed by ETag) or an object
+	// prefix served as a directory tree (keyed by a listing fingerprint).
+	// Credentials resolve through the AWS default chain — the schema
+	// carries no key material of any kind. Runtime-only. See FetchS3 and
+	// docs/design/object-stores.md.
+	TypeS3 = "s3"
 )
 
 // Config is the top-level content-source.yaml document.
@@ -192,6 +200,21 @@ type Source struct {
 	// generation).
 	Generation int64 `yaml:"generation,omitempty"`
 
+	// type: s3 — runtime-capable (see FetchS3). Shares bucket:, object:,
+	// prefix: and sha256: with type: gcs; adds the addressing an
+	// S3-compatible store needs. Endpoint is the base URL for anything
+	// that is not AWS ("https://s3.example.net"); Region is the signing
+	// region (Garage validates it against its s3_region; on AWS it may
+	// come from AWS_REGION instead); PathStyle addresses the bucket as
+	// <endpoint>/<bucket>/... — required by Garage, wrong for AWS. ETag
+	// pins a bundle object to one exact ETag, the S3 counterpart of
+	// generation: — set it and the current ETag is never consulted.
+	// There is no field for an access key, deliberately.
+	Endpoint  string `yaml:"endpoint,omitempty"`
+	Region    string `yaml:"region,omitempty"`
+	PathStyle bool   `yaml:"path_style,omitempty"`
+	ETag      string `yaml:"etag,omitempty"`
+
 	// Refresh opts this source into RUNTIME RECONCILIATION: a periodic,
 	// metadata-only probe of the backing object storage that swaps a new
 	// snapshot in when — and only when — the bytes actually changed.
@@ -248,7 +271,7 @@ type Source struct {
 // changes. A relative local memory path under one of them would be
 // written into an entry destined to be superseded, so it is refused at
 // load time — see memory.Spec.Validate.
-func (s Source) ephemeral() bool { return s.Type == TypeURL || s.Type == TypeGCS }
+func (s Source) ephemeral() bool { return s.Type == TypeURL || s.IsObjectStore() }
 
 // Layout locates each embeddable artifact inside the resolved source root.
 type Layout struct {
@@ -444,6 +467,10 @@ func (s Source) validate(p string) error {
 		if err := s.validateGCS(p); err != nil {
 			return err
 		}
+	case TypeS3:
+		if err := s.validateS3(p); err != nil {
+			return err
+		}
 	case TypeURL:
 		if s.URL == "" {
 			return fmt.Errorf("%s.url is required for type: url", p)
@@ -466,7 +493,7 @@ func (s Source) validate(p string) error {
 			return fmt.Errorf("%s.sha256 must be 64 hex characters (a sha256 digest), got %q (%d chars)", p, s.SHA256, len(s.SHA256))
 		}
 	default:
-		return fmt.Errorf("%s.type must be one of none|local|git|submodule|url|gcs, got %q", p, s.Type)
+		return fmt.Errorf("%s.type must be one of none|local|git|submodule|url|gcs|s3, got %q", p, s.Type)
 	}
 	if s.Layout.Wiki == "" {
 		return fmt.Errorf("%s.layout.wiki is required for type: %s", p, s.Type)
@@ -509,14 +536,19 @@ func (s Source) validateRefresh(p string) error {
 	if s.Refresh == nil {
 		return nil
 	}
-	if s.Type != TypeGCS {
-		return fmt.Errorf("%s.refresh applies to type: %s only, but this source is type: %s — "+
-			"a local source is already re-read per request, and a url source is pinned by its mandatory sha256", p, TypeGCS, s.Type)
+	if !s.IsObjectStore() {
+		return fmt.Errorf("%s.refresh applies to type: %s or type: %s only, but this source is type: %s — "+
+			"a local source is already re-read per request, and a url source is pinned by its mandatory sha256", p, TypeGCS, TypeS3, s.Type)
 	}
 	if s.Generation != 0 {
 		return fmt.Errorf("%s: generation: %d pins this source to one immutable object generation, so refresh: can never do anything — "+
 			"remove generation: to follow the object, or remove refresh: to keep serving exactly the pinned bytes",
 			p, s.Generation)
+	}
+	if s.ETag != "" {
+		return fmt.Errorf("%s: etag: %q pins this source to one immutable object version, so refresh: can never do anything — "+
+			"remove etag: to follow the object, or remove refresh: to keep serving exactly the pinned bytes",
+			p, s.ETag)
 	}
 	return s.Refresh.Validate(p + ".refresh")
 }

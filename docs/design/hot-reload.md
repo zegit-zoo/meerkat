@@ -453,8 +453,10 @@ say so with `refresh:`.
   re-reads a store this process is already current with. Harmless and
   bounded by the interval, and the incremental reload above removes most
   of its cost.
-- **Other object stores.** The probe is the same shape for an S3 ETag or
-  an Azure Blob ETag; `Fingerprinter` and `GCSVersion` are the two seams.
+- **Other object stores.** Done for S3: the probe is `ObjectVersion`
+  (ETag for a bundle, a `(key, ETag, size)` listing fingerprint for a
+  prefix) and `S3Store` implements `Fingerprinter`. See
+  `docs/design/object-stores.md` for what each provider enforces.
 - **Per-collection refresh for `type: local`**, if a file watcher ever
   becomes worth its failure modes. The reconciliation half is already
   backend-agnostic — only the probe is GCS-shaped.

@@ -335,7 +335,7 @@ unverified directory.
   reader drains. The per-collection index arrangement paid off a second
   time here — a refresh rebuilds exactly one collection's index and leaves
   the others alone, which one shared index could not have done.
-- **Other object stores.** The `gcsAPI` seam is GCS-shaped but small; S3
-  or Azure Blob would follow the same generation/ETag-keyed pattern. Since
-  #28 there is a second, matching seam to fill in: the cheap version probe
-  (`contentsource.GCSVersion`) and `memory.Fingerprinter`.
+- **Other object stores.** Done for S3 (AWS, Garage, MinIO): the seam is
+  now the provider-neutral `objectStore` interface plus a `storeKind` per
+  provider, with the fetch, probe and cache logic shared — see
+  `docs/design/object-stores.md`. Azure Blob would be one more adapter.

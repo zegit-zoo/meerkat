@@ -15,6 +15,9 @@ const (
 	BackendLocal = "local"
 	// BackendGCS stores them under a Google Cloud Storage prefix.
 	BackendGCS = "gcs"
+	// BackendS3 stores them under a prefix in an S3-compatible bucket
+	// (AWS S3, Garage, MinIO). See S3Store and docs/design/object-stores.md.
+	BackendS3 = "s3"
 )
 
 // DefaultLocalPath is where a `memory: {type: local}` block with no
@@ -69,10 +72,19 @@ func PersonalVisibilities() []string { return []string{VisibilityPrivate, Visibi
 //	  bucket: my-org-knowledge
 //	  prefix: kb/memory/
 //
+//	memory:
+//	  type: s3
+//	  bucket: my-org-knowledge
+//	  prefix: kb/memory/
+//	  endpoint: https://s3.example.net   # omit for AWS
+//	  region: garage
+//	  path_style: true                   # Garage / MinIO; not AWS
+//	  sse: AES256                        # optional; SSE-S3 on AWS
+//
 // Absent, the collection is read-only and mk_save_memory refuses to
 // name it — which is what every pre-existing configuration gets.
 type Spec struct {
-	// Type selects the backend: local | gcs.
+	// Type selects the backend: local | gcs | s3.
 	Type string `yaml:"type"`
 
 	// Path is the directory a type: local store writes into. Relative
@@ -80,11 +92,33 @@ type Spec struct {
 	// Empty means DefaultLocalPath.
 	Path string `yaml:"path,omitempty"`
 
-	// Bucket / Prefix locate a type: gcs store. As everywhere else in
-	// meerkat's GCS support there is no credentials field: authentication
-	// is Application Default Credentials.
+	// Bucket / Prefix locate a type: gcs or type: s3 store. As everywhere
+	// else in meerkat's object-store support there is no credentials
+	// field: authentication is Application Default Credentials (GCS) or
+	// the AWS default chain (S3).
 	Bucket string `yaml:"bucket,omitempty"`
 	Prefix string `yaml:"prefix,omitempty"`
+
+	// Endpoint, Region and PathStyle address a type: s3 store, with the
+	// same meaning as on a type: s3 content source: Endpoint is the base
+	// URL for anything that is not AWS, Region the signing region,
+	// PathStyle the <endpoint>/<bucket>/ addressing Garage and MinIO
+	// need. SSE requests server-side encryption on every write
+	// ("AES256" for SSE-S3, "aws:kms" for SSE-KMS); Garage ignores it
+	// and encrypts at rest by its own configuration instead.
+	Endpoint  string `yaml:"endpoint,omitempty"`
+	Region    string `yaml:"region,omitempty"`
+	PathStyle bool   `yaml:"path_style,omitempty"`
+	SSE       string `yaml:"sse,omitempty"`
+
+	// SingleWriter (type: s3 only) asserts that exactly one meerkat
+	// process writes this store, and makes the store enforce its
+	// optimistic-locking preconditions in-process instead of proving at
+	// startup that the backend enforces them. It is the switch for a
+	// provider that ignores If-Match / If-None-Match on writes (Garage
+	// does); with it, the store gives the local backend's guarantee and
+	// no more. See S3Store.
+	SingleWriter bool `yaml:"single_writer,omitempty"`
 
 	// PersonalVisibility decides who may READ this collection's personal
 	// memories: private (the default — only the principal who wrote it)
@@ -103,8 +137,9 @@ type Spec struct {
 	// collections.Collection.SaveMemory); without this, a memory written
 	// through A stays invisible to B until B restarts.
 	//
-	// type: gcs only — see Validate. A local store has no other writer to
-	// converge with: it is a directory belonging to one process.
+	// type: gcs and type: s3 only — see Validate. A local store has no
+	// other writer to converge with: it is a directory belonging to one
+	// process.
 	Refresh *refresh.Spec `yaml:"refresh,omitempty"`
 }
 
@@ -148,10 +183,13 @@ func (s *Spec) Validate(label string, contentIsEphemeral bool) error {
 	}
 	switch s.Type {
 	case "":
-		return fmt.Errorf("%s.type is required — one of %s|%s", label, BackendLocal, BackendGCS)
+		return fmt.Errorf("%s.type is required — one of %s|%s|%s", label, BackendLocal, BackendGCS, BackendS3)
 	case BackendLocal:
 		if s.Bucket != "" || s.Prefix != "" {
-			return fmt.Errorf("%s: bucket/prefix apply to type: %s, not type: %s", label, BackendGCS, BackendLocal)
+			return fmt.Errorf("%s: bucket/prefix apply to type: %s or %s, not type: %s", label, BackendGCS, BackendS3, BackendLocal)
+		}
+		if s.Endpoint != "" || s.Region != "" || s.PathStyle || s.SSE != "" || s.SingleWriter {
+			return fmt.Errorf("%s: endpoint/region/path_style/sse/single_writer apply to type: %s, not type: %s", label, BackendS3, BackendLocal)
 		}
 		if contentIsEphemeral && !filepath.IsAbs(s.Path) {
 			return fmt.Errorf("%s.path must be absolute for a cache-backed content source: "+
@@ -171,18 +209,46 @@ func (s *Spec) Validate(label string, contentIsEphemeral bool) error {
 		if s.Path != "" {
 			return fmt.Errorf("%s: path applies to type: %s, not type: %s", label, BackendLocal, BackendGCS)
 		}
+		if s.Endpoint != "" || s.Region != "" || s.PathStyle || s.SSE != "" || s.SingleWriter {
+			return fmt.Errorf("%s: endpoint/region/path_style/sse/single_writer apply to type: %s, not type: %s", label, BackendS3, BackendGCS)
+		}
+	case BackendS3:
+		if s.Bucket == "" {
+			return fmt.Errorf("%s.bucket is required for type: %s", label, BackendS3)
+		}
+		if strings.Contains(s.Bucket, "/") {
+			return fmt.Errorf("%s.bucket must be a bucket name, not a path or s3:// URL, got %q", label, s.Bucket)
+		}
+		if s.Prefix == "" {
+			return fmt.Errorf("%s.prefix is required for type: %s — an empty prefix would name the whole bucket", label, BackendS3)
+		}
+		if s.Path != "" {
+			return fmt.Errorf("%s: path applies to type: %s, not type: %s", label, BackendLocal, BackendS3)
+		}
+		if s.Endpoint != "" && !strings.HasPrefix(s.Endpoint, "https://") && !strings.HasPrefix(s.Endpoint, "http://") {
+			return fmt.Errorf("%s.endpoint must be an http(s):// URL, got %q", label, s.Endpoint)
+		}
+		switch s.SSE {
+		case "", "AES256", "aws:kms":
+		default:
+			return fmt.Errorf("%s.sse must be AES256 or aws:kms (or absent), got %q", label, s.SSE)
+		}
 	default:
-		return fmt.Errorf("%s.type must be %s or %s, got %q", label, BackendLocal, BackendGCS, s.Type)
+		return fmt.Errorf("%s.type must be %s, %s or %s, got %q", label, BackendLocal, BackendGCS, BackendS3, s.Type)
 	}
-	if s.Refresh != nil && s.Type != BackendGCS {
+	if s.Refresh != nil && s.Type == BackendS3 && s.SingleWriter {
+		return fmt.Errorf("%s: refresh: and single_writer: true contradict each other — "+
+			"reconciliation exists so several writers converge, and single_writer asserts there is only this one", label)
+	}
+	if s.Refresh != nil && s.Type != BackendGCS && s.Type != BackendS3 {
 		// A local store is a directory this process owns; there is no
 		// second writer to converge with, so a refresh block on one is a
 		// misunderstanding of what reconciliation is for. Refusing it is
 		// better than accepting a poll loop that can only ever re-read what
 		// this process itself wrote.
-		return fmt.Errorf("%s.refresh applies to type: %s only (this store is type: %s) — "+
+		return fmt.Errorf("%s.refresh applies to type: %s or %s only (this store is type: %s) — "+
 			"reconciliation exists so replicas sharing one object store converge, and a local store has no other writer",
-			label, BackendGCS, s.Type)
+			label, BackendGCS, BackendS3, s.Type)
 	}
 	return s.Refresh.Validate(label + ".refresh")
 }
@@ -211,6 +277,8 @@ func (s *Spec) Open(ctx context.Context, contentDir string) (Store, error) {
 		return OpenLocal(dir)
 	case BackendGCS:
 		return OpenGCS(ctx, s.Bucket, s.Prefix)
+	case BackendS3:
+		return OpenS3(ctx, s)
 	default:
 		// Unreachable: Validate runs at config load time.
 		return nil, fmt.Errorf("unsupported memory backend %q", s.Type)
