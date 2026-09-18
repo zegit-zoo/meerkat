@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -51,8 +52,28 @@ collection the page was served from.`,
 				}
 				return err
 			}
+			reg := registry()
 			if asJSON {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(newShowResult(ref))
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(newShowResult(reg, ref))
+			}
+			if ref.Page.IsPointer() {
+				// A pointer's payload is where to go and why; the body,
+				// if any, is the how-to.
+				links := reg.LinksOf(ref)
+				switch {
+				case links.PointerError != "":
+					fmt.Fprintf(cmd.OutOrStdout(), "pointer (invalid): %s\n", links.PointerError)
+				case links.Pointer != nil && !links.Pointer.Resolved:
+					fmt.Fprintf(cmd.OutOrStdout(), "pointer -> %s (unresolved: %s)\n", links.Pointer.String(), links.Pointer.Reason)
+				case links.Pointer != nil:
+					fmt.Fprintf(cmd.OutOrStdout(), "pointer -> %s\n", links.Pointer.String())
+				}
+				if ref.Page.Front.Hint != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "hint: %s\n", ref.Page.Front.Hint)
+				}
+				if strings.TrimSpace(ref.Page.Body) != "" {
+					fmt.Fprintln(cmd.OutOrStdout())
+				}
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), ref.Page.Body)
 			return nil
@@ -79,14 +100,18 @@ type showResult struct {
 	Collection string `json:"collection"`
 	TrustTier  string `json:"trust_tier"`
 	Stale      bool   `json:"stale"`
+	Kind       string `json:"kind"`
+	collections.PageLinks
 }
 
 // newShowResult builds the mk show --json payload for a page reference.
-func newShowResult(ref collections.PageRef) showResult {
+func newShowResult(reg *collections.Registry, ref collections.PageRef) showResult {
 	return showResult{
 		Page:       ref.Page,
 		Collection: ref.Collection,
 		TrustTier:  ref.Page.Front.TrustTier(),
 		Stale:      ref.Page.Front.IsStale(time.Now().UTC()),
+		Kind:       collections.KindOf(ref.Page),
+		PageLinks:  reg.LinksOf(ref),
 	}
 }

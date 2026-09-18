@@ -282,8 +282,14 @@ type searchHit struct {
 	Title      string  `json:"title"`
 	Category   string  `json:"category"`
 	Status     string  `json:"status"`
+	Type       string  `json:"type,omitempty"`
+	Kind       string  `json:"kind"`
 	Score      float64 `json:"score"`
 	Snippet    string  `json:"snippet"`
+	// Pointer hits only: where the hit routes and why.
+	Target         string `json:"target,omitempty"`
+	TargetResolved bool   `json:"target_resolved,omitempty"`
+	Hint           string `json:"hint,omitempty"`
 }
 
 type showRequest struct {
@@ -328,16 +334,20 @@ type showResponse struct {
 	Collection string `json:"collection"`
 	TrustTier  string `json:"trust_tier"`
 	Stale      bool   `json:"stale"`
+	Kind       string `json:"kind"`
+	collections.PageLinks
 }
 
 // newShowResponse builds the POST /show payload for a page reference,
 // mirroring internal/cli/show.go's newShowResult.
-func newShowResponse(ref collections.PageRef) showResponse {
+func newShowResponse(reg *collections.Registry, ref collections.PageRef) showResponse {
 	return showResponse{
 		Page:       ref.Page,
 		Collection: ref.Collection,
 		TrustTier:  ref.Page.Front.TrustTier(),
 		Stale:      ref.Page.Front.IsStale(time.Now().UTC()),
+		Kind:       collections.KindOf(ref.Page),
+		PageLinks:  reg.LinksOf(ref),
 	}
 }
 
@@ -412,13 +422,18 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	out := make([]searchHit, len(results))
 	for i, r := range results {
 		out[i] = searchHit{
-			ID:         r.Page.ID,
-			Collection: r.Collection,
-			Title:      r.Page.Title,
-			Category:   r.Page.Front.Category,
-			Status:     r.Page.Front.Status,
-			Score:      r.Score,
-			Snippet:    oneLine(r.Snippet),
+			ID:             r.Page.ID,
+			Collection:     r.Collection,
+			Title:          r.Page.Title,
+			Category:       r.Page.Front.Category,
+			Status:         r.Page.Front.Status,
+			Type:           r.Page.Front.Type,
+			Kind:           r.Kind,
+			Score:          r.Score,
+			Snippet:        oneLine(r.Snippet),
+			Target:         r.Target,
+			TargetResolved: r.TargetResolved,
+			Hint:           r.Hint,
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -452,7 +467,7 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, newShowResponse(ref))
+	writeJSON(w, http.StatusOK, newShowResponse(s.reg, ref))
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {

@@ -302,7 +302,7 @@ func TestShowPageJSON_Shape(t *testing.T) {
 			Verified:    kb.VerifiedList{{By: "human:ahormati"}},
 		},
 	}
-	out, err := showPageJSON(collections.PageRef{Collection: "default", Page: page})
+	out, err := showPageJSON(collections.Global("test"), collections.PageRef{Collection: "default", Page: page})
 	if err != nil {
 		t.Fatalf("showPageJSON: %v", err)
 	}

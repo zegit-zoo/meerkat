@@ -116,6 +116,11 @@ const (
 
 	// KeyPagesMatched is how many pages an operation resolved.
 	KeyPagesMatched = attribute.Key("meerkat.pages.matched")
+	// KeyLinks and KeyLinkedFrom are how many resolved-or-not links a
+	// shown page carries and how many pages link to it. Counts only —
+	// a link target is a page ID, and page IDs never reach a span.
+	KeyLinks      = attribute.Key("meerkat.show.links")
+	KeyLinkedFrom = attribute.Key("meerkat.show.linked_from")
 	// KeyPagesReturned is how many it returned after filtering.
 	KeyPagesReturned = attribute.Key("meerkat.pages.returned")
 

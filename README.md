@@ -970,6 +970,19 @@ search syntax are never rewritten. A hub collection can set
 `layout.analyzer: ngram` to index titles as edge n-grams. See
 [docs/SEARCH.md](docs/SEARCH.md).
 
+### Links, pointer pages and `mk lint`
+
+`related:` entries are resolved across the mounted collections
+(`<id>`, `<collection>:<id>`, or an external `mcp://<server>`), every
+page view reports `links` and `linked_from`, and a page of
+`type: pointer` with a `target:` (`collection:<name>`,
+`<collection>:<id>`, `mcp://<server>`) and a one-sentence `hint:`
+routes an agent to the next hop — pointer hits outrank content hits,
+and `mk_search` with `bundle: true` groups hits by pointer target into
+capability bundles. Dangling links are warnings in `/readyz`, never an
+outage; `mk lint` lists them and exits 1 for a content repo's CI. See
+[docs/design/links.md](docs/design/links.md).
+
 ### Provenance: `mk version`
 
 `mk version` reports which content is actually being served via the

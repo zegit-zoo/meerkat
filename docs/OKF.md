@@ -197,11 +197,13 @@ by the ingestion pipeline as work to do.
 
 - **meerkat does not produce OKF.** There is no export/generate path,
   only consumption.
-- **No cross-link resolution.** Markdown links between concepts
-  (bundle-relative `/tables/customers.md`, or relative `./orders.md` —
-  §6.1) are left as plain markdown text; meerkat does not validate,
-  rewrite, or follow them, so a broken link has no effect on indexing or
-  serving.
+- **No cross-link resolution in page bodies.** Markdown links between
+  concepts (bundle-relative `/tables/customers.md`, or relative
+  `./orders.md` — §6.1) are left as plain markdown text; meerkat does
+  not validate, rewrite, or follow them, so a broken link has no effect
+  on indexing or serving. Frontmatter `related:` entries *are* resolved
+  (and `type: pointer` pages route across collections) — see
+  [docs/design/links.md](design/links.md) and `mk lint`.
 - **The Attested Computation family is inert.** `type: Attested
   Computation` concepts and their `runtime`, `parameters`, `computation`,
   `executor`, `attester` fields (§10) are preserved under `front.extra`

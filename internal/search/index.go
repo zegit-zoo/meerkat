@@ -47,6 +47,7 @@ type Index struct {
 	pages          map[string]kb.Page
 	categoryBoosts map[string]float64
 	titleAnalyzer  string
+	typeBoosts     map[string]float64
 }
 
 // Title analyzers a collection may choose (Layout.Analyzer in
@@ -74,6 +75,28 @@ const MaxNgramCorpusBytes = 1 << 20
 func WithTitleAnalyzer(name string) Option {
 	return func(idx *Index) {
 		idx.titleAnalyzer = name
+	}
+}
+
+// DefaultTypeBoosts is what an index ranks by when WithTypeBoosts is not
+// given: a hub's routing pages outrank its own thin content, and the
+// two other members of a capability bundle sit between a pointer and a
+// plain page. The values are starting points to be tuned from retrieval
+// telemetry (meerkat-mob issue F), not constants of nature.
+var DefaultTypeBoosts = map[string]float64{
+	kb.TypePointer: 4.0,
+	kb.TypeSkill:   2.0,
+	kb.TypeExample: 1.5,
+}
+
+// WithTypeBoosts configures a per-`type` boost map: a hit whose
+// frontmatter type is in the map has its final score multiplied by the
+// weight (see QueryAs for why this is a multiplier where category
+// boosts are a clause). Passing an empty map disables type boosting;
+// not passing the option at all applies DefaultTypeBoosts.
+func WithTypeBoosts(boosts map[string]float64) Option {
+	return func(idx *Index) {
+		idx.typeBoosts = boosts
 	}
 }
 
@@ -171,6 +194,7 @@ func NewFromPages(pages []kb.Page, opts ...Option) (*Index, error) {
 		pages:          pageMap,
 		categoryBoosts: make(map[string]float64),
 		titleAnalyzer:  pre.titleAnalyzer,
+		typeBoosts:     DefaultTypeBoosts,
 	}
 	for _, opt := range opts {
 		opt(result)
@@ -442,9 +466,21 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 		if frags, ok := hit.Fragments["body"]; ok && len(frags) > 0 {
 			snippet = frags[0]
 		}
+		score := hit.Score
+		// Type boosts multiply the FINAL score rather than adding a
+		// clause the way category boosts do: an additive clause cannot
+		// reliably lift a two-line pointer page above a content page
+		// whose title matches every term, and "the hub's routing pages
+		// outrank its own content" is the property the mob design
+		// needs. A multiplier makes the rule legible: a typed page wins
+		// whenever its own match is within 1/boost of the best content
+		// hit.
+		if weight, ok := i.typeBoosts[page.Front.Type]; ok && weight > 0 {
+			score *= weight
+		}
 		out = append(out, Result{
 			Page:    page,
-			Score:   hit.Score,
+			Score:   score,
 			Snippet: snippet,
 		})
 	}

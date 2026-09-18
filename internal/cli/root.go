@@ -237,7 +237,7 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 			root.AddCommand(c)
 		}
 	}
-	addToGroup(groupKB, newSearchCmd(), newShowCmd(), newListCmd())
+	addToGroup(groupKB, newSearchCmd(), newShowCmd(), newListCmd(), newLintCmd())
 	addToGroup(groupServer, newMCPCmd(), newHTTPCmd())
 	addToGroup(groupOps, newIngestCmd(), newUpdateCmd(), newVersionCmd())
 	return root

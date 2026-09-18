@@ -286,8 +286,15 @@ func searchTool(reg *collections.Registry) mcp.Tool {
 			"Full-text search across the knowledge base "+
 				"(meerkat). Title and ID matches are boosted so "+
 				"page-name lookups (e.g. a concept or service name) "+
-				"rank highest. Returns a JSON list of "+
-				"{id, collection, title, score, snippet, category} hits."+
+				"rank highest, and routing pages (type: pointer) outrank "+
+				"content. Returns a JSON list of "+
+				"{id, collection, title, score, snippet, category, type, kind} hits; "+
+				"a hit with kind 'pointer' also carries target (where to go next: "+
+				"'collection:<name>', '<collection>:<id>', or an external 'mcp://<server>') "+
+				"and hint (why). Follow a pointer by searching its target collection, "+
+				"or with mk_show on its target page. With bundle=true the same hits come "+
+				"back grouped by pointer target as capability bundles "+
+				"{target, hint, pointers, skills, examples, docs}."+
 				collectionSuffix(reg)),
 		mcp.WithString("query",
 			mcp.Required(),
@@ -295,6 +302,9 @@ func searchTool(reg *collections.Registry) mcp.Tool {
 		),
 		mcp.WithNumber("limit",
 			mcp.Description("Maximum number of results (default 10)."),
+		),
+		mcp.WithBoolean("bundle",
+			mcp.Description("Group the hits by pointer target into capability bundles instead of a flat list (default false)."),
 		),
 		collectionArg(reg),
 		// mcp.NewTool defaults every tool's annotations to the MCP spec's
@@ -384,7 +394,12 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 		)
 		span.End()
 
-		body, err := searchResultsJSON(results)
+		var body string
+		if req.GetBool("bundle", false) {
+			body, err = bundlesJSON(query, view.Bundles(results))
+		} else {
+			body, err = searchResultsJSON(results)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("encode results: %w", err)
 		}
@@ -392,24 +407,74 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 	}
 }
 
-// searchResultsJSON renders search results into the stable mk_search wire
-// shape: a JSON array of {id, collection, title, category, status, score,
-// snippet}. id stays the page's own unqualified ID — the collection is a
-// field of its own, never folded into it.
-func searchResultsJSON(results []collections.Hit) (string, error) {
-	simplified := make([]map[string]any, len(results))
+// bundlesJSON renders capability bundles: {query, bundles: [{target,
+// hint, score, pointers, skills, examples, docs}]}, each member in the
+// flat hit shape searchResultsJSON uses.
+func bundlesJSON(query string, bundles []collections.Bundle) (string, error) {
+	type bundle struct {
+		Target   string           `json:"target"`
+		Hint     string           `json:"hint,omitempty"`
+		Score    float64          `json:"score"`
+		Pointers []map[string]any `json:"pointers,omitempty"`
+		Skills   []map[string]any `json:"skills,omitempty"`
+		Examples []map[string]any `json:"examples,omitempty"`
+		Docs     []map[string]any `json:"docs,omitempty"`
+	}
+	out := struct {
+		Query   string   `json:"query"`
+		Bundles []bundle `json:"bundles"`
+	}{Query: query, Bundles: make([]bundle, 0, len(bundles))}
+	for _, b := range bundles {
+		out.Bundles = append(out.Bundles, bundle{
+			Target:   b.Target,
+			Hint:     b.Hint,
+			Score:    b.Score,
+			Pointers: hitMaps(b.Pointers),
+			Skills:   hitMaps(b.Skills),
+			Examples: hitMaps(b.Examples),
+			Docs:     hitMaps(b.Docs),
+		})
+	}
+	body, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+// hitMaps renders hits in the flat wire shape: {id, collection, title,
+// category, status, type, kind, score, snippet} plus, for a pointer,
+// {target, target_resolved, hint}. id stays the page's own unqualified
+// ID — the collection is a field of its own, never folded into it.
+func hitMaps(results []collections.Hit) []map[string]any {
+	out := make([]map[string]any, len(results))
 	for i, r := range results {
-		simplified[i] = map[string]any{
+		m := map[string]any{
 			"id":         r.Page.ID,
 			"collection": r.Collection,
 			"title":      r.Page.Title,
 			"category":   r.Page.Front.Category,
 			"status":     r.Page.Front.Status,
+			"type":       r.Page.Front.Type,
+			"kind":       r.Kind,
 			"score":      r.Score,
 			"snippet":    oneLine(r.Snippet),
 		}
+		if r.Kind == collections.KindPointer {
+			m["target"] = r.Target
+			m["target_resolved"] = r.TargetResolved
+			m["hint"] = r.Hint
+		}
+		out[i] = m
 	}
-	body, err := json.MarshalIndent(simplified, "", "  ")
+	return out
+}
+
+// searchResultsJSON renders search results into the stable mk_search wire
+// shape: a JSON array of hitMaps entries. Fields added since the first
+// release (type, kind, target, hint) are additive; nothing was renamed.
+func searchResultsJSON(results []collections.Hit) (string, error) {
+	body, err := json.MarshalIndent(hitMaps(results), "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -498,9 +563,11 @@ func showHandler(reg *collections.Registry, mem transportOptions) mcpserver.Tool
 			telemetry.Fail(span, telemetry.OutcomeError)
 			return nil, err
 		}
-		span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK), telemetry.KeyPagesReturned.Int(1))
+		links := view.LinksOf(ref)
+		span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK), telemetry.KeyPagesReturned.Int(1),
+			telemetry.KeyLinks.Int(len(links.Links)), telemetry.KeyLinkedFrom.Int(len(links.LinkedFrom)))
 		span.End()
-		body, err := showPageJSON(ref)
+		body, err := showPageJSON(view, ref)
 		if err != nil {
 			return nil, err
 		}
@@ -519,17 +586,25 @@ type showPageOutput struct {
 	Collection string `json:"collection"`
 	TrustTier  string `json:"trust_tier"`
 	Stale      bool   `json:"stale"`
+	// Kind is the routing kind (pointer | skill | example | doc). For a
+	// pointer, Pointer in the embedded PageLinks is where to go and
+	// Front.Hint is why; the body is whatever the author wrote, often
+	// nothing.
+	Kind string `json:"kind"`
+	collections.PageLinks
 }
 
 // showPageJSON renders showPageOutput for a page reference. Split out
 // from showHandler so the shape is directly unit-testable, mirroring
 // searchResultsJSON / listPagesJSON.
-func showPageJSON(ref collections.PageRef) (string, error) {
+func showPageJSON(reg *collections.Registry, ref collections.PageRef) (string, error) {
 	out := showPageOutput{
 		Page:       ref.Page,
 		Collection: ref.Collection,
 		TrustTier:  ref.Page.Front.TrustTier(),
 		Stale:      ref.Page.Front.IsStale(time.Now().UTC()),
+		Kind:       collections.KindOf(ref.Page),
+		PageLinks:  reg.LinksOf(ref),
 	}
 	body, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {

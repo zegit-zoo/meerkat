@@ -61,6 +61,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
@@ -141,8 +142,12 @@ type Collection struct {
 	// mutable at runtime, it needs a lock or an atomic; see
 	// docs/design/hot-reload.md.
 	personalReadsAreCollectionWide bool
-	// overlayMu guards overlay.
-	overlayMu sync.RWMutex
+	// overlayMu guards overlay. overlayGen counts overlay replacements
+	// and additions; together with the snapshot version it is the
+	// cheap "has anything that carries links changed?" answer the
+	// link graph cache (links.go) keys on.
+	overlayMu  sync.RWMutex
+	overlayGen atomic.Uint64
 	// overlay holds the memory documents layered over the collection's
 	// content root, by page ID. It is populated from the memory store at
 	// mount time and extended by every successful write — see
@@ -591,6 +596,7 @@ func (c *Collection) AttachMemory(ctx context.Context, store memory.Store) error
 	c.overlayMu.Lock()
 	c.memory = store
 	c.overlay = pages
+	c.overlayGen.Add(1)
 	c.overlayMu.Unlock()
 	return nil
 }
@@ -684,6 +690,12 @@ func timedMemory[T any](ctx context.Context, backend, operation string, fn func(
 type Registry struct {
 	list []*Collection
 	by   map[string]*Collection
+	// links caches the resolved link graph and root names the registry
+	// the graph is built from: a view (Restrict, ViewedBy) shares its
+	// root's cache and filters at read time, so a per-request view
+	// never walks the pages. See links.go.
+	links *linkCache
+	root  *Registry
 	// derived marks a registry produced by Restrict or ViewedBy: a
 	// per-request VIEW over another registry's collections rather than an
 	// owner of them. Close is a no-op on a derived registry, because the
@@ -719,6 +731,16 @@ func (r PageRef) QualifiedID() string { return r.Collection + ":" + r.Page.ID }
 type Hit struct {
 	Collection string `json:"collection"`
 	search.Result
+	// Kind is the routing kind: pointer | skill | example | doc. See
+	// links.go.
+	Kind string `json:"kind"`
+	// Target and Hint are set for a pointer hit: where it routes
+	// (`collection:flux`, `flux:concepts/drift`, `mcp://datadog`) and
+	// the one-sentence reason to go. TargetResolved is false when the
+	// target does not exist in the mounted set.
+	Target         string `json:"target,omitempty"`
+	TargetResolved bool   `json:"target_resolved,omitempty"`
+	Hint           string `json:"hint,omitempty"`
 }
 
 // searchOptions derives the index options from the collection's
@@ -736,7 +758,7 @@ func New(cols ...*Collection) (*Registry, error) {
 	if len(cols) == 0 {
 		return nil, errors.New("a registry needs at least one collection")
 	}
-	r := &Registry{list: cols, by: make(map[string]*Collection, len(cols))}
+	r := &Registry{list: cols, by: make(map[string]*Collection, len(cols)), links: &linkCache{}}
 	for _, c := range cols {
 		if c.Name == "" {
 			return nil, errors.New("collection name must not be empty")
@@ -757,7 +779,7 @@ func New(cols ...*Collection) (*Registry, error) {
 // exactly as they did.
 func Global(provenance string) *Registry {
 	c := newCollection(DefaultName, provenance, "", nil)
-	return &Registry{list: []*Collection{c}, by: map[string]*Collection{DefaultName: c}}
+	return &Registry{list: []*Collection{c}, by: map[string]*Collection{DefaultName: c}, links: &linkCache{}}
 }
 
 // Open mounts every resolved collection, wiring each non-embedded one
@@ -905,6 +927,8 @@ func (r *Registry) Restrict(allow func(name string) bool) *Registry {
 		by:      make(map[string]*Collection, len(r.list)),
 		derived: true,
 		viewer:  r.viewer,
+		links:   r.links,
+		root:    r.base(),
 	}
 	for _, c := range r.list {
 		if !allow(c.Name) {
@@ -940,6 +964,8 @@ func (r *Registry) ViewedBy(v kb.Viewer) *Registry {
 		by:      r.by,
 		derived: true,
 		viewer:  &v,
+		links:   r.links,
+		root:    r.base(),
 	}
 	return out
 }
@@ -1026,6 +1052,12 @@ type Health struct {
 	// log and authenticated collection discovery, never /readyz's
 	// unauthenticated body.
 	StaleReason string `json:"stale_reason,omitempty"`
+	// DanglingLinks counts `related:` entries and pointer targets in
+	// this collection that do not resolve; Warnings lists the first
+	// few. A warning never makes a collection unready: a broken link
+	// is a content bug to fix, not an outage.
+	DanglingLinks int      `json:"dangling_links,omitempty"`
+	Warnings      []string `json:"warnings,omitempty"`
 }
 
 // contentRootReachable reports whether the collection's content root
@@ -1054,7 +1086,7 @@ func (c *Collection) contentRootReachable() bool {
 }
 
 // health derives one collection's serving state.
-func (c *Collection) health() Health {
+func (c *Collection) health(dangling []Dangling) Health {
 	// Latch the startup baseline on the first call. A deployment whose
 	// content root was already absent when the server started has
 	// deliberately (and documentedly) asked to serve an empty
@@ -1063,6 +1095,7 @@ func (c *Collection) health() Health {
 	c.rootOnce.Do(func() { c.rootSeen = c.contentRootReachable() })
 
 	h := Health{Name: c.Name}
+	h.DanglingLinks, h.Warnings = linkWarnings(dangling)
 	pages, err := c.Pages()
 	if err != nil {
 		h.Error = fmt.Sprintf("list pages: %v", err)
@@ -1111,9 +1144,30 @@ func (c *Collection) health() Health {
 func (r *Registry) Check() []Health {
 	out := make([]Health, 0, len(r.list))
 	for _, c := range r.list {
-		out = append(out, c.health())
+		out = append(out, c.health(r.danglingFor(c.Name)))
 	}
 	return out
+}
+
+// maxLinkWarnings bounds how many dangling links a Health carries in
+// full; the count is always exact. `mk lint` prints them all.
+const maxLinkWarnings = 5
+
+// linkWarnings folds a collection's dangling links into Health: the
+// exact count, and the first few as text.
+func linkWarnings(dangling []Dangling) (int, []string) {
+	if len(dangling) == 0 {
+		return 0, nil
+	}
+	out := make([]string, 0, min(len(dangling), maxLinkWarnings)+1)
+	for i, d := range dangling {
+		if i == maxLinkWarnings {
+			out = append(out, fmt.Sprintf("… and %d more (run `mk lint`)", len(dangling)-maxLinkWarnings))
+			break
+		}
+		out = append(out, d.String())
+	}
+	return len(dangling), out
 }
 
 // Ready reports whether every mounted collection is serveable, and the
@@ -1195,7 +1249,9 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 			deepest = stage
 		}
 		for _, res := range results {
-			out = append(out, Hit{Collection: c.Name, Result: res})
+			h := Hit{Collection: c.Name, Result: res}
+			r.routing(&h)
+			out = append(out, h)
 		}
 	}
 	// One span per fan-out, not per collection: the per-collection detail
