@@ -103,8 +103,14 @@ const (
 // existed has — changes nothing anywhere. See internal/telemetry and
 // docs/design/observability.md.
 type Config struct {
-	Content       Source            `yaml:"content"`
-	Collections   []Collection      `yaml:"collections,omitempty"`
+	Content     Source       `yaml:"content"`
+	Collections []Collection `yaml:"collections,omitempty"`
+	// Tree names the ROOT knowledge base of a tree: a source whose
+	// resolved directory carries a manifest.yaml naming its children,
+	// each of which carries its own. It is the third, mutually
+	// exclusive form beside content: and collections:; see tree.go and
+	// docs/design/tree.md.
+	Tree          *Source           `yaml:"tree,omitempty"`
 	Auth          *authz.Config     `yaml:"auth,omitempty"`
 	Observability *telemetry.Config `yaml:"observability,omitempty"`
 }
@@ -344,6 +350,20 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 	// server that exports nothing and says so nowhere.
 	if _, err := telemetry.Resolve(cfg.Observability); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
+	}
+	if cfg.Tree != nil {
+		if cfg.Content.Type != TypeNone || len(cfg.Collections) > 0 {
+			return Config{}, fmt.Errorf("%s: tree: is exclusive with content: and collections: — a tree's members come from its manifests", displayPath)
+		}
+		if cfg.Tree.Type == "" || cfg.Tree.Type == TypeNone {
+			return Config{}, fmt.Errorf("%s: tree.type is required (the root knowledge base's source)", displayPath)
+		}
+		cfg.Tree.Layout = MergeLayout(cfg.Tree.Layout)
+		cfg.Tree.Update.Normalize()
+		if err := cfg.Tree.validate("tree"); err != nil {
+			return Config{}, err
+		}
+		return cfg, nil
 	}
 	if len(cfg.Collections) > 0 {
 		// Mutually exclusive, not merged — see Config's doc comment. Only

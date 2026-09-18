@@ -46,6 +46,7 @@ type Metrics struct {
 	indexBuilds     *prometheus.CounterVec
 	indexDuration   *prometheus.HistogramVec
 	indexPages      prometheus.Gauge
+	treeDepth       prometheus.Gauge
 	sourceResolves  *prometheus.CounterVec
 	sourceDuration  *prometheus.HistogramVec
 	sourceCache     *prometheus.CounterVec
@@ -104,6 +105,10 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 		indexPages: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "meerkat_index_pages",
 			Help: "Pages indexed across every mounted collection (a total, not a per-collection series).",
+		}),
+		treeDepth: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "meerkat_tree_depth",
+			Help: "Deepest knowledge base declared in the tree this process serves (root = 0; 0 for a flat deployment; the hard cap is 5).",
 		}),
 		sourceResolves: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "meerkat_source_resolves_total",
@@ -169,7 +174,7 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 	}
 	if reg != nil {
 		reg.MustRegister(
-			m.indexBuilds, m.indexDuration, m.indexPages,
+			m.indexBuilds, m.indexDuration, m.indexPages, m.treeDepth,
 			m.sourceResolves, m.sourceDuration, m.sourceCache, m.sourceBytes,
 			m.searches, m.searchDuration, m.searchResults, m.ambiguous,
 			m.memorySaves, m.memoryDuration, m.memoryErrors,
@@ -196,6 +201,15 @@ func (m *Metrics) SetIndexedPages(n int) {
 		return
 	}
 	m.indexPages.Set(float64(n))
+}
+
+// SetTreeDepth publishes the deepest knowledge base in the tree this
+// process serves (root = 0). A depth, never a name.
+func (m *Metrics) SetTreeDepth(depth int) {
+	if m == nil {
+		return
+	}
+	m.treeDepth.Set(float64(depth))
 }
 
 // SourceResolved records one content-source resolution. sourceType must

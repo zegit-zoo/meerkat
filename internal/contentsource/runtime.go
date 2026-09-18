@@ -136,6 +136,9 @@ type ResolvedCollection struct {
 	// generation must recognise it as current and do no work, rather than
 	// re-resolving once on principle.
 	Version string
+	// Tree is this collection's place in a `tree:` deployment; nil for
+	// a flat content: or collections: configuration. See tree.go.
+	Tree *TreeNode
 }
 
 // ResolveRuntimeCollections is ResolveRuntime generalised to a
@@ -165,6 +168,13 @@ func ResolveRuntimeCollections(ctx context.Context, contentSourceFlag string) ([
 	cfg, err := LoadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("content-source.yaml (%s): %w", path, err)
+	}
+	if cfg.Tree != nil {
+		cols, _, terr := ResolveTree(ctx, *cfg.Tree, path)
+		if terr != nil {
+			return nil, fmt.Errorf("content-source.yaml (%s): %w", path, terr)
+		}
+		return cols, nil
 	}
 	if len(cfg.Collections) == 0 {
 		rc, rerr := resolveSource(ctx, cfg.Content, path)

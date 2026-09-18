@@ -151,6 +151,11 @@ func listCollections(cmd *cobra.Command, reg *collections.Registry, asJSON bool)
 		Source     string `json:"source"`
 		Pages      int    `json:"pages"`
 		PageErrors string `json:"page_error,omitempty"`
+		// Tree fields, present in a tree: deployment.
+		Path    string `json:"path,omitempty"`
+		Tier    *int   `json:"tier,omitempty"`
+		Parent  string `json:"parent,omitempty"`
+		Mounted *bool  `json:"mounted,omitempty"`
 	}
 	out := make([]entry, 0, reg.Len())
 	for _, c := range reg.All() {
@@ -163,15 +168,30 @@ func listCollections(cmd *cobra.Command, reg *collections.Registry, asJSON bool)
 		} else {
 			e.Pages = len(pages)
 		}
+		if n := c.Tree; n != nil {
+			tier, mounted := n.Depth, true
+			e.Path, e.Tier, e.Parent, e.Mounted = n.Path, &tier, n.Parent, &mounted
+		}
 		out = append(out, e)
+	}
+	for _, t := range reg.TreeEntries() {
+		if t.Mounted {
+			continue
+		}
+		tier, mounted := t.Depth, false
+		out = append(out, entry{Name: t.Name, Type: t.SourceType, Source: "unmounted (mount: " + t.Mount + ")", Path: t.Path, Tier: &tier, Parent: t.Parent, Mounted: &mounted})
 	}
 	if asJSON {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 	}
 	for _, e := range out {
-		fmt.Fprintf(cmd.OutOrStdout(), "%-20s  %-8s  %5d pages  %s\n", e.Name, e.Type, e.Pages, e.Source)
+		label := e.Name
+		if e.Path != "" {
+			label = e.Path
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%-28s  %-8s  %5d pages  %s\n", label, e.Type, e.Pages, e.Source)
 		if e.PageErrors != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "%-20s  %s\n", "", "↳ "+e.PageErrors)
+			fmt.Fprintf(cmd.OutOrStdout(), "%-28s  %s\n", "", "↳ "+e.PageErrors)
 		}
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "\n%d collections\n", len(out))

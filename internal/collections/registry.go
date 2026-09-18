@@ -95,6 +95,10 @@ type Collection struct {
 	// re-resolve needs. See reload.go.
 	Source contentsource.Source
 
+	// Tree is this collection's place in a `tree:` deployment; nil for
+	// a flat one.
+	Tree *contentsource.TreeNode
+
 	// snapMu guards snap. A read lock is taken for exactly as long as it
 	// takes to read the pointer and add a reference; the write lock only
 	// by a snapshot swap. See acquire/install in reload.go.
@@ -696,6 +700,9 @@ type Registry struct {
 	// never walks the pages. See links.go.
 	links *linkCache
 	root  *Registry
+	// tree is set when the registry was opened from a `tree:`; see
+	// tree.go. Views read it through base().
+	tree *tree
 	// derived marks a registry produced by Restrict or ViewedBy: a
 	// per-request VIEW over another registry's collections rather than an
 	// owner of them. Close is a no-op on a derived registry, because the
@@ -827,9 +834,15 @@ func Open(ctx context.Context, resolved []contentsource.ResolvedCollection) (*Re
 				return nil, err
 			}
 		}
+		c.Tree = rc.Tree
 		cols = append(cols, c)
 	}
-	return New(cols...)
+	r, err := New(cols...)
+	if err != nil {
+		return nil, err
+	}
+	r.tree = buildTree(resolved)
+	return r, nil
 }
 
 // Len reports how many collections are mounted.
@@ -880,6 +893,11 @@ func (r *Registry) MemoryNames() []string { return r.WithMemory().Names() }
 // ever mounted — which is the point.
 func (r *Registry) Get(name string) (*Collection, error) {
 	if c, ok := r.by[name]; ok {
+		return c, nil
+	}
+	if resolved, err := r.resolveTreeName(name); err != nil {
+		return nil, err
+	} else if c, ok := r.by[resolved]; ok {
 		return c, nil
 	}
 	if len(r.list) == 0 {
@@ -987,6 +1005,14 @@ func (r *Registry) viewerOf() kb.Viewer {
 // anything.
 func (r *Registry) target(name string) ([]*Collection, error) {
 	if name == "" {
+		// In a tree, an unqualified search asks the ROOT hub: it routes,
+		// and its pointer hits name the next hop. A flat deployment
+		// keeps searching every collection.
+		if root := r.Root(); root != "" {
+			if c, ok := r.by[root]; ok {
+				return []*Collection{c}, nil
+			}
+		}
 		return r.list, nil
 	}
 	c, err := r.Get(name)
@@ -1315,10 +1341,16 @@ func (r *Registry) SplitQualified(id string) (collection, pageID string) {
 	if !found || rest == "" {
 		return "", id
 	}
-	if _, ok := r.by[name]; !ok {
-		return "", id
+	if _, ok := r.by[name]; ok {
+		return name, rest
 	}
-	return name, rest
+	// A tree path alias: root/platform/flux:<id>.
+	if t := r.base().tree; t != nil && strings.Contains(name, "/") {
+		if resolved, ok := t.byPath[name]; ok {
+			return resolved, rest
+		}
+	}
+	return "", id
 }
 
 // Show resolves one page.

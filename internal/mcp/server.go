@@ -52,6 +52,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
+	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/search"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
@@ -294,7 +295,10 @@ func searchTool(reg *collections.Registry) mcp.Tool {
 				"and hint (why). Follow a pointer by searching its target collection, "+
 				"or with mk_show on its target page. With bundle=true the same hits come "+
 				"back grouped by pointer target as capability bundles "+
-				"{target, hint, pointers, skills, examples, docs}."+
+				"{target, hint, pointers, skills, examples, docs}. "+
+				"In a tree deployment a search with no 'collection' asks the ROOT hub only "+
+				"and its pointer hits name the next hop; name a child collection (or its "+
+				"path, e.g. root/platform/flux) to search it."+
 				collectionSuffix(reg)),
 		mcp.WithString("query",
 			mcp.Required(),
@@ -777,7 +781,10 @@ func listCollectionsTool(reg *collections.Registry) mcp.Tool {
 		"and the capabilities YOU hold on it (e.g. [\"read\"], [\"read\",\"personal-write\"]). " +
 		"Takes no arguments. Call this before naming an unfamiliar 'collection' value on " +
 		"mk_search/mk_show/mk_list, or to check whether mk_save_memory is worth trying. " +
-		"Returns a JSON array of {name, type, source, pages, capabilities, description?, contract?}. " +
+		"Returns a JSON array of {name, type, source, pages, capabilities, description?, contract?} — " +
+		"in a tree deployment also {path, tier, parent, children, mounted, mount, placement}: " +
+		"the root (tier 0) routes, children are reached by naming them (or their path) in mk_search's " +
+		"'collection'; an entry with mounted:false is declared but not served by this process. " +
 		"When present, 'contract' is the sanctioned way to contribute knowledge back to " +
 		"that collection, already adjusted to YOUR capabilities: method 'direct' means " +
 		"write through this server; 'merge-request' means patch the contribution repo it " +
@@ -812,7 +819,8 @@ func listCollectionsHandler(reg *collections.Registry, mem transportOptions) mcp
 	return func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		view := visible(ctx, reg, mem)
 		_, span := telemetry.Span(ctx, telemetry.SpanListCollections,
-			telemetry.KeyCollectionCount.Int(view.Len()))
+			telemetry.KeyCollectionCount.Int(view.Len()),
+			telemetry.KeyTreeDepth.Int(view.TreeDepth()))
 		body, err := listCollectionsJSON(ctx, view)
 		if err != nil {
 			telemetry.Fail(span, telemetry.OutcomeError)
@@ -860,6 +868,17 @@ type collectionSummary struct {
 	// generation would mint a series per publication. See
 	// docs/design/hot-reload.md.
 	Refresh []collections.ReloadStatus `json:"refresh,omitempty"`
+	// Tree fields (a `tree:` deployment only): where this knowledge
+	// base sits, what hangs below it, and whether this process serves
+	// it. A declared-but-unmounted child appears as its own entry with
+	// mounted:false and no pages.
+	Path      string                   `json:"path,omitempty"`
+	Tier      *int                     `json:"tier,omitempty"`
+	Parent    string                   `json:"parent,omitempty"`
+	Children  []contentsource.ChildRef `json:"children,omitempty"`
+	Mounted   *bool                    `json:"mounted,omitempty"`
+	Mount     string                   `json:"mount,omitempty"`
+	Placement string                   `json:"placement,omitempty"`
 }
 
 // contractSummary is the wire shape of the caller-effective
@@ -916,6 +935,11 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry) (strin
 		if pages, err := view.Pages(c.Name); err == nil {
 			entry.Pages = len(pages)
 		}
+		if n := c.Tree; n != nil {
+			entry.Path, entry.Parent, entry.Children = n.Path, n.Parent, n.Children
+			tier, mounted := n.Depth, true
+			entry.Tier, entry.Mounted, entry.Mount, entry.Placement = &tier, &mounted, n.Mount, n.Placement
+		}
 		if c.Contract().Declared() {
 			ec := c.EffectiveContract(g)
 			entry.Contract = &contractSummary{
@@ -930,6 +954,19 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry) (strin
 			}
 		}
 		out = append(out, entry)
+	}
+	// Declared but unmounted knowledge bases: listed so the tree is
+	// complete and an agent knows the name exists (and why a search
+	// naming it is refused), with no pages and no capabilities.
+	for _, e := range view.TreeEntries() {
+		if e.Mounted {
+			continue
+		}
+		tier, mounted := e.Depth, false
+		out = append(out, collectionSummary{
+			Name: e.Name, Type: e.SourceType, Source: "unmounted", Capabilities: []string{},
+			Path: e.Path, Tier: &tier, Parent: e.Parent, Mounted: &mounted, Mount: e.Mount, Placement: e.Placement,
+		})
 	}
 	body, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
