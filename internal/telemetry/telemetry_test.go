@@ -143,7 +143,7 @@ func TestSpanOnAnUninstrumentedContextIsFree(t *testing.T) {
 		t.Error("Record on an uninstrumented context must be nil")
 	}
 	// And a nil recorder must absorb every call.
-	Record(ctx).Searched(OutcomeOK, 0.1, 5)
+	Record(ctx).Searched(OutcomeOK, 0.1, 5, StageExact)
 	Record(ctx).IndexBuilt(OutcomeOK, 0.1)
 	Record(ctx).MemorySaved("personal", OutcomeSaved)
 	Record(ctx).CacheLookup(SourceGCSObject, CacheHit)

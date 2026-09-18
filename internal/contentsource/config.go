@@ -29,6 +29,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/memory"
 	"github.com/zegit-zoo/meerkat/internal/refresh"
+	"github.com/zegit-zoo/meerkat/internal/search"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
@@ -255,6 +256,13 @@ type Layout struct {
 	Sources   string `yaml:"sources,omitempty"`   // source registry  -> internal/sources/etc/sources.yaml
 	Prompts   string `yaml:"prompts,omitempty"`   // per-source prompts -> internal/sources/etc/prompts/
 	Templates string `yaml:"templates,omitempty"` // page templates   -> internal/sources/etc/templates/
+
+	// Analyzer selects how page TITLES are indexed for search:
+	// "standard" (the default, bleve's standard analyzer) or "ngram"
+	// (edge n-grams, so a partial or misspelt word still matches the
+	// title it begins; meant for a hub tier of routing pages and refused
+	// for a corpus over 1 MiB). See docs/SEARCH.md.
+	Analyzer string `yaml:"analyzer,omitempty"`
 }
 
 func defaultLayout() Layout {
@@ -462,6 +470,11 @@ func (s Source) validate(p string) error {
 	}
 	if s.Layout.Wiki == "" {
 		return fmt.Errorf("%s.layout.wiki is required for type: %s", p, s.Type)
+	}
+	switch s.Layout.Analyzer {
+	case "", search.AnalyzerStandard, search.AnalyzerNgram:
+	default:
+		return fmt.Errorf("%s.layout.analyzer must be %s or %s, got %q", p, search.AnalyzerStandard, search.AnalyzerNgram, s.Layout.Analyzer)
 	}
 	if err := s.Memory.Validate(p+".memory", s.ephemeral()); err != nil {
 		return err

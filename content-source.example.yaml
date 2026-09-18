@@ -173,6 +173,13 @@ content:
     sources:   ingestion/sources.yaml # source registry  -> internal/sources/etc/sources.yaml
     prompts:   ingestion/prompts     # per-source prompts -> internal/sources/etc/prompts/
     templates: templates             # page templates    -> internal/sources/etc/templates/
+    # analyzer: ngram                # OPTIONAL: how page TITLES are indexed.
+    #                                # standard (default) or ngram — edge
+    #                                # n-grams so a partial or misspelt word
+    #                                # still matches the title it begins.
+    #                                # For a hub tier of routing pages;
+    #                                # refused for a corpus over 1 MiB.
+    #                                # See docs/SEARCH.md.
 
   # --- memory: a WRITABLE store for this collection (runtime, MCP only) ------
   #

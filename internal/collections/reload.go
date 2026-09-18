@@ -187,7 +187,7 @@ func (c *Collection) indexOf(s *snapshot) (*search.Index, error) {
 			s.indexErr = fmt.Errorf("list pages: %w", err)
 			return
 		}
-		s.index, s.indexErr = search.NewFromPages(pages)
+		s.index, s.indexErr = search.NewFromPages(pages, c.searchOptions()...)
 	})
 	return s.index, s.indexErr
 }
@@ -198,11 +198,11 @@ func (c *Collection) indexOf(s *snapshot) (*search.Index, error) {
 // before anything is published, which is what keeps it off the request
 // path. Consuming the once means indexOf will hand out this index rather
 // than lazily building a second one.
-func newBuiltSnapshot(ctx context.Context, fsys fs.FS, provenance, version string, pages []kb.Page) (*snapshot, error) {
+func newBuiltSnapshot(ctx context.Context, fsys fs.FS, provenance, version string, pages []kb.Page, opts ...search.Option) (*snapshot, error) {
 	ctx, span := telemetry.Span(ctx, telemetry.SpanIndexBuild,
 		telemetry.KeyIndexPages.Int(len(pages)))
 	started := time.Now()
-	idx, err := search.NewFromPages(pages)
+	idx, err := search.NewFromPages(pages, opts...)
 	outcome := telemetry.OutcomeOK
 	if err != nil {
 		outcome = telemetry.OutcomeError
@@ -225,14 +225,15 @@ func newBuiltSnapshot(ctx context.Context, fsys fs.FS, provenance, version strin
 //
 // This — not Index() — is how a query reaches an index, and it is the
 // reason a refresh can close the previous one safely.
-func (c *Collection) searchAs(ctx context.Context, v kb.Viewer, query string, limit int) ([]search.Result, error) {
+func (c *Collection) searchAs(ctx context.Context, v kb.Viewer, query string, limit int) ([]search.Result, search.Stage, error) {
 	snap := c.acquire()
 	defer snap.release()
 	idx, err := c.indexOf(snap)
 	if err != nil {
-		return nil, fmt.Errorf("collection %q: %w", c.Name, err)
+		return nil, search.StageExact, fmt.Errorf("collection %q: %w", c.Name, err)
 	}
-	return idx.QueryAs(ctx, c.viewerFor(v), query, limit)
+	out, stage, err := idx.QueryStaged(ctx, c.viewerFor(v), query, limit)
+	return out, stage, err
 }
 
 // publishMemory makes a just-stored memory readable: into the overlay
@@ -625,7 +626,7 @@ func (c *Collection) ReloadContent(ctx context.Context) (refresh.Outcome, error)
 	// merged from the live one — unfiltered, so every document is in the
 	// index and visibility stays a query-time decision.
 	next, err := newBuiltSnapshot(ctx, fsys, contentsource.GCSProvenance(src, resolved), resolved,
-		c.mergeOverlay(pages, kb.Unfiltered()))
+		c.mergeOverlay(pages, kb.Unfiltered()), c.searchOptions()...)
 	if err != nil {
 		return refresh.Outcome{}, c.contentFailed(err)
 	}

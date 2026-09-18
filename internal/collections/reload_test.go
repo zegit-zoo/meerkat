@@ -175,7 +175,7 @@ func wikiPage(id, body string) string {
 // searchIDs runs a query and returns the matching page IDs.
 func searchIDs(t *testing.T, c *Collection, query string) []string {
 	t.Helper()
-	results, err := c.searchAs(context.Background(), kb.Unfiltered(), query, 20)
+	results, _, err := c.searchAs(context.Background(), kb.Unfiltered(), query, 20)
 	if err != nil {
 		t.Fatalf("search %q: %v", query, err)
 	}

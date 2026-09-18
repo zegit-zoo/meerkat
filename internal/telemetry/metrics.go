@@ -124,8 +124,8 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 		}, []string{"type"}),
 		searches: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "meerkat_search_total",
-			Help: "Search executions, by outcome (ok, invalid_query, timeout, error).",
-		}, []string{"outcome"}),
+			Help: "Search executions, by outcome (ok, invalid_query, timeout, error) and planner stage (exact, fuzzy, prefix): the fallback rate is fuzzy+prefix over the total.",
+		}, []string{"outcome", "stage"}),
 		searchDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "meerkat_search_duration_seconds",
 			Help:    "Search execution latency, across every collection in the caller's view.",
@@ -226,11 +226,11 @@ func (m *Metrics) Downloaded(sourceType string, bytes int64) {
 
 // Searched records one search execution: how long it took, how it ended,
 // and how many results came back. The COUNT, never the results.
-func (m *Metrics) Searched(outcome string, seconds float64, results int) {
+func (m *Metrics) Searched(outcome string, seconds float64, results int, stage string) {
 	if m == nil {
 		return
 	}
-	m.searches.WithLabelValues(outcome).Inc()
+	m.searches.WithLabelValues(outcome, SearchStage(stage)).Inc()
 	m.searchDuration.WithLabelValues(outcome).Observe(seconds)
 	if outcome == OutcomeOK {
 		m.searchResults.Observe(float64(results))
