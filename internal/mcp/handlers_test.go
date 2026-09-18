@@ -424,7 +424,7 @@ func TestListCollectionsHandler_Shape(t *testing.T) {
 	// No grants in context (stdio, or an unauthenticated hosted server):
 	// authz.Grants.Capabilities' nil receiver reports the full capability
 	// set — there is no identity to restrict against.
-	wantCaps := []string{"read", "personal-write", "team-write", "global-write", "admin"}
+	wantCaps := []string{"read", "personal-write", "team-write", "global-write", "admin", "intake-write"}
 	for _, e := range entries {
 		gotRaw, _ := e["capabilities"].([]any)
 		got := make([]string, len(gotRaw))

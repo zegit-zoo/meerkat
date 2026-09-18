@@ -116,6 +116,7 @@ func newServer(reg *collections.Registry, mem transportOptions, opts ...mcpserve
 	registerList(s, reg, mem)
 	registerListCollections(s, reg, mem)
 	registerSaveMemory(s, reg, mem)
+	registerReportOutcome(s, reg, mem)
 	return s
 }
 
@@ -155,6 +156,12 @@ func indexAll(ctx context.Context, reg *collections.Registry) error {
 // bites only on a store SHARED with a hosted server, where the other
 // namespaces belong to other people and were never this user's to read.
 func ServeStdio(ctx context.Context, reg *collections.Registry) error {
+	return ServeStdioWith(ctx, reg, OutcomeOptions{})
+}
+
+// ServeStdioWith is ServeStdio with mk_report_outcome's sinks
+// configured (the traversal log and the intake store).
+func ServeStdioWith(ctx context.Context, reg *collections.Registry, outcome OutcomeOptions) error {
 	if err := indexAll(ctx, reg); err != nil {
 		return err
 	}
@@ -164,7 +171,7 @@ func ServeStdio(ctx context.Context, reg *collections.Registry) error {
 	// server was spawned by the one user it serves, so a personal memory
 	// has an unambiguous owner even though no token established it. See
 	// transportOptions.
-	return mcpserver.ServeStdio(newServer(reg, transportOptions{AllowAnonymousPersonal: true}))
+	return mcpserver.ServeStdio(newServer(reg, transportOptions{AllowAnonymousPersonal: true, Outcome: outcome}))
 }
 
 // Tool names. Constants because the per-request tool filter
@@ -231,6 +238,12 @@ func toolFilter(reg *collections.Registry) mcpserver.ToolFilterFunc {
 			case toolListCollections:
 				if readView.Len() > 0 {
 					out = append(out, listCollectionsTool(readView))
+				}
+			case toolReportOutcome:
+				// Anyone who can read may report; the intake write inside
+				// is gated separately on intake-write.
+				if readView.Len() > 0 {
+					out = append(out, reportOutcomeTool(readView))
 				}
 			case toolSaveMemory:
 				if memView.Len() > 0 {
@@ -310,6 +323,9 @@ func searchTool(reg *collections.Registry) mcp.Tool {
 		mcp.WithBoolean("bundle",
 			mcp.Description("Group the hits by pointer target into capability bundles instead of a flat list (default false)."),
 		),
+		mcp.WithString("session_id",
+			mcp.Description("Optional retrieval-session identifier for callers that cannot keep an MCP session (stateless HTTP). Pass the same value to every call of one question and to mk_report_outcome at the end."),
+		),
 		collectionArg(reg),
 		// mcp.NewTool defaults every tool's annotations to the MCP spec's
 		// safe-but-wrong-for-us shape (readOnlyHint:false,
@@ -354,9 +370,14 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 		// answer; the text stays in the process. Same for the result
 		// count, which is the number of hits and never their IDs.
 		view := visible(ctx, reg, mem)
+		sessionID := strings.TrimSpace(req.GetString("session_id", ""))
+		if sessionID != "" && (len(sessionID) > maxSessionIDLen || !sessionIDPattern.MatchString(sessionID)) {
+			return mcp.NewToolResultError(fmt.Sprintf("session_id must be 1–%d characters of [A-Za-z0-9._:-]", maxSessionIDLen)), nil
+		}
 		ctx, span := telemetry.Span(ctx, telemetry.SpanSearch,
 			telemetry.KeySearchQueryLength.Int(len(query)),
 			telemetry.KeySearchLimit.Int(limit),
+			telemetry.KeySearchSessionProvided.Bool(sessionID != ""),
 			telemetry.KeyCollectionNamed.Bool(req.GetString("collection", "") != ""),
 			telemetry.KeyCollectionCount.Int(view.Len()),
 		)

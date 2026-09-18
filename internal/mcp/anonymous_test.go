@@ -140,8 +140,10 @@ func TestHostedAnonymous_HiddenCollectionsAreInvisibleToAnonymousCallers(t *test
 		if err != nil {
 			t.Fatalf("tools/list: %v", err)
 		}
-		if len(res.Tools) != 4 {
-			t.Fatalf("got %d tools, want the 4 read tools", len(res.Tools))
+		// The four read tools plus mk_report_outcome, which any reader may
+		// call (its intake write is gated separately on intake-write).
+		if len(res.Tools) != 5 {
+			t.Fatalf("got %d tools, want the 4 read tools plus mk_report_outcome", len(res.Tools))
 		}
 		for _, tool := range res.Tools {
 			blob, _ := json.Marshal(tool)

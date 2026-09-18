@@ -153,6 +153,7 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 				// environment (and MEERKAT_TRACES_ENABLED), which is how a
 				// container with no config file was always going to do it.
 				activeObservability = nil
+				activeIntake = nil
 				return nil
 			}
 			resolved, err := contentsource.ResolveRuntimeCollections(cmd.Context(), contentSourceFlag)
@@ -174,6 +175,11 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 				return err
 			}
 			activeObservability = obs
+			intake, err := contentsource.LoadRuntimeIntake(contentSourceFlag)
+			if err != nil {
+				return err
+			}
+			activeIntake = intake
 			// Point the process-global KB filesystem at the FIRST resolved
 			// collection. For every single-collection configuration (which
 			// is every configuration that predates collections) that is
