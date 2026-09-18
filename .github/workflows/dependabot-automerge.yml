@@ -1,0 +1,132 @@
+name: Dependabot automerge
+
+# Automerge Dependabot's minor/patch PRs once CI is green. This is the enforcement half
+# of the policy declared in .github/dependabot.yml (ported from flux-config's
+# renovate.json): minor + patch land unattended, majors always wait for a human.
+#
+# Why `workflow_run` and not the `on: pull_request` + `gh pr merge --auto` recipe from
+# GitHub's own docs: `--auto` delegates the gating to GitHub's auto-merge, which only
+# holds a PR while a REQUIRED status check is pending. The `main-guardrails` ruleset on
+# this repo requires signatures and blocks force-push/deletion, but requires NO status
+# checks, and repo auto-merge is switched off — so `--auto` would either fail outright or,
+# the moment auto-merge is enabled, merge every Dependabot PR the instant it is opened,
+# CI or not. Keying off the CI run's own conclusion makes the gate explicit and local:
+# nothing merges unless the Lint + Test jobs of the "CI" workflow have all succeeded on
+# the exact commit being merged.
+#
+# Safety properties, in the order the job checks them:
+#   1. the run must come from a pull_request event that SUCCEEDED;
+#   2. the PR must be authored by dependabot[bot] and live in this repo (no forks);
+#   3. the PR head must still be the commit CI passed on — a push after the green run
+#      invalidates the gate;
+#   4. every `update-type:` trailer Dependabot writes into the PR's commit messages must
+#      be semver-minor or semver-patch. A grouped PR carries one trailer per dependency,
+#      so a single major anywhere in the group blocks the whole merge. Reading the
+#      trailers rather than the group name means renaming a group in dependabot.yml
+#      cannot silently widen what merges unattended.
+# Any check that does not hold exits 0 without merging: the PR simply stays open for a
+# human. Only an unexpected API/merge failure fails the job.
+#
+# GITHUB_TOKEN note: Dependabot-triggered `pull_request` runs get a read-only token, which
+# is another reason the merge does not live in the CI workflow itself. `workflow_run` runs
+# in the context of the default branch with the permissions declared below.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  automerge:
+    name: Automerge minor/patch
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]' &&
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/')
+    permissions:
+      # contents: write is what performs the merge; pull-requests: write lets gh read and
+      # update the PR. The merge commit itself is created by the API and therefore signed
+      # by GitHub, which is what satisfies the required_signatures rule on main.
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+    steps:
+      - name: Resolve the pull request
+        id: pr
+        run: |
+          set -euo pipefail
+          # workflow_run.pull_requests is populated for same-repo PRs, but is empty often
+          # enough that the head SHA lookup is kept as the authoritative path.
+          number=$(gh api "repos/$REPO/commits/$HEAD_SHA/pulls" \
+            --jq "[.[] | select(.state == \"open\" and .head.sha == \"$HEAD_SHA\")] | .[0].number // empty")
+          if [ -z "$number" ]; then
+            echo "No open PR found for $HEAD_SHA ($HEAD_BRANCH) — nothing to merge."
+            echo "number=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Resolved PR #$number"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Verify author, head and update types
+        id: gate
+        if: steps.pr.outputs.number != ''
+        run: |
+          set -euo pipefail
+          pr="${{ steps.pr.outputs.number }}"
+          # `mergeable` is written ONLY on the success path; every early exit leaves it
+          # unset, which reads as false in the merge step's `if`.
+
+          read -r author cross state head < <(gh api "repos/$REPO/pulls/$pr" \
+            --jq '[.user.login, (.head.repo.full_name != .base.repo.full_name), .state, .head.sha] | @tsv')
+
+          if [ "$author" != "dependabot[bot]" ]; then
+            echo "PR #$pr is authored by $author, not dependabot[bot] — skipping."; exit 0
+          fi
+          if [ "$cross" != "false" ]; then
+            echo "PR #$pr comes from a fork — skipping."; exit 0
+          fi
+          if [ "$state" != "open" ]; then
+            echo "PR #$pr is $state — skipping."; exit 0
+          fi
+          if [ "$head" != "$HEAD_SHA" ]; then
+            echo "PR #$pr advanced to $head since CI passed on $HEAD_SHA — skipping."; exit 0
+          fi
+
+          # One `update-type: version-update:semver-<level>` trailer per updated
+          # dependency, written by Dependabot into the commit message.
+          types=$(gh api "repos/$REPO/pulls/$pr/commits" --paginate \
+            --jq '.[].commit.message' \
+            | sed -n 's/^[[:space:]]*update-type:[[:space:]]*version-update:semver-\([a-z]*\).*/\1/p' \
+            | sort -u)
+          if [ -z "$types" ]; then
+            echo "PR #$pr has no update-type trailer — cannot classify, skipping."; exit 0
+          fi
+          echo "Update types in PR #$pr: $(echo "$types" | tr '\n' ' ')"
+          for t in $types; do
+            case "$t" in
+              minor|patch) ;;
+              *) echo "PR #$pr contains a $t update — majors are merged by a human, skipping."; exit 0 ;;
+            esac
+          done
+
+          echo "mergeable=true" >> "$GITHUB_OUTPUT"
+
+      - name: Squash-merge
+        if: steps.gate.outputs.mergeable == 'true'
+        run: |
+          set -euo pipefail
+          pr="${{ steps.pr.outputs.number }}"
+          # --delete-branch because delete_branch_on_merge is off at the repo level.
+          # A merge that fails (conflict, or the base moved) fails the job on purpose:
+          # Dependabot rebases the branch, CI runs again, and this workflow retries.
+          gh pr merge "$pr" --squash --delete-branch --repo "$REPO"
+          echo "Merged PR #$pr"

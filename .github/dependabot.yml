@@ -1,11 +1,79 @@
 version: 2
+
+# Dependency-update policy. Ported from the flux-config Renovate config (renovate.json)
+# so both repos age dependencies the same way, with the vocabulary translated:
+#
+#   flux-config (Renovate)                        meerkat (Dependabot)
+#   ------------------------------------------    ----------------------------------------
+#   matchUpdateTypes [minor,patch] automerge:true groups.*-minor-patch + the automerge
+#                                                 workflow (CI-gated), below
+#   matchUpdateTypes [major]  automerge:false     majors match NO group, so they arrive as
+#                                                 individual PRs and no workflow touches
+#                                                 them — a human merges them
+#   minimumReleaseAge "3 days"                    cooldown.default-days: 3
+#   groupName: <product>                          groups.<id>.patterns
+#
+# Grouping is also why this repo no longer trickles one PR per module: a weekly run now
+# raises ONE gomod PR and ONE github-actions PR for everything minor/patch, which is what
+# the five-open-PR backlog of 2026-09 (#42..#47) cost us.
+#
+# The automerge half lives in .github/workflows/dependabot-automerge.yml. It does NOT key
+# off the group names here — it reads the `update-type:` trailers Dependabot writes into
+# each commit message — so renaming a group cannot silently widen what merges unattended.
 updates:
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
+    # 3-day soak before a PR is raised, mirroring flux-config's minimumReleaseAge.
+    # Dependabot's own default is also 3 days for version updates; it is stated
+    # explicitly here so a future upstream default change cannot move the policy.
+    # Cooldown does NOT apply to security updates — those still arrive immediately,
+    # which is the behaviour we want.
+    cooldown:
+      default-days: 3
+      semver-major-days: 3
+      semver-minor-days: 3
+      semver-patch-days: 3
+    groups:
+      # One PR for every minor/patch Go module bump. Majors are deliberately absent
+      # from update-types: an unmatched dependency falls back to its own PR.
+      go-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      go-security-minor-patch:
+        applies-to: security-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    # github-actions supports `default-days` only — the semver-*-days options are
+    # documented as unsupported for this ecosystem (Dependabot options reference,
+    # cooldown support table), so they are deliberately absent here.
+    cooldown:
+      default-days: 3
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      actions-security-minor-patch:
+        applies-to: security-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
