@@ -105,7 +105,38 @@ content:
   # reads or accepts a static service-account key. Grant the principal
   # storage.objects.get (and storage.objects.list for prefix mode).
 
-  # --- refresh: follow the bucket while running (runtime, type: gcs only) ----
+  # --- type: s3 (runtime only) ------------------------------------------------
+  # The same two modes from an S3-compatible bucket: AWS S3, or a self-hosted
+  # Garage / MinIO. Exactly one of object: / prefix:.
+  #
+  # bucket: my-org-knowledge          # bucket NAME (not an s3:// URL)
+  # object: bundles/kb-v1.2.3.tar.gz  # (a) bundle mode, keyed by the ETag
+  # etag: "d41d8cd98f00b204e9800998ecf8427e"
+  #                                   # OPTIONAL: pin one exact ETag — the S3
+  #                                   # counterpart of generation:. Never
+  #                                   # consulted again once set.
+  # prefix: kb/live/                  # (b) prefix mode, keyed by a fingerprint
+  #                                   # over every object's (key, ETag, size)
+  # endpoint: https://s3.example.net  # REQUIRED for anything that is not AWS
+  # region: garage                    # signing region; Garage validates it
+  #                                   # against its s3_region. On AWS it may
+  #                                   # come from AWS_REGION instead.
+  # path_style: true                  # <endpoint>/<bucket>/… addressing —
+  #                                   # Garage and MinIO need it, AWS does not.
+  # sha256: "..."                     # OPTIONAL, verified before extraction.
+  #
+  # The ETag is OPAQUE to meerkat: compared, cached under, and sent back as
+  # If-Match so a replaced object fails the fetch instead of being served
+  # under the old name. It is not assumed to be a content hash.
+  # Cache: <user cache dir>/meerkat/content/s3/<hash(endpoint,bucket,…)>/<etag-or-fingerprint>/
+  #
+  # Credentials: the AWS default chain only — AWS_ACCESS_KEY_ID /
+  # AWS_SECRET_ACCESS_KEY, ~/.aws/config, IRSA / web identity, instance
+  # metadata. There is deliberately NO key field in this schema. Grant
+  # s3:GetObject (and s3:ListBucket for prefix mode). Provider differences
+  # (what Garage does and does not enforce) are in docs/design/object-stores.md.
+
+  # --- refresh: follow the bucket while running (runtime, gcs and s3) --------
   #
   # ABSENT (the default, and what every configuration written before this
   # existed gets): the source is resolved ONCE at startup and never
@@ -158,8 +189,8 @@ content:
   # changes"; a file carrying both has two contradictory readings, and one of
   # them silently revokes that guarantee.
   #
-  # Only type: gcs takes a refresh block. type: local is already re-read per
-  # request, and type: url is pinned by its mandatory sha256.
+  # Only type: gcs and type: s3 take a refresh block. type: local is already
+  # re-read per request, and type: url is pinned by its mandatory sha256.
   #
   # A running `mk mcp serve-http` also reloads every configured target
   # immediately on SIGHUP, through the same code path. There is deliberately
@@ -198,14 +229,14 @@ content:
   # meerkat's own overlay, which loads live documents only.
   #
   # memory:
-  #   type: local                    # local | gcs
+  #   type: local                    # local | gcs | s3
   #
   #   # --- type: local ---------------------------------------------------
   #   path: memory                   # relative to the collection's content
   #                                  # directory (a SIBLING of wiki/), or
   #                                  # absolute. Default: "memory".
   #                                  # MUST be absolute when the content
-  #                                  # source is type: url or type: gcs —
+  #                                  # source is type: url, gcs or s3 —
   #                                  # those resolve to a content-addressed
   #                                  # cache that is replaced on every content
   #                                  # change, so a relative path would lose
@@ -224,7 +255,27 @@ content:
   #   # replicas can share one store and still never lose a write.
   #   # Grant storage.objects.get/list/create/delete on the prefix.
   #
-  #   # --- refresh: converge with the other replicas (type: gcs only) -----
+  #   # --- type: s3 ------------------------------------------------------
+  #   # bucket: my-org-knowledge     # bucket NAME; AWS default chain only
+  #   # prefix: kb/memory/           # required
+  #   # endpoint: https://s3.example.net   # omit for AWS
+  #   # region: garage
+  #   # path_style: true             # Garage / MinIO; not AWS
+  #   # sse: AES256                  # OPTIONAL: SSE-S3 (or aws:kms) on every
+  #   #                              # write. Garage ignores it.
+  #   # single_writer: false         # see below
+  #   # Writes use If-None-Match: * to create and If-Match: "<etag>" to update.
+  #   # NOT EVERY S3 ENFORCES THOSE (Garage 2.4 does not): at startup meerkat
+  #   # writes a probe under _staging/_probe/, re-writes it with preconditions
+  #   # that must fail, deletes it, and REFUSES TO OPEN the store if either
+  #   # write was accepted — a shared store there would lose updates.
+  #   # single_writer: true asserts that exactly ONE meerkat process writes
+  #   # this store; the store then enforces its preconditions in-process
+  #   # (the local backend's guarantee, no more) and skips the probe. It
+  #   # cannot be combined with refresh:. Grant s3:GetObject/ListBucket/
+  #   # PutObject/DeleteObject on the prefix. See docs/design/object-stores.md.
+  #
+  #   # --- refresh: converge with the other replicas (gcs and s3) ---------
   #   refresh:
   #     interval: 15s              # same block, same rules as the content
   #                                # refresh above (unit required, 5s floor,
@@ -242,8 +293,8 @@ content:
   #   # under _staging/ are excluded from the probe as well as from the load,
   #   # so writing one neither publishes it nor makes the fleet reload.
   #   #
-  #   # type: gcs only. A local store is a directory one process owns; there
-  #   # is no other writer to converge with.
+  #   # type: gcs and type: s3 only. A local store is a directory one process
+  #   # owns; there is no other writer to converge with.
   #
   #   # --- who may READ a personal memory ---------------------------------
   #   personal_visibility: private   # private (DEFAULT) | collection

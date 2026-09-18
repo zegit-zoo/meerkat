@@ -524,8 +524,8 @@ func (c *Collection) ReloadStatuses() []ReloadStatus { return c.status.statuses(
 // the real functions; there is no configuration or exported knob that
 // could point them anywhere else.
 var (
-	probeVersion   = contentsource.GCSVersion
-	resolveContent = contentsource.FetchGCS
+	probeVersion   = contentsource.ObjectVersion
+	resolveContent = contentsource.FetchObject
 )
 
 // ReloadContent re-resolves the collection's content source and, when
@@ -625,7 +625,7 @@ func (c *Collection) ReloadContent(ctx context.Context) (refresh.Outcome, error)
 	// The memory overlay is not touched by a content refresh, so it is
 	// merged from the live one — unfiltered, so every document is in the
 	// index and visibility stays a query-time decision.
-	next, err := newBuiltSnapshot(ctx, fsys, contentsource.GCSProvenance(src, resolved), resolved,
+	next, err := newBuiltSnapshot(ctx, fsys, contentsource.ObjectProvenance(src, resolved), resolved,
 		c.mergeOverlay(pages, kb.Unfiltered()), c.searchOptions()...)
 	if err != nil {
 		return refresh.Outcome{}, c.contentFailed(err)

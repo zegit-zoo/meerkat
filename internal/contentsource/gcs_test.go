@@ -13,13 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 // gcs_test.go drives type: gcs through the real FetchGCS code path —
 // cache keying, conditional reads, extraction, tree layout, size caps —
-// against a fake gcsAPI. Nothing here needs credentials, a bucket, or
+// against a fake objectStore. Nothing here needs credentials, a bucket, or
 // the network: newGCSClient is a package var precisely so the seam can
 // be swapped for this fake (see its doc comment).
 
@@ -60,27 +61,28 @@ func (f *fakeGCS) remove(name string) {
 	delete(f.live, name)
 }
 
-func (f *fakeGCS) Attrs(_ context.Context, _, object string) (gcsObject, error) {
+func (f *fakeGCS) Attrs(_ context.Context, _, object string) (storedObject, error) {
 	f.attrCalls++
 	gen, ok := f.live[object]
 	if !ok {
-		return gcsObject{}, fmt.Errorf("object %q does not exist", object)
+		return storedObject{}, fmt.Errorf("object %q does not exist", object)
 	}
-	return gcsObject{Name: object, Generation: gen, Size: int64(len(f.objects[object][gen]))}, nil
+	return storedObject{Name: object, Version: strconv.FormatInt(gen, 10), Size: int64(len(f.objects[object][gen]))}, nil
 }
 
-func (f *fakeGCS) Objects(_ context.Context, _, prefix string) ([]gcsObject, error) {
-	var out []gcsObject
+func (f *fakeGCS) Objects(_ context.Context, _, prefix string) ([]storedObject, error) {
+	var out []storedObject
 	for name, gen := range f.live {
 		if strings.HasPrefix(name, prefix) {
-			out = append(out, gcsObject{Name: name, Generation: gen, Size: int64(len(f.objects[name][gen]))})
+			out = append(out, storedObject{Name: name, Version: strconv.FormatInt(gen, 10), Size: int64(len(f.objects[name][gen]))})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
 
-func (f *fakeGCS) Open(_ context.Context, _, object string, generation int64) (io.ReadCloser, error) {
+func (f *fakeGCS) Open(_ context.Context, _, object, version string) (io.ReadCloser, error) {
+	generation, _ := strconv.ParseInt(version, 10, 64)
 	f.reads = append(f.reads, fmt.Sprintf("%s@%d", object, generation))
 	byGen, ok := f.objects[object]
 	if !ok {
@@ -101,7 +103,7 @@ func (f *fakeGCS) Close() error { f.closed = true; return nil }
 func useFakeGCS(t *testing.T, f *fakeGCS) {
 	t.Helper()
 	orig := newGCSClient
-	newGCSClient = func(context.Context) (gcsAPI, error) { return f, nil }
+	newGCSClient = func(context.Context) (objectStore, error) { return f, nil }
 	t.Cleanup(func() { newGCSClient = orig })
 
 	base := t.TempDir()
@@ -425,9 +427,9 @@ func TestFetchGCS_Prefix_SkipsUnsafeAndPlaceholderObjects(t *testing.T) {
 func TestFetchGCS_Prefix_ObjectCountCapRefuses(t *testing.T) {
 	fake := newFakeGCS()
 	useFakeGCS(t, fake)
-	orig := maxGCSObjects
-	maxGCSObjects = 2
-	t.Cleanup(func() { maxGCSObjects = orig })
+	orig := maxStoreObjects
+	maxStoreObjects = 2
+	t.Cleanup(func() { maxStoreObjects = orig })
 
 	for i := range 3 {
 		fake.put(fmt.Sprintf("kb/wiki/p%d.md", i), []byte("---\nid: p\n---\nx\n"))
@@ -557,7 +559,7 @@ func TestResolveRuntimeCollections_GCS(t *testing.T) {
 // embedded fallback.
 func TestResolveRuntimeCollections_GCSClientErrorSurfaces(t *testing.T) {
 	orig := newGCSClient
-	newGCSClient = func(context.Context) (gcsAPI, error) {
+	newGCSClient = func(context.Context) (objectStore, error) {
 		return nil, errors.New("could not find default credentials")
 	}
 	t.Cleanup(func() { newGCSClient = orig })

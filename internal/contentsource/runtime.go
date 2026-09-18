@@ -254,17 +254,17 @@ func resolveSourceInner(ctx context.Context, src Source, cfgPath string) (Resolv
 			return ResolvedCollection{}, fmt.Errorf("content-source.yaml (%s): %w", cfgPath, ferr)
 		}
 		return ResolvedCollection{Dir: dir, Source: src, Provenance: URLProvenance(src)}, nil
-	case TypeGCS:
-		dir, version, ferr := FetchGCS(ctx, src)
+	case TypeGCS, TypeS3:
+		dir, version, ferr := FetchObject(ctx, src)
 		if ferr != nil {
 			return ResolvedCollection{}, fmt.Errorf("content-source.yaml (%s): %w", cfgPath, ferr)
 		}
-		return ResolvedCollection{Dir: dir, Source: src, Provenance: GCSProvenance(src, version), Version: version}, nil
+		return ResolvedCollection{Dir: dir, Source: src, Provenance: ObjectProvenance(src, version), Version: version}, nil
 	case TypeGit, TypeSubmodule:
 		return ResolvedCollection{}, fmt.Errorf(
 			"content-source.yaml (%s): type %q is build-time only (it needs git and a working tree) — "+
 				"not supported at runtime; use `make sync` to embed it at build time instead, or switch "+
-				"to type: url, type: gcs or type: local for a runtime-resolved source", cfgPath, src.Type)
+				"to type: url, type: gcs, type: s3 or type: local for a runtime-resolved source", cfgPath, src.Type)
 	default:
 		// Unreachable: LoadFile's Validate call already rejects any type
 		// not in {none, local, git, submodule, url, gcs}. Kept as an

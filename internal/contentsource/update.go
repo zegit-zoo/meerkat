@@ -309,7 +309,7 @@ func validateContributionPath(label, p string) error {
 // error.
 //
 // Writable means the same thing it means for a `memory:` store (see
-// internal/memory.Spec): a DIRECTORY on disk, or a GCS object PREFIX.
+// internal/memory.Spec): a DIRECTORY on disk, or a GCS / S3 object PREFIX.
 // Everything else is a snapshot — a digest-pinned archive, an immutable
 // bundle, content embedded at build time, or a build-time-only git
 // source — and a write to it either has nowhere to go or is replaced by
@@ -323,6 +323,11 @@ func (s Source) backendKind() (writable bool, desc string) {
 			return true, "type: gcs with prefix: (an object prefix served as a directory tree)"
 		}
 		return false, "type: gcs with object: (one immutable .tar.gz bundle, pinned by generation)"
+	case TypeS3:
+		if s.Prefix != "" {
+			return true, "type: s3 with prefix: (an object prefix served as a directory tree)"
+		}
+		return false, "type: s3 with object: (one immutable .tar.gz bundle, pinned by ETag)"
 	case TypeURL:
 		return false, "type: url (a digest-pinned .tar.gz archive)"
 	case TypeNone:

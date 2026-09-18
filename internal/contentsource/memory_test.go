@@ -121,8 +121,8 @@ func TestParseConfig_MemoryValidationRunsAtLoadTime(t *testing.T) {
 			"memory.type is required",
 		},
 		"unknown type": {
-			"content:\n  type: local\n  path: kb\n  memory:\n    type: s3\n    path: m\n",
-			"must be local or gcs",
+			"content:\n  type: local\n  path: kb\n  memory:\n    type: azure\n    path: m\n",
+			"must be local, gcs or s3",
 		},
 		"gcs with no prefix": {
 			"content:\n  type: local\n  path: kb\n  memory:\n    type: gcs\n    bucket: b\n",

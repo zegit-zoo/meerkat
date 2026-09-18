@@ -425,6 +425,7 @@ func TestSourceTypeIsAClosedSet(t *testing.T) {
 	allowed := map[string]bool{
 		SourceEmbedded: true, SourceLocal: true, SourceURL: true,
 		SourceGCSObject: true, SourceGCSPrefix: true, SourceOther: true,
+		SourceS3Object: true, SourceS3Prefix: true,
 	}
 	cases := []struct {
 		typ                string
@@ -438,6 +439,9 @@ func TestSourceTypeIsAClosedSet(t *testing.T) {
 		{"gcs", true, false, SourceGCSObject},
 		{"gcs", false, true, SourceGCSPrefix},
 		{"gcs", false, false, SourceOther},
+		{"s3", true, false, SourceS3Object},
+		{"s3", false, true, SourceS3Prefix},
+		{"s3", false, false, SourceOther},
 		{"something-new", false, false, SourceOther},
 	}
 	for _, c := range cases {

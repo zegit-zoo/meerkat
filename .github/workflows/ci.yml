@@ -89,3 +89,43 @@ jobs:
 
       - name: Scan for secrets
         run: make gitleaks
+
+  # Opt-in conformance against real S3-compatible stores. The unit tests
+  # above run against in-memory fakes; this job proves the assumptions
+  # those fakes encode (ETags, If-Match on reads, conditional writes,
+  # pagination) against each provider, and fails when a provider's
+  # observed behaviour drifts from the table in
+  # docs/design/object-stores.md.
+  s3-conformance:
+    name: Object store conformance (${{ matrix.provider }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [garage, minio]
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Sync kb content
+        run: make sync
+
+      - name: Start ${{ matrix.provider }}
+        run: |
+          scripts/${{ matrix.provider }}-up.sh > "$RUNNER_TEMP/s3.env"
+          # The credentials are ephemeral (they exist only inside the
+          # container this job started), so exporting them here is safe.
+          sed 's/^export //' "$RUNNER_TEMP/s3.env" | tr -d '"' >> "$GITHUB_ENV"
+
+      - name: Conformance tests
+        run: go test -race -count=1 -run 'S3Conformance' -v ./internal/contentsource/ ./internal/memory/
+
+      - name: Stop ${{ matrix.provider }}
+        if: always()
+        run: scripts/${{ matrix.provider }}-up.sh down
