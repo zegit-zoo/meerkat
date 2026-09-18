@@ -220,6 +220,13 @@ const SourceEmbedded = "embedded"
 // layout, and none of them belongs in a metric label or on a span
 // exported to a collector — the same rule internal/refresh/metrics.go
 // states for the refresh series.
+// ResolveSource resolves one runtime source to a directory — the
+// exported form of the per-collection step ResolveRuntimeCollections
+// takes, for mounting a lazy child of a tree on demand (issue E).
+func ResolveSource(ctx context.Context, src Source, cfgPath string) (ResolvedCollection, error) {
+	return resolveSource(ctx, src, cfgPath)
+}
+
 func resolveSource(ctx context.Context, src Source, cfgPath string) (ResolvedCollection, error) {
 	sourceType := telemetry.SourceType(src.Type, src.Object != "", src.Prefix != "")
 	ctx, span := telemetry.Span(ctx, telemetry.SpanSourceResolve,

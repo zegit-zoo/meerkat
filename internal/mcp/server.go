@@ -44,6 +44,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -130,8 +131,33 @@ func newServer(reg *collections.Registry, mem transportOptions, opts ...mcpserve
 // ctx carries the telemetry, so the startup build is traced and timed
 // like any other index build. It is otherwise unused: nothing here is
 // cancellable, and the parameter exists to reach the instrumentation.
+// startCache warm-starts the lazy-mount cache from the traversal log
+// and runs the temperature flusher until the returned stop function is
+// called. Both are no-ops without a traversal log.
+func startCache(ctx context.Context, reg *collections.Registry) (stop func()) {
+	spec := reg.CacheSpec()
+	if n, err := reg.WarmStart(ctx, spec.WarmStartDays); err != nil {
+		fmt.Fprintf(os.Stderr, "meerkat: warm start: %v\n", err)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "meerkat: warm start mounted %d collection(s)\n", n)
+	}
+	fctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		reg.RunFlusher(fctx, spec.FlushInterval)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 func indexAll(ctx context.Context, reg *collections.Registry) error {
 	for _, c := range reg.All() {
+		if c.IsCold() {
+			continue // mounted, and indexed, on first request
+		}
 		if _, err := c.IndexContext(ctx); err != nil {
 			return fmt.Errorf("build search index for collection %q: %w", c.Name, err)
 		}
@@ -165,6 +191,8 @@ func ServeStdioWith(ctx context.Context, reg *collections.Registry, outcome Outc
 	if err := indexAll(ctx, reg); err != nil {
 		return err
 	}
+	stopFlusher := startCache(ctx, reg)
+	defer stopFlusher()
 	defer func() { _ = reg.Close() }()
 
 	// AllowAnonymousPersonal is true here and nowhere else: a stdio
@@ -384,6 +412,13 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 		started := time.Now()
 
 		results, err := view.Search(ctx, req.GetString("collection", ""), query, limit)
+		var cold *collections.ColdError
+		if errors.As(err, &cold) {
+			telemetry.Record(ctx).Searched(telemetry.OutcomeOK, time.Since(started).Seconds(), 0, telemetry.StageExact)
+			span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
+			span.End()
+			return coldResult(cold)
+		}
 		if err != nil {
 			outcome := telemetry.OutcomeError
 			switch {
@@ -435,6 +470,19 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 // bundlesJSON renders capability bundles: {query, bundles: [{target,
 // hint, score, pointers, skills, examples, docs}]}, each member in the
 // flat hit shape searchResultsJSON uses.
+// coldResult is the answer under cache.cold_policy: async for a request
+// that named a cold collection: the mount has started; retry after
+// retry_after_ms. A tool result, not an error — the caller did nothing
+// wrong.
+func coldResult(cold *collections.ColdError) (*mcp.CallToolResult, error) {
+	return jsonResult(map[string]any{
+		"status":         "cold",
+		"collection":     cold.Name,
+		"retry_after_ms": cold.RetryAfter.Milliseconds(),
+		"message":        "this knowledge base is being mounted; retry the same call after retry_after_ms",
+	})
+}
+
 func bundlesJSON(query string, bundles []collections.Bundle) (string, error) {
 	type bundle struct {
 		Target   string           `json:"target"`
@@ -565,6 +613,12 @@ func showHandler(reg *collections.Registry, mem transportOptions) mcpserver.Tool
 			telemetry.KeyCollectionCount.Int(view.Len()),
 		)
 		ref, err := view.Show(req.GetString("collection", ""), id)
+		var cold *collections.ColdError
+		if errors.As(err, &cold) {
+			span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
+			span.End()
+			return coldResult(cold)
+		}
 		if err != nil {
 			switch {
 			case errors.Is(err, kb.ErrNotFound):
@@ -953,13 +1007,18 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry) (strin
 		// many of them there are. Routing through the view applies the
 		// same viewer mk_list does, so the number a caller is told matches
 		// the number they can enumerate.
-		if pages, err := view.Pages(c.Name); err == nil {
+		// c.Pages, not view.Pages(name): listing a cold collection must
+		// describe it, never mount it.
+		if pages, err := c.PagesFor(view.Viewer()); err == nil {
 			entry.Pages = len(pages)
 		}
 		if n := c.Tree; n != nil {
 			entry.Path, entry.Parent, entry.Children = n.Path, n.Parent, n.Children
-			tier, mounted := n.Depth, true
+			tier, mounted := n.Depth, !c.IsCold()
 			entry.Tier, entry.Mounted, entry.Mount, entry.Placement = &tier, &mounted, n.Mount, n.Placement
+			if c.IsCold() {
+				entry.Source = "cold"
+			}
 		}
 		if c.Contract().Declared() {
 			ec := c.EffectiveContract(g)
@@ -975,19 +1034,6 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry) (strin
 			}
 		}
 		out = append(out, entry)
-	}
-	// Declared but unmounted knowledge bases: listed so the tree is
-	// complete and an agent knows the name exists (and why a search
-	// naming it is refused), with no pages and no capabilities.
-	for _, e := range view.TreeEntries() {
-		if e.Mounted {
-			continue
-		}
-		tier, mounted := e.Depth, false
-		out = append(out, collectionSummary{
-			Name: e.Name, Type: e.SourceType, Source: "unmounted", Capabilities: []string{},
-			Path: e.Path, Tier: &tier, Parent: e.Parent, Mounted: &mounted, Mount: e.Mount, Placement: e.Placement,
-		})
 	}
 	body, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {

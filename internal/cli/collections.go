@@ -7,6 +7,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
+	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/memory"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
@@ -42,6 +43,9 @@ var activeObservability *telemetry.Config
 // activeIntake is the runtime `intake:` block, or nil: the store
 // mk_report_outcome writes an agent's outside research into.
 var activeIntake *memory.Spec
+
+// activeCache is the runtime `cache:` block, or nil (defaults).
+var activeCache *contentsource.CacheSpec
 
 // registry returns the collections this invocation serves, falling back
 // to a single collection over the process-global KB filesystem.

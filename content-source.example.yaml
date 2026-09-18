@@ -830,3 +830,20 @@ content:
 #     path_style: true
 #     hmac_key_env: MEERKAT_PATH_LOG_KEY
 #     retention_days: 0
+
+# --- cache: lazy mounting and the resident budget (tree: deployments) -------
+#
+# mount: lazy children of the tree are mounted on first request and kept
+# resident under a budget; when the cache passes the watermark the coldest,
+# then oldest-first-traversed, lazy collections are culled back to cold.
+# Culling is for the cache only — content is never touched. Temperatures
+# are flushed to the traversal log and read back at startup to warm-start.
+# See docs/design/cache.md.
+#
+# cache:
+#   max_bytes: 64MiB             # resident budget for lazy collections; 0 = unbounded
+#   high_watermark: 0.65         # culling starts at this fill ratio
+#   cold_policy: blocking        # blocking (mount in the request) | async
+#   retry_after: 2s              # what an async cold answer asks the caller to wait
+#   warm_start_days: 7           # read temperature flushes from the traversal log
+#   flush_interval: 5m           # write temperatures to the traversal log

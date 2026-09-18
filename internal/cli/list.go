@@ -169,17 +169,13 @@ func listCollections(cmd *cobra.Command, reg *collections.Registry, asJSON bool)
 			e.Pages = len(pages)
 		}
 		if n := c.Tree; n != nil {
-			tier, mounted := n.Depth, true
+			tier, mounted := n.Depth, !c.IsCold()
 			e.Path, e.Tier, e.Parent, e.Mounted = n.Path, &tier, n.Parent, &mounted
+			if c.IsCold() {
+				e.Source = "cold (mount: " + n.Mount + ")"
+			}
 		}
 		out = append(out, e)
-	}
-	for _, t := range reg.TreeEntries() {
-		if t.Mounted {
-			continue
-		}
-		tier, mounted := t.Depth, false
-		out = append(out, entry{Name: t.Name, Type: t.SourceType, Source: "unmounted (mount: " + t.Mount + ")", Path: t.Path, Tier: &tier, Parent: t.Parent, Mounted: &mounted})
 	}
 	if asJSON {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(out)

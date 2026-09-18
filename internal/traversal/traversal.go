@@ -165,6 +165,81 @@ type Sink interface {
 	Days(ctx context.Context) ([]string, error)
 	// DeleteDay removes every object under one day prefix.
 	DeleteDay(ctx context.Context, day string) error
+	// ReadDay returns every object under one day prefix.
+	ReadDay(ctx context.Context, day string) ([][]byte, error)
+}
+
+// TemperatureRecord is the periodic flush of the cache's traversal
+// counters (issue E): one object per flush with every collection's
+// temperature and first-traversal sequence, names hashed. A restart
+// reads the recent ones to warm-start.
+type TemperatureRecord struct {
+	Version    int                    `json:"version"`
+	Kind       string                 `json:"kind"`
+	RecordedAt time.Time              `json:"recorded_at"`
+	Entries    map[string]Temperature `json:"entries"`
+}
+
+// Temperature is one collection's counters.
+type Temperature struct {
+	Temperature    int64 `json:"temperature"`
+	FirstTraversal int64 `json:"first_traversal"`
+	Depth          int   `json:"tier"`
+}
+
+// KindTemperature marks a temperature record; session entries have no
+// kind field.
+const KindTemperature = "temperature"
+
+// RecordTemperatures writes the cache's counters, keyed by hashed
+// collection name.
+func (l *Log) RecordTemperatures(ctx context.Context, byName map[string]Temperature) error {
+	if l == nil || len(byName) == 0 {
+		return nil
+	}
+	now := l.now().UTC()
+	rec := TemperatureRecord{Version: 1, Kind: KindTemperature, RecordedAt: now, Entries: make(map[string]Temperature, len(byName))}
+	for name, t := range byName {
+		rec.Entries[l.Hash(name)] = t
+	}
+	body, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	key := path.Join(Prefix, now.Format("2006-01-02"), fmt.Sprintf("%d-temperature.json", now.UnixNano()))
+	return l.sink.Put(ctx, key, body)
+}
+
+// ReadTemperatures folds the temperature records of the last days into
+// one map keyed by hashed name: the latest record per hash wins, so a
+// restart sees the counters as they were last flushed.
+func (l *Log) ReadTemperatures(ctx context.Context, days int) (map[string]Temperature, error) {
+	if l == nil || days <= 0 {
+		return nil, nil
+	}
+	out := map[string]Temperature{}
+	latest := map[string]time.Time{}
+	now := l.now().UTC()
+	for i := 0; i < days; i++ {
+		day := now.AddDate(0, 0, -i).Format("2006-01-02")
+		objs, err := l.sink.ReadDay(ctx, day)
+		if err != nil {
+			return nil, err
+		}
+		for _, body := range objs {
+			var rec TemperatureRecord
+			if err := json.Unmarshal(body, &rec); err != nil || rec.Kind != KindTemperature {
+				continue
+			}
+			for h, t := range rec.Entries {
+				if prev, ok := latest[h]; !ok || rec.RecordedAt.After(prev) {
+					latest[h] = rec.RecordedAt
+					out[h] = t
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // Log hashes and writes entries.
@@ -350,6 +425,31 @@ func (s *localSink) Days(_ context.Context) ([]string, error) {
 		if e.IsDir() && isDay(e.Name()) {
 			out = append(out, e.Name())
 		}
+	}
+	return out, nil
+}
+
+func (s *localSink) ReadDay(_ context.Context, day string) ([][]byte, error) {
+	if !isDay(day) {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(filepath.Join(s.dir, day))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out [][]byte
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(s.dir, day, e.Name())) //nolint:gosec // G304: our own log directory.
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
 	}
 	return out, nil
 }

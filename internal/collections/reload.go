@@ -565,6 +565,9 @@ func (c *Collection) ReloadContent(ctx context.Context) (refresh.Outcome, error)
 	if !src.Refreshable() {
 		return refresh.Outcome{}, fmt.Errorf("collection %q is not configured for content refresh", c.Name)
 	}
+	if c.IsCold() {
+		return refresh.Outcome{}, fmt.Errorf("collection %q is cold; it is mounted on first request, not refreshed", c.Name)
+	}
 
 	// Each of the six steps below gets a phase span, so a slow
 	// reconciliation is attributable to the probe, the download, the
@@ -819,6 +822,9 @@ func (r *Registry) RefreshTargets() []refresh.Target {
 		// collection still gets a status slot — without one, a failed
 		// refresh would be invisible to readiness.
 		c.status.configure(c.Source)
+		if c.lazy {
+			continue // mounted on demand; a cold collection has nothing to reconcile
+		}
 		if c.Source.Refreshable() {
 			out = append(out, &contentTarget{c: c, ordinal: i})
 		}

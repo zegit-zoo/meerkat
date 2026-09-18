@@ -981,6 +981,16 @@ configured it is also written as an HMAC-hashed path record, and with an
 becomes a draft page for review. See
 [docs/design/observability.md](docs/design/observability.md#retrieval-outcomes-and-the-traversal-log).
 
+### Lazy mounting and the resident cache (`cache:`)
+
+A `mount: lazy` child of the tree is mounted on the first request that
+names it and stays resident under `cache.max_bytes`; past the watermark
+the coldest, then oldest-first-traversed, lazy collections are culled
+back to cold (content is never touched). `cold_policy: async` answers
+`{status: cold, retry_after_ms}` instead of blocking; temperatures are
+flushed to the traversal log and read back at startup to warm-start.
+See [docs/design/cache.md](docs/design/cache.md).
+
 ### The knowledge-base tree (`tree:`)
 
 `tree:` names a root knowledge base whose `manifest.yaml` declares its

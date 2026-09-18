@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kb"
@@ -55,8 +56,11 @@ func TestTree_RegistryKnowsTheTree(t *testing.T) {
 	if !reg.IsTree() || reg.Root() != "root" || reg.TreeDepth() != 2 || reg.TreeLimits().MaxHops != 3 || reg.TreeLimits().MaxSteps != contentsource.DefaultLimits.MaxSteps {
 		t.Fatalf("tree = root %q depth %d limits %+v", reg.Root(), reg.TreeDepth(), reg.TreeLimits())
 	}
-	if strings.Join(reg.Names(), ",") != "root,platform,flux" {
-		t.Errorf("mounted = %v", reg.Names())
+	if strings.Join(reg.Names(), ",") != "root,platform,flux,vendors" {
+		t.Errorf("declared = %v (vendors is declared and cold)", reg.Names())
+	}
+	if v, _ := reg.Get("vendors"); v == nil || !v.IsCold() || !v.Lazy() {
+		t.Errorf("vendors must be a cold, lazy collection: %+v", v)
 	}
 	var paths []string
 	for _, e := range reg.TreeEntries() {
@@ -71,20 +75,46 @@ func TestTree_RegistryKnowsTheTree(t *testing.T) {
 	}
 }
 
-func TestTree_ColdChildIsRefusedNotUnknown(t *testing.T) {
+func TestTree_ColdChildMountsOnFirstRequest(t *testing.T) {
 	reg := openTree(t)
-	_, err := reg.Get("vendors")
-	if !errors.Is(err, ErrColdCollection) || !errors.Is(err, ErrUnknownCollection) {
-		t.Fatalf("Get(vendors) = %v, want ErrColdCollection wrapping ErrUnknownCollection", err)
+	v, _ := reg.Get("vendors")
+	if !v.IsCold() {
+		t.Fatal("vendors must start cold")
 	}
-	if !strings.Contains(err.Error(), "lazy") {
-		t.Errorf("message should name the mount mode: %v", err)
+	// Blocking policy (default): the first request mounts it and answers.
+	hits, err := reg.Search(context.Background(), "vendors", "vendors", 5)
+	if err != nil || len(hits) == 0 || hits[0].Collection != "vendors" {
+		t.Fatalf("Search(vendors) = %v %v, want a mounted answer", hits, err)
 	}
-	if _, err := reg.Search(context.Background(), "vendors", "anything", 5); !errors.Is(err, ErrColdCollection) {
-		t.Errorf("Search(vendors) = %v", err)
+	if v.IsCold() || !v.Tree.Mounted {
+		t.Error("vendors must be warm after the request")
+	}
+	if _, n := reg.Resident(); n != 1 {
+		t.Errorf("resident lazy collections = %d, want 1", n)
 	}
 	if _, err := reg.Get("nope"); errors.Is(err, ErrColdCollection) || !errors.Is(err, ErrUnknownCollection) {
 		t.Errorf("Get(nope) = %v, want plain unknown", err)
+	}
+}
+
+func TestTree_AsyncColdPolicyAnswersColdThenMounts(t *testing.T) {
+	reg := openTree(t)
+	reg.SetCache(&contentsource.CacheSpec{ColdPolicy: contentsource.ColdAsync, RetryAfter: 50 * time.Millisecond}, nil)
+	_, err := reg.Search(context.Background(), "vendors", "vendors", 5)
+	var cold *ColdError
+	if !errors.As(err, &cold) || !errors.Is(err, ErrColdCollection) || !errors.Is(err, ErrUnknownCollection) || cold.Name != "vendors" {
+		t.Fatalf("async first request = %v, want *ColdError", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		hits, err := reg.Search(context.Background(), "vendors", "vendors", 5)
+		if err == nil && len(hits) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mount never completed: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

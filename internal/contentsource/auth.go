@@ -81,6 +81,20 @@ func LoadRuntimeAuth(contentSourceFlag string) (*authz.Config, error) {
 // It sits beside LoadRuntimeAuth rather than inside it because the two
 // answer different questions for different subcommands, and a caller
 // that wants one should not be made to think about the other.
+// LoadRuntimeCache returns the `cache:` block of the runtime
+// content-source.yaml, or nil when there is none.
+func LoadRuntimeCache(contentSourceFlag string) (*CacheSpec, error) {
+	path, err := LocateRuntime(ResolveFlag(contentSourceFlag))
+	if err != nil || path == "" {
+		return nil, err
+	}
+	cfg, err := LoadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("content-source.yaml (%s): %w", path, err)
+	}
+	return cfg.Cache, nil
+}
+
 // LoadRuntimeIntake returns the `intake:` block of the runtime
 // content-source.yaml, or nil when there is none.
 func LoadRuntimeIntake(contentSourceFlag string) (*memory.Spec, error) {
