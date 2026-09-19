@@ -18,6 +18,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/memory"
+	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
 	"github.com/zegit-zoo/meerkat/internal/traversal"
 )
@@ -83,6 +84,55 @@ type OutcomeOptions struct {
 	// Intake is the store fallback research is written to; nil writes
 	// nothing.
 	Intake memory.Store
+	// Sessions tracks retrieval sessions (issue F); nil tracks nothing.
+	Sessions *retrieval.Tracker
+}
+
+// sessionKey is the retrieval-session key for a call: the explicit
+// session_id, else the MCP client session, else "" (no session).
+func sessionKey(ctx context.Context, explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if cs := mcpserver.ClientSessionFromContext(ctx); cs != nil {
+		return cs.SessionID()
+	}
+	return ""
+}
+
+// limitResult answers a call that exceeded a traversal limit: a tool
+// result, not an error, telling the agent to report rather than keep
+// searching.
+func limitResult(ctx context.Context, lim *retrieval.ErrLimitReached) (*mcp.CallToolResult, error) {
+	telemetry.Record(ctx).RetrievalLimitReached(lim.Limit)
+	return jsonResult(map[string]any{
+		"status":  "limit_reached",
+		"limit":   lim.Limit,
+		"max":     lim.Max,
+		"message": "this retrieval session has used its " + lim.Limit + " budget; report the outcome with mk_report_outcome (found, not_found or gave_up, with what you tried) instead of searching further",
+	})
+}
+
+// tierAndResidency reports a collection's tree depth (-1 unknown) and
+// whether it is resident right now, for the session's hot/tier
+// accounting. Ask BEFORE the call that may mount it.
+func tierAndResidency(view *collections.Registry, name string) (tier int, resident bool) {
+	tier, resident = -1, true
+	if name == "" {
+		if root := view.Root(); root != "" {
+			name = root
+		} else {
+			return tier, resident
+		}
+	}
+	c, err := view.Get(name)
+	if err != nil {
+		return tier, resident
+	}
+	if c.Tree != nil {
+		tier = c.Tree.Depth
+	}
+	return tier, !c.IsCold()
 }
 
 type outcomeArgs struct {
@@ -274,11 +324,19 @@ func reportOutcomeHandler(reg *collections.Registry, opts transportOptions) mcps
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		key := sessionKey(ctx, args.sessionID)
 		if args.sessionID == "" {
 			args.sessionID = sessionIDFrom(ctx)
 		}
 		g := authz.FromContext(ctx)
 		view := visible(ctx, reg, opts)
+		// Close the retrieval session (issue F) with the reported outcome
+		// and quality; the SLIs are observed there.
+		var q *retrieval.Quality
+		if args.quality != nil {
+			q = &retrieval.Quality{Accuracy: args.quality.Accuracy, Completeness: args.quality.Completeness, AnswerQuality: args.quality.AnswerQuality}
+		}
+		opts.Outcome.Sessions.End(ctx, key, args.outcome, q)
 
 		// Path shape: the tree depth of each attempted collection this
 		// caller can see; -1 for anything else. Depths are numbers and

@@ -455,6 +455,70 @@ returns the caller's own context and a non-recording span.
   span/label asymmetry), every outcome classified, error text not
   recorded.
 
+## Retrieval sessions and SLIs
+
+meerkat-mob issue F (#6). Per-call telemetry cannot say how long an
+agent took to get context for one question, how many hops it needed,
+or where it gave up. A **retrieval session** can: every tool call
+sharing a key — an explicit `session_id` passed to `mk_search`,
+`mk_show` and `mk_report_outcome`, or the MCP client session — within
+an idle window (`sessions.idle_timeout`, default 120 s). It ends on
+`mk_report_outcome`, on idle timeout, or when the MCP session goes
+away.
+
+Definitions (`internal/retrieval`):
+
+| Term | Meaning |
+|---|---|
+| step | any tool call |
+| hop | a search scoped to a collection different from the previous call's |
+| attempt | a search since the last show |
+| first_context | the first search with a hit, or the first show |
+| first_relevant_context | the last show not followed by another search; a `found` report confirms it, `gave_up` voids it |
+| wrong_turn | a hop into a collection that is never shown from |
+| hot | every collection the session touched was resident (issue E) before it was touched |
+| tier_reached | the deepest tree depth touched (-1 in a flat deployment) |
+
+One `meerkat.retrieval.session` span per session, started on the
+first call and ended with the session, parents every call's own span;
+it carries `meerkat.retrieval.{outcome, hops, steps, attempts,
+wrong_turns, hot_path, tier_reached}`. Counts, a boolean, a tier
+number and a closed-set outcome — never the session ID, a name or a
+query.
+
+The SLIs, all human-readable names:
+
+| Metric | Labels |
+|---|---|
+| `meerkat_retrieval_time_to_first_context_seconds` | `tier_reached`, `hot` |
+| `meerkat_retrieval_time_to_first_relevant_context_seconds` | `tier_reached`, `hot` |
+| `meerkat_retrieval_time_to_give_up_seconds` | — (not_found, gave_up, timeout sessions) |
+| `meerkat_retrieval_collection_hops`, `meerkat_retrieval_steps`, `meerkat_retrieval_wrong_turns` | — |
+| `meerkat_retrieval_sessions_total` | `outcome` = found, not_found, gave_up, timeout |
+| `meerkat_retrieval_accuracy`, `meerkat_retrieval_completeness`, `meerkat_retrieval_answer_quality` | `tier` (from `mk_report_outcome`'s quality) |
+| `meerkat_retrieval_limit_reached_total` | `limit` = hops, steps, attempts |
+
+The three questions the mob asks are then: a hot, well-used path is
+`time_to_first_relevant_context{hot="true"}` at low tiers; an obscure
+cold path is the same histogram with `hot="false"` and a deep
+`tier_reached`; giving up is `time_to_give_up_seconds` together with
+`sessions_total{outcome}` and `wrong_turns`. Path *identity* for any of
+them is in the traversal log, joined by hashed name.
+
+**Traversal limits.** The root manifest's `limits:` (issue D; 12 hops,
+40 steps, 20 attempts when unset, also for a flat deployment) are
+enforced per session. A call over budget is answered with `{status:
+limit_reached, limit, max, message}` — a tool result telling the agent
+to report the outcome rather than keep searching — and counted in
+`meerkat_retrieval_limit_reached_total{limit}`. Agents under
+performance pressure optimise their path; the limits put that pressure
+on the retrieval side.
+
+**Measure before targets (Q12).** No SLO is set here. Run two weeks of
+real traffic, read the histograms per tier and hot/cold, and only then
+choose targets; the numbers a fresh deployment produces say more about
+its content than about meerkat.
+
 ## Retrieval outcomes and the traversal log
 
 meerkat-mob issue G (#7). Per-call telemetry cannot see whether a

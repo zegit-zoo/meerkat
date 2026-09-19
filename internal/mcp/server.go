@@ -55,6 +55,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kb"
+	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/search"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
@@ -131,6 +132,24 @@ func newServer(reg *collections.Registry, mem transportOptions, opts ...mcpserve
 // ctx carries the telemetry, so the startup build is traced and timed
 // like any other index build. It is otherwise unused: nothing here is
 // cancellable, and the parameter exists to reach the instrumentation.
+// startSessions runs the retrieval-session sweeper until the returned
+// stop function is called; a no-op for a nil tracker.
+func startSessions(ctx context.Context, tr *retrieval.Tracker) (stop func()) {
+	if tr == nil {
+		return func() {}
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tr.Run(sctx)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 // startCache warm-starts the lazy-mount cache from the traversal log
 // and runs the temperature flusher until the returned stop function is
 // called. Both are no-ops without a traversal log.
@@ -193,6 +212,8 @@ func ServeStdioWith(ctx context.Context, reg *collections.Registry, outcome Outc
 	}
 	stopFlusher := startCache(ctx, reg)
 	defer stopFlusher()
+	stopSessions := startSessions(ctx, outcome.Sessions)
+	defer stopSessions()
 	defer func() { _ = reg.Close() }()
 
 	// AllowAnonymousPersonal is true here and nowhere else: a stdio
@@ -402,6 +423,16 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 		if sessionID != "" && (len(sessionID) > maxSessionIDLen || !sessionIDPattern.MatchString(sessionID)) {
 			return mcp.NewToolResultError(fmt.Sprintf("session_id must be 1–%d characters of [A-Za-z0-9._:-]", maxSessionIDLen)), nil
 		}
+		// Retrieval session (issue F): this call's span hangs under the
+		// session span; the step and hop limits are enforced here.
+		ctx, sess := mem.Outcome.Sessions.Begin(ctx, sessionKey(ctx, sessionID))
+		if err := sess.Step(); err != nil {
+			if lim, ok := retrieval.IsLimit(err); ok {
+				return limitResult(ctx, lim)
+			}
+		}
+		targetName := req.GetString("collection", "")
+		tier, resident := tierAndResidency(view, targetName)
 		ctx, span := telemetry.Span(ctx, telemetry.SpanSearch,
 			telemetry.KeySearchQueryLength.Int(len(query)),
 			telemetry.KeySearchLimit.Int(limit),
@@ -446,6 +477,7 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 			}
 		}
 		stage := string(collections.StageOf(results))
+		sessErr := sess.Search(targetName, tier, len(results), resident)
 		telemetry.Record(ctx).Searched(telemetry.OutcomeOK, time.Since(started).Seconds(), len(results), stage)
 		span.SetAttributes(
 			telemetry.KeySearchResults.Int(len(results)),
@@ -454,6 +486,11 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 		)
 		span.End()
 
+		if lim, ok := retrieval.IsLimit(sessErr); ok {
+			// The results are real; the session is over budget. Answer
+			// the limit so the agent reports instead of hopping again.
+			return limitResult(ctx, lim)
+		}
 		var body string
 		if req.GetBool("bundle", false) {
 			body, err = bundlesJSON(query, view.Bundles(results))
@@ -581,6 +618,9 @@ func showTool(reg *collections.Registry) mcp.Tool {
 			mcp.Required(),
 			mcp.Description("Page ID, e.g. 'concepts/Some-Concept'. May be qualified as '<collection>:<page-id>'."),
 		),
+		mcp.WithString("session_id",
+			mcp.Description("Optional retrieval-session identifier; pass the same value you gave mk_search so this show is counted in that session."),
+		),
 		collectionArg(reg),
 		// See registerSearch's comment: mk_show only reads a page out of
 		// the KB filesystem, so it gets the same read-only/non-destructive/
@@ -607,6 +647,21 @@ func showHandler(reg *collections.Registry, mem transportOptions) mcpserver.Tool
 		// collections were searched — enough to explain a slow or
 		// ambiguous lookup, and nothing that names a document.
 		qualified, _ := view.SplitQualified(id)
+		showSession := strings.TrimSpace(req.GetString("session_id", ""))
+		if showSession != "" && (len(showSession) > maxSessionIDLen || !sessionIDPattern.MatchString(showSession)) {
+			return mcp.NewToolResultError(fmt.Sprintf("session_id must be 1–%d characters of [A-Za-z0-9._:-]", maxSessionIDLen)), nil
+		}
+		ctx, sess := mem.Outcome.Sessions.Begin(ctx, sessionKey(ctx, showSession))
+		if err := sess.Step(); err != nil {
+			if lim, ok := retrieval.IsLimit(err); ok {
+				return limitResult(ctx, lim)
+			}
+		}
+		showTarget := req.GetString("collection", "")
+		if showTarget == "" {
+			showTarget = qualified
+		}
+		showTier, showResident := tierAndResidency(view, showTarget)
 		ctx, span := telemetry.Span(ctx, telemetry.SpanShow,
 			telemetry.KeyCollectionQualified.Bool(qualified != ""),
 			telemetry.KeyCollectionNamed.Bool(req.GetString("collection", "") != ""),
@@ -643,6 +698,10 @@ func showHandler(reg *collections.Registry, mem transportOptions) mcpserver.Tool
 			return nil, err
 		}
 		links := view.LinksOf(ref)
+		if showTarget == "" {
+			showTier, showResident = tierAndResidency(view, ref.Collection)
+		}
+		sess.Show(ref.Collection, showTier, showResident)
 		span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK), telemetry.KeyPagesReturned.Int(1),
 			telemetry.KeyLinks.Int(len(links.Links)), telemetry.KeyLinkedFrom.Int(len(links.LinkedFrom)))
 		span.End()
