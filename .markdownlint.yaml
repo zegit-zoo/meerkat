@@ -1,0 +1,9 @@
+# Lenient: structure and consistency, not line length.
+default: true
+MD013: false   # line length
+MD033: false   # inline HTML (badges, details)
+MD041: false   # first line heading (frontmatter)
+MD024:
+  siblings_only: true
+MD029:
+  style: ordered

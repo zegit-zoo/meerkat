@@ -115,6 +115,7 @@ content:
 ```
 
 Notes:
+
 - `layout.wiki` is required for a non-`none` source; `sources`/`prompts`/
   `templates` are optional (a KB with no ingestion config still serves
   search/show/list).
@@ -128,7 +129,7 @@ Replace `sync.sh` with a small Go tool (`go run ./internal/contentsync`,
 backed by the `internal/contentsource` library). Go (not bash) because git
 resolution for private repos must reuse `internal/auth`.
 
-```
+```text
 read content-source.yaml
   ├─ absent | type:none → clear embed dirs to placeholders; print notice; exit 0
   ├─ type:local         → SRC = layout root at `path`
@@ -169,6 +170,7 @@ building cleanly without shipping anyone's content.
 ### Validation & errors
 
 The tool validates the config and fails fast with actionable messages:
+
 - `type: git` without `repo`/`ref`; `type: local` without `path`;
   `type: submodule` without an initialized submodule.
 - Missing `layout.wiki` for a non-`none` source.
@@ -199,9 +201,11 @@ copying — usable as a CI lint on `content-source.yaml`.
 ## Migration
 
 1. Existing submodule users add:
+
    ```yaml
    content: { type: submodule, submodule: kb }
    ```
+
    → byte-for-byte identical build; `sync.sh` retired (kept briefly as a shim
    that execs the Go tool, then removed).
 2. The public repo ships **no** `content-source.yaml` (default empty build).

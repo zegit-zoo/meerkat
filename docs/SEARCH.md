@@ -192,7 +192,7 @@ go test -bench=. ./internal/search/...
 
 Current numbers (M-series Mac):
 
-```
+```text
 BenchmarkNew    ~150ms/op   (cold-start of in-memory index)
 BenchmarkQuery  ~5ms/op     (warm query against 730+ pages)
 ```

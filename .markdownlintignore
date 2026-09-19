@@ -1,0 +1,4 @@
+# Content fixtures are knowledge-base pages, not repo docs.
+internal/kb/testdata/
+internal/kb/content/
+node_modules/

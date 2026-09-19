@@ -36,7 +36,7 @@ The agent will pick these up automatically — they appear in
 
 In an OpenCode session:
 
-```
+```text
 > Use mk_search to find pages about rate limiting. Return the top 3.
 
 mk_search(query="rate limiting", limit=3)
@@ -88,7 +88,7 @@ Combined with the bundled `gitlab_glab_*` MCP tools (in OpenCode by
 default), an agent can fetch the canonical upstream README rather
 than relying solely on the meerkat-rendered summary:
 
-```
+```text
 mk_show systems/backend/rate-limiter
   -> see source.repo
 

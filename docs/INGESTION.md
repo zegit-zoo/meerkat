@@ -8,7 +8,7 @@ Meerkat is a **planner**. OpenCode (running `gpt-5.5-fast` by
 default) is the **executor**. The Go binary ships with no LLM
 credentials.
 
-```
+```text
 sources.yaml + prompts + templates
         │
         ▼
@@ -138,7 +138,7 @@ mk ingest --execute --workdir-kb ~/your-kb-repo
 
 For each task, the executor spawns one `opencode run` subprocess:
 
-```
+```sh
 opencode run \
   --model openai/gpt-5.5-fast \
   --dir ${WORKDIR_KB} \

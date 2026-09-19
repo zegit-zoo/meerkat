@@ -19,10 +19,12 @@ flat CI run — it's part of the tag-triggered release gate below.
 
 1. Ensure the working tree is clean and tests pass locally (`make pre-release`).
 2. Tag the release commit:
-   ```
+
+   ```sh
    git tag -s v1.2.3 -m "release v1.2.3"
    git push origin v1.2.3
    ```
+
 3. The `release.yml` workflow triggers on the tag push, running two jobs
    in parallel once `verify` passes:
    - **`verify` job** — re-runs the full gate (lint + test + vuln + gosec + gitleaks) on the exact tagged SHA.
@@ -30,6 +32,7 @@ flat CI run — it's part of the tag-triggered release gate below.
    - **`docker` job** (runs only after `verify` passes, in parallel with `goreleaser`) — builds the hardened multi-stage [`Dockerfile`](../Dockerfile) for `linux/amd64` + `linux/arm64` via QEMU + buildx, pushes the manifest list to `ghcr.io/zegit-zoo/meerkat`, signs it with cosign (keyless, GitHub OIDC), and attaches a Syft SBOM + SLSA provenance attestation via buildx's native `--sbom`/`--provenance`. See [docs/CONTAINER.md](CONTAINER.md).
 
 The released artifacts are:
+
 - `meerkat_<v>_<os>_<arch>.tar.gz` / `.zip` (Windows)
 - `meerkat-bootstrap_<v>_<os>_<arch>` / `.exe` (Windows) — a standalone
   binary (not archived) that installs a verified `zegit-zoo/meerkat`

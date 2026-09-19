@@ -74,7 +74,7 @@ start of the request. The caller's `*collections.Registry` is a view
 containing only the collections they may read. Every operation then runs
 against a registry that, as far as it can tell, never mounted the rest.
 
-```
+```text
 request → verify token → evaluate policy → Registry.Restrict(grants.CanRead) → handlers
 ```
 
@@ -196,7 +196,7 @@ misconfiguration available here, so it is not expressible.
 
 ### The 401 handshake (RFC 9728)
 
-```
+```text
 →  POST /mcp                            (no token)
 ←  401 Unauthorized
    WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp",
@@ -539,7 +539,7 @@ current, and then the ordinary not-ready path produces the 503. See
 
 ### Metrics
 
-```
+```text
 meerkat_http_requests_total{route,method,status}
 meerkat_http_request_duration_seconds{route,method}
 meerkat_auth_failures_total{reason}          # missing_token | invalid_token | no_grants

@@ -415,7 +415,7 @@ hash and writes temp-file + atomic rename; a GCS store uses
 replicas can share one store. A lost race is a retryable `conflict` naming
 the current version, never a silent overwrite:
 
-```
+```text
 conflict: the memory "memory/team/runbook" was created or changed by someone
 else since you last read it, so this save was refused rather than overwriting
 it. It is now at version "3f2a1c0b9d8e7f60". Read it with mk_show, merge what
@@ -480,7 +480,7 @@ source. An OpenCode (or Claude Code) sub-agent populates each one using the
 prompt declared in the source's entry in your content repo's
 `ingestion/sources.yaml`.
 
-```
+```text
 embedded sources.yaml
         │
         ▼
@@ -558,7 +558,7 @@ The directory uses the **content-repo layout** — the same layout
 `content-source.yaml` describes and `mk ingest` writes into — not the
 internal embed layout:
 
-```
+```text
 meerkat-kb/
 ├── wiki/                       # markdown pages
 │   ├── index.md
@@ -644,7 +644,7 @@ extracted and nothing is cached. That requirement is the feature, not an
 inconvenience — it's what makes fetched content verifiable at all, and it
 doubles as the on-disk cache key:
 
-```
+```text
 <user cache dir>/meerkat/content/url/<sha256>/
 ```
 
@@ -697,7 +697,7 @@ write, so `(bucket, object, generation)` names immutable bytes the way a
 `sha256` does for `type: url` — which is why `sha256` is *optional* here
 (and still verified before extraction if you set it):
 
-```
+```text
 <user cache dir>/meerkat/content/gcs/<hash(bucket,object)>/<generation>/
 <user cache dir>/meerkat/content/gcs/<hash(bucket,prefix)>/<listing-fingerprint>/
 ```
@@ -752,7 +752,7 @@ assumed to be a content hash (multipart uploads and SSE-KMS make it
 something else), which is why `sha256:` is still available and still
 verified before extraction if you set it:
 
-```
+```text
 <user cache dir>/meerkat/content/s3/<hash(endpoint,bucket,object)>/<etag>/
 <user cache dir>/meerkat/content/s3/<hash(endpoint,bucket,prefix)>/<listing-fingerprint>/
 ```
@@ -1228,7 +1228,7 @@ make build
 
 ## Repo layout
 
-```
+```text
 cmd/meerkat/main.go         entrypoint
 internal/
   kb/         Page + Frontmatter, //go:embed all:content

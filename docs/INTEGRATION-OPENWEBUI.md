@@ -15,6 +15,7 @@ mk http serve --port 4004
 ```
 
 Required:
+
 - `--api-key <key>` flag **or** `MEERKAT_API_KEY` env (env wins if
   both are set, with a startup warning). Prefer the env var — a
   value passed via `--api-key` is visible to other local users via
@@ -23,6 +24,7 @@ Required:
   anonymous mode.
 
 Optional:
+
 - `--host` defaults to `127.0.0.1`.
 - `--port` defaults to `4004`.
 

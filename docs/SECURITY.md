@@ -49,7 +49,7 @@ team.
 
 ### `govulncheck` — vulnerable dependency
 
-```
+```text
 Vulnerability #1: GO-2024-XXXX
   Module: golang.org/x/foo
     Found in: golang.org/x/foo@v0.5.0

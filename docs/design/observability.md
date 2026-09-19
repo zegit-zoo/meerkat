@@ -8,7 +8,7 @@ user-facing reference is the [README](../../README.md).)*
 
 ## Summary
 
-#9 gave the hosted server probes, bounded Prometheus metrics and
+Issue #9 gave the hosted server probes, bounded Prometheus metrics and
 structured JSON logs. That answers *"is this replica healthy"* and *"was
 that tool call slow"*. It cannot answer the question an operator
 actually has when one call is slow:
@@ -105,7 +105,7 @@ classes above.
 
 ## Provider wiring
 
-```
+```text
 telemetry.New(ctx, Options{Config, Registry, Logger, Version, SpanExporter, SetGlobals})
   -> nil, nil          when nothing was configured
   -> *Telemetry        tracer + domain metric recorder + bounded batch pipeline
@@ -149,7 +149,7 @@ test binary sets neither.
 
 ### Middleware order
 
-```
+```text
 traceHTTP( accessLog( instrumentHTTP( mux ) ) )
 ```
 
@@ -266,7 +266,7 @@ observability:
 
 ### The rule
 
-```
+```text
 explicit meerkat configuration  >  OTEL_* environment  >  default
 ```
 
@@ -338,7 +338,7 @@ server that exports nothing and says so nowhere.
 Every existing series is unchanged. Added, all bounded by the same label
 discipline (`internal/telemetry/metrics.go`):
 
-```
+```text
 meerkat_index_builds_total{outcome}
 meerkat_index_build_duration_seconds{outcome}
 meerkat_index_pages
