@@ -35,6 +35,13 @@ type Task struct {
 	Model         string         `json:"model"`                  // e.g. "openai/gpt-5.5-fast"
 	SubagentType  string         `json:"subagent_type"`          // e.g. "general"
 	WallClockCapS int            `json:"wall_clock_cap_seconds"` // per-task hard cap
+
+	// Intake roles (roles.go). Empty Role is the classic placeholder
+	// page ingest.
+	Role     Role   `json:"role,omitempty"`
+	IntakeID string `json:"intake_id,omitempty"`
+	RawPath  string `json:"raw_path,omitempty"`
+	TargetKB string `json:"target_kb,omitempty"`
 }
 
 // PlanOpts narrows what the planner emits.

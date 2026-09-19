@@ -292,16 +292,22 @@ meerkat ingest [flags]
 **Flags**
 
 ```
+      --apply                          With --role librarian: file confirmed candidates through their collection's contract. Without it the librarian changes nothing.
       --batch-file string              Plan-only: write the JSONL batch to this file instead of stdout.
       --branch string                  Push target branch. Overrides the branch derived from content-source.yaml.
+      --days int                       With --role librarian: days of traversal log to read for missing-link findings. (default 7)
       --dry-run                        With --execute, print the planned commands without running them.
       --execute                        Actually run the tasks (otherwise plan-only).
       --executor string                Agent CLI to run each page: opencode | claude. (default "opencode")
+      --from string                    With --role researcher|validator: where items come from (intake, the content-source.yaml intake: store). (default "intake")
       --max-consecutive-failures int   Stop the executor after this many consecutive failures (0 = never auto-stop).
       --max-parallel int               Max concurrent opencode sessions when --execute (default 1). (default 1)
       --model string                   Model override (default: openai/gpt-5.5-fast or per-source override in sources.yaml).
+      --namespace string               With --role researcher: only this identity namespace's deposits (default: every namespace).
+      --only string                    With --role: only this intake id.
       --page string                    Plan exactly one page (e.g. 'concepts/Rate-Limiting' or 'wiki/policies/foo.md'). Overrides --source/--statuses.
       --reverse                        Process tasks in reverse ID order. Useful when running a second batch alongside a forward one — collisions skip cheaply because the executor checks page status before spawning opencode.
+      --role string                    Act as an intake role: researcher (raw intake -> candidate page), validator (re-derive a candidate's claims), librarian (report on the tree; --apply files confirmed candidates).
       --source string                  Restrict to one source id from sources.yaml (e.g. policies, adr, runbooks).
       --status strings                 Restrict to pages with these frontmatter statuses (default: placeholder,ingest-failed).
       --subagent string                OpenCode subagent type (default: general).

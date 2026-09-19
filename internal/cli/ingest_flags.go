@@ -45,6 +45,18 @@ func ingestPFlags(f *ingestFlags) *flagSet {
 			"second batch alongside a forward one — collisions skip "+
 			"cheaply because the executor checks page status before "+
 			"spawning opencode.")
+	fs.StringVar(&f.role, "role", "",
+		"Act as an intake role: researcher (raw intake -> candidate page), validator (re-derive a candidate's claims), librarian (report on the tree; --apply files confirmed candidates).")
+	fs.StringVar(&f.from, "from", "intake",
+		"With --role researcher|validator: where items come from (intake, the content-source.yaml intake: store).")
+	fs.StringVar(&f.namespace, "namespace", "",
+		"With --role researcher: only this identity namespace's deposits (default: every namespace).")
+	fs.StringVar(&f.only, "only", "",
+		"With --role: only this intake id.")
+	fs.BoolVar(&f.apply, "apply", false,
+		"With --role librarian: file confirmed candidates through their collection's contract. Without it the librarian changes nothing.")
+	fs.IntVar(&f.days, "days", 7,
+		"With --role librarian: days of traversal log to read for missing-link findings.")
 	fs.BoolVar(&f.trustSources, "trust-sources", false,
 		"Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged.")
 	return fs

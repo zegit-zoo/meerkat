@@ -970,6 +970,17 @@ search syntax are never rewritten. A hub collection can set
 `layout.analyzer: ngram` to index titles as edge n-grams. See
 [docs/SEARCH.md](docs/SEARCH.md).
 
+### The intake pipeline (`mk ingest --role`)
+
+Research deposited by `mk_report_outcome` becomes knowledge through
+three agent roles: `mk ingest --role researcher` turns a raw item into
+a candidate page, `--role validator` re-derives its claims (a different
+model than the researcher's, two independent confirmations to file),
+and `--role librarian` reports dangling links, stale pages, cull
+proposals, missing links from the traversal log and parked items —
+changing nothing without `--apply`. See
+[docs/design/intake.md](docs/design/intake.md).
+
 ### Retrieval sessions and SLIs
 
 Calls sharing a `session_id` (or an MCP session) form a retrieval
