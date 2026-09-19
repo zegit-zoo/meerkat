@@ -32,7 +32,10 @@ import (
 //   - parked intake items that need a human,
 //   - staged candidates with enough confirmations to file,
 //   - promotions: hot deep collections that deserve a pointer from the
-//     root (promotion.go).
+//     root (promotion.go),
+//   - prompt quality: rewrite targets (pointer hints, page
+//     descriptions, the tool text, hub routing) derived from the
+//     initial queries sessions asked (promptquality.go).
 //
 // Nothing is modified unless Apply is called, and Apply files only what
 // the collection's update contract allows: `direct` writes the page
@@ -72,6 +75,9 @@ type Report struct {
 	// Promotions lists hot deep collections proposed for a root pointer,
 	// hottest first. Each also appears in Findings as a promotion.
 	Promotions []Promotion `json:"promotions,omitempty"`
+	// PromptQuality lists rewrite targets from the initial queries, most
+	// supported first. Each also appears in Findings as prompt_quality.
+	PromptQuality []PromptFinding `json:"prompt_quality,omitempty"`
 }
 
 // Fileable is a confirmed candidate and how its collection takes it.
@@ -108,6 +114,9 @@ type LibrarianOpts struct {
 	// deep; default 2.
 	PromotionTopN     int
 	PromotionMinDepth int
+	// PromptMinSessions is how many sessions must share a rewrite
+	// target before it is reported; default 2.
+	PromptMinSessions int
 	Now               func() time.Time
 }
 
@@ -125,6 +134,9 @@ func Librarian(ctx context.Context, reg *collections.Registry, store *intake.Sto
 	}
 	if opts.PromotionMinDepth <= 0 {
 		opts.PromotionMinDepth = DefaultPromotionMinDepth
+	}
+	if opts.PromptMinSessions <= 0 {
+		opts.PromptMinSessions = DefaultPromptMinSessions
 	}
 	now := opts.Now()
 	rep := &Report{At: now}
@@ -188,6 +200,22 @@ func Librarian(ctx context.Context, reg *collections.Registry, store *intake.Sto
 			rep.Promotions = append(rep.Promotions, p)
 			rep.Findings = append(rep.Findings, Finding{Kind: FindingPromotion, Collection: p.Hub, Page: p.PageID(), Count: int(min(p.Temperature, 1<<30)), Detail: p.detail()})
 			m.LibrarianFinding(FindingPromotion)
+		}
+		// Prompt quality: rewrite targets from the initial queries.
+		pqs, err := promptQuality(ctx, reg, opts.Log, opts)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range pqs {
+			rep.PromptQuality = append(rep.PromptQuality, f)
+			// The finding points at what to edit: the one pointer page
+			// when there is exactly one, else the collection concerned.
+			coll, page := f.Collection, ""
+			if len(f.Pages) == 1 {
+				coll, page, _ = strings.Cut(f.Pages[0], ":")
+			}
+			rep.Findings = append(rep.Findings, Finding{Kind: FindingPromptQuality, Collection: coll, Page: page, Count: f.Sessions, Detail: f.Target + ": " + f.detail()})
+			m.LibrarianFinding(FindingPromptQuality)
 		}
 	}
 

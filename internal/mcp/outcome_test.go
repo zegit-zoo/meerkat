@@ -14,6 +14,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/memory"
+	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/traversal"
 )
 
@@ -193,5 +194,28 @@ func TestReportOutcome_ValidationAndGating(t *testing.T) {
 	out = callOutcome(t, ctx, bare, map[string]any{"outcome": "gave_up", "fallback": map[string]any{"kind": "web", "summary": "s"}})
 	if out["recorded"] != true || out["logged"] != false || out["intake"] != "not_configured" {
 		t.Errorf("unconfigured: %v", out)
+	}
+}
+
+func TestReportOutcome_LogCarriesSessionStagesAndWrongTurns(t *testing.T) {
+	ctx := context.Background()
+	f := newOutcomeFixture(t)
+	f.opts.Outcome.Sessions = retrieval.New(0, retrieval.Limits{})
+	_, s := f.opts.Outcome.Sessions.Begin(ctx, "sess-stages")
+	_ = s.Search("flux", 0, 1, true, "exact")
+	_ = s.Search("other", 0, 0, true, "fuzzy")
+	_ = s.Search("flux", 0, 1, true, "fuzzy")
+	s.Show("flux", 0, true)
+	out := callOutcome(t, ctx, f, map[string]any{"session_id": "sess-stages", "outcome": "found", "initial_query": "helmrelase drift", "attempted": []any{"flux", "other", "flux"}, "pages": []any{"flux:concepts/drift"}})
+	if out["logged"] != true {
+		t.Fatalf("response = %v", out)
+	}
+	entries, err := f.opts.Outcome.Log.ReadSessions(ctx, 1)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %v (%v)", entries, err)
+	}
+	e := entries[0]
+	if e.WrongTurns != 1 || e.Stages["exact"] != 1 || e.Stages["fuzzy"] != 2 || len(e.Stages) != 2 {
+		t.Errorf("entry session fields: wrong_turns=%d stages=%v", e.WrongTurns, e.Stages)
 	}
 }

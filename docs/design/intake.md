@@ -90,7 +90,23 @@ reports:
   reaches the collection today from a lower hub, and the pages sessions
   confirmed most inside it (matched by hashing the registry's own
   qualified IDs), so a human can judge whether those pages belong
-  higher up. Page moves are never automated.
+  higher up. Page moves are never automated,
+- **prompt-quality** rewrite targets (meerkat-mob #21), from the
+  initial queries in the traversal log, each supported by at least 2
+  sessions (`--prompt-min-sessions` in `LibrarianOpts`):
+  - *hint*: sessions gave up in a collection whose pointer hints
+    mention none of the query's words (a misspelt "datadgo" is not
+    found in "datadog" — that is the point) → rewrite the hint;
+  - *description*: sessions found their page only after the exact
+    stage missed and the fuzzy or prefix stage answered (the session's
+    `stages` counts) → put the words agents use on the pages;
+  - *tool*: sessions gave up having touched only the root, or nothing
+    → the `mk_search` tool description did not send them anywhere;
+  - *route*: sessions starting in a hub took a wrong turn first
+    (`wrong_turns` > 0) → the hub's pointer hints do not separate its
+    children.
+  Each finding quotes the queries (most frequent first). Report-only:
+  the rewrite stage that edits hints and descriptions is a later slice.
 
 Without `--apply` it changes nothing. With it, `direct` contracts get
 the page written into the collection's memory store at
@@ -111,8 +127,10 @@ listing), `meerkat_librarian_findings_total{kind}`.
 
 ## Not in this slice
 
-- Prompt-quality rewrites from initial queries (meerkat-mob #21): the
-  librarian has the queries (issue G) but proposes nothing yet.
+- The prompt-quality *rewrite* stage (meerkat-mob #21, second half):
+  an agent role that edits pointer hints and page descriptions from the
+  analysis findings and proposes tool-description changes as a merge
+  request. The analysis stage above is in.
 - Forge issues for parked items (meerkat-mob #19).
 - Automated page moves for a promotion; only the root pointer is filed.
 - Attachments under `raw/<…>/<id>/attachments/`; the layout leaves
