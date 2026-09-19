@@ -73,6 +73,7 @@ type Metrics struct {
 	intakeItems       *prometheus.CounterVec
 	intakeOldest      prometheus.Gauge
 	librarianFindings *prometheus.CounterVec
+	librarianRewrites *prometheus.CounterVec
 	sourceResolves    *prometheus.CounterVec
 	sourceDuration    *prometheus.HistogramVec
 	sourceCache       *prometheus.CounterVec
@@ -229,8 +230,12 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 		}),
 		librarianFindings: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "meerkat_librarian_findings_total",
-			Help: "Findings of a librarian run, by kind (dangling, stale, cull, missing_link, needs_human).",
+			Help: "Findings of a librarian run, by kind (dangling, stale, cull, missing_link, needs_human, promotion, prompt_quality).",
 		}, []string{"kind"}),
+		librarianRewrites: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "meerkat_librarian_rewrites_total",
+			Help: "Prompt-quality rewrites executed by the librarian, by result (rewritten, unchanged, rejected, failed).",
+		}, []string{"action"}),
 		treeDepth: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "meerkat_tree_depth",
 			Help: "Deepest knowledge base declared in the tree this process serves (root = 0; 0 for a flat deployment; the hard cap is 5).",
@@ -304,7 +309,7 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 			m.retrievalFirstContext, m.retrievalFirstRelevant, m.retrievalGiveUp, m.retrievalHops, m.retrievalSteps,
 			m.retrievalWrongTurns, m.retrievalSessions, m.retrievalAccuracy, m.retrievalCompleteness,
 			m.retrievalAnswerQuality, m.retrievalLimitReached,
-			m.intakeItems, m.intakeOldest, m.librarianFindings,
+			m.intakeItems, m.intakeOldest, m.librarianFindings, m.librarianRewrites,
 			m.sourceResolves, m.sourceDuration, m.sourceCache, m.sourceBytes,
 			m.searches, m.searchDuration, m.searchResults, m.ambiguous,
 			m.memorySaves, m.memoryDuration, m.memoryErrors,
@@ -493,6 +498,20 @@ func (m *Metrics) LibrarianFinding(kind string) {
 		kind = "other"
 	}
 	m.librarianFindings.WithLabelValues(kind).Inc()
+}
+
+// LibrarianRewrite counts one prompt-quality rewrite by what became of
+// it (rewritten | unchanged | rejected | failed).
+func (m *Metrics) LibrarianRewrite(action string) {
+	if m == nil {
+		return
+	}
+	switch action {
+	case "rewritten", "unchanged", "rejected", "failed":
+	default:
+		action = "other"
+	}
+	m.librarianRewrites.WithLabelValues(action).Inc()
 }
 
 // RetrievalOutcome counts one mk_report_outcome call. outcome and

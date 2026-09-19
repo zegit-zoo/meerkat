@@ -368,18 +368,95 @@ func runLibrarian(cmd *cobra.Command, ctx context.Context, store *intake.Store) 
 	fmt.Fprintf(cmd.ErrOrStderr(), "\n%d findings: %d dangling, %d stale, %d cull, %d missing links, %d need a human, %d promotions, %d prompt-quality; %d candidates fileable\n",
 		len(rep.Findings), rep.Count(ingest.FindingDangling), rep.Count(ingest.FindingStale), rep.Count(ingest.FindingCull),
 		rep.Count(ingest.FindingMissingLink), rep.Count(ingest.FindingNeedsHuman), rep.Count(ingest.FindingPromotion), rep.Count(ingest.FindingPromptQuality), len(rep.Fileable))
-	if !iflags.apply {
-		if len(rep.Fileable) > 0 || len(rep.Promotions) > 0 {
-			fmt.Fprintln(cmd.ErrOrStderr(), "nothing changed; add --apply to file the confirmed candidates and root pointers through their contracts")
+	if iflags.apply {
+		applied, err := ingest.Apply(ctx, reg, store, rep)
+		if err != nil {
+			return err
+		}
+		for _, a := range applied {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %s  %s\n", a.Action, a.IntakeID, a.Detail)
+		}
+	} else if len(rep.Fileable) > 0 || len(rep.Promotions) > 0 {
+		fmt.Fprintln(cmd.ErrOrStderr(), "nothing filed; add --apply to file the confirmed candidates and root pointers through their contracts")
+	}
+	if len(rep.PromptQuality) == 0 {
+		return nil
+	}
+	if !iflags.execute {
+		fmt.Fprintf(cmd.ErrOrStderr(), "%d prompt-quality findings; add --execute (with --workdir-kb) to run the rewrites through the executor\n", len(rep.PromptQuality))
+		return nil
+	}
+	return runRewrites(cmd, ctx, rep)
+}
+
+// runRewrites executes the report's prompt-quality rewrites in the
+// content working copy: one executor task per page and field, checked
+// against a pre-run snapshot, plus a tool-description proposal file.
+func runRewrites(cmd *cobra.Command, ctx context.Context, rep *ingest.Report) error {
+	workdir := iflags.workdirKB
+	branch := iflags.branch
+	if workdir == "" {
+		wc, err := contentsource.ResolveWorkingCopy(".", cmd.ErrOrStderr())
+		if err != nil {
+			return fmt.Errorf("resolve content working copy (or pass --workdir-kb): %w", err)
+		}
+		workdir = wc.Path
+	}
+	if branch == "" {
+		branch = ingest.DefaultRewriteBranch
+	}
+	abs, _ := filepath.Abs(workdir)
+	cfg, _ := contentsource.Load(".")
+	now := time.Now()
+	if rel, err := ingest.WriteToolProposal(rep, abs, now); err != nil {
+		return err
+	} else if rel != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %s  tool-description proposal for a merge request on meerkat\n", "proposal", rel)
+	}
+	tasks, skips, err := ingest.PlanRewrites(rep, ingest.RewritePlanOpts{
+		Workdir: abs, WikiDir: cfg.Content.Layout.Wiki, Model: iflags.model, SubagentType: iflags.subagent, WallClockCap: iflags.wallClockCap, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		return fmt.Errorf("plan rewrites: %w", err)
+	}
+	for _, s := range skips {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  skip  %s  — %s\n", s.IntakeID, s.Reason)
+	}
+	if len(tasks) == 0 {
+		fmt.Fprintln(cmd.ErrOrStderr(), "no rewrite targets in this working copy — nothing to execute")
+		return nil
+	}
+	if iflags.dryRun {
+		for _, t := range tasks {
+			fmt.Fprintf(cmd.OutOrStdout(), "would execute: rewrite %s in %s (%s)  model=%s\n", t.Field, t.PagePath, t.TargetKB, t.Model)
 		}
 		return nil
 	}
-	applied, err := ingest.Apply(ctx, reg, store, rep)
+	before, err := ingest.Snapshot(abs, tasks)
 	if err != nil {
 		return err
 	}
-	for _, a := range applied {
-		fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %s  %s\n", a.Action, a.IntakeID, a.Detail)
+	fmt.Fprintf(cmd.ErrOrStderr(), "executing %d rewrites  workdir=%s  branch=%s  parallel=%d\n", len(tasks), abs, branch, iflags.maxParallel)
+	results, err := ingest.Run(ctx, tasks, ingest.ExecOpts{
+		WorkdirKB: abs, Branch: branch, ExecutorName: iflags.executorName, MaxParallel: iflags.maxParallel,
+		Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(), MaxConsecutiveFailures: iflags.maxConsecFail, TrustSources: iflags.trustSources,
+	})
+	if err != nil {
+		return err
+	}
+	done, err := ingest.FinalizeRewrites(ctx, abs, results, before)
+	if err != nil {
+		return fmt.Errorf("finalize rewrites: %w", err)
+	}
+	var bad int
+	for _, d := range done {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %s  %s\n", d.Action, d.Page, d.Detail)
+		if d.Action == "failed" || d.Action == "rejected" {
+			bad++
+		}
+	}
+	if bad > 0 {
+		return fmt.Errorf("%d of %d rewrites failed or were rejected", bad, len(done))
 	}
 	return nil
 }
