@@ -341,6 +341,22 @@ func (r *Registry) PointerOf(collection string, p kb.Page) (ResolvedLink, bool) 
 	return res, ok
 }
 
+// PointersTo lists the qualified IDs (`<collection>:<id>`) of every
+// valid pointer page whose target is the named collection, sorted. It
+// answers "is this collection reachable by a pointer, and from where?"
+// — what the librarian's promotion pass needs to know before proposing
+// another one (meerkat-mob issue #20).
+func (r *Registry) PointersTo(collection string) []string {
+	var out []string
+	for from, res := range r.graph().pointers {
+		if res.Kind == kb.LinkCollection && res.Collection == collection {
+			out = append(out, from)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // LinkReport returns the registry-wide link health. It is what
 // Registry.Check folds into each collection's Health and what
 // `mk lint` prints.

@@ -80,14 +80,28 @@ reports:
   log's key; the initial queries in the log say what they asked,
 - **needs-human** parked items,
 - **fileable** staged candidates with the required confirmations, by
-  collection and contract method.
+  collection and contract method,
+- **promotion** proposals (meerkat-mob #20): collections at depth 2 or
+  deeper whose flushed temperature (issue E's records in the traversal
+  log) puts them in the top 5 for the window, and that no pointer in
+  the root already reaches. Each proposal names the root, the pointer
+  page it would add (`pointers/<collection>`), the hint it would carry
+  (the collection's description, else its tree path), any pointer that
+  reaches the collection today from a lower hub, and the pages sessions
+  confirmed most inside it (matched by hashing the registry's own
+  qualified IDs), so a human can judge whether those pages belong
+  higher up. Page moves are never automated.
 
 Without `--apply` it changes nothing. With it, `direct` contracts get
 the page written into the collection's memory store at
 `global/intake/<id>.md` and the item marked filed; `merge-request`
 contracts get the instructions printed (the candidate is already
 committed on the working copy's branch); `none` names the page for a
-human to place.
+human to place. A promotion is filed the same way into the root: a
+`direct` root gets `global/pointers/<collection>.md` written and
+published into its overlay at once, so the next run's link graph sees
+the pointer and proposes nothing; a `merge-request` root gets the
+pointer spelled out in the instructions.
 
 ## Metrics
 
@@ -97,10 +111,10 @@ listing), `meerkat_librarian_findings_total{kind}`.
 
 ## Not in this slice
 
-- Promotion of hot deep pages toward tier 0 and prompt-quality
-  rewrites: the librarian has the inputs (temperatures from issue E,
-  initial queries from issue G) but proposes nothing yet.
-- Forge issues for parked items.
+- Prompt-quality rewrites from initial queries (meerkat-mob #21): the
+  librarian has the queries (issue G) but proposes nothing yet.
+- Forge issues for parked items (meerkat-mob #19).
+- Automated page moves for a promotion; only the root pointer is filed.
 - Attachments under `raw/<…>/<id>/attachments/`; the layout leaves
   room for them.
 - A mongoose executor; the executor seam is unchanged.

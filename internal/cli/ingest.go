@@ -365,12 +365,12 @@ func runLibrarian(cmd *cobra.Command, ctx context.Context, store *intake.Store) 
 		return err
 	}
 	rep.Write(cmd.OutOrStdout())
-	fmt.Fprintf(cmd.ErrOrStderr(), "\n%d findings: %d dangling, %d stale, %d cull, %d missing links, %d need a human; %d candidates fileable\n",
+	fmt.Fprintf(cmd.ErrOrStderr(), "\n%d findings: %d dangling, %d stale, %d cull, %d missing links, %d need a human, %d promotions; %d candidates fileable\n",
 		len(rep.Findings), rep.Count(ingest.FindingDangling), rep.Count(ingest.FindingStale), rep.Count(ingest.FindingCull),
-		rep.Count(ingest.FindingMissingLink), rep.Count(ingest.FindingNeedsHuman), len(rep.Fileable))
+		rep.Count(ingest.FindingMissingLink), rep.Count(ingest.FindingNeedsHuman), rep.Count(ingest.FindingPromotion), len(rep.Fileable))
 	if !iflags.apply {
-		if len(rep.Fileable) > 0 {
-			fmt.Fprintln(cmd.ErrOrStderr(), "nothing changed; add --apply to file the confirmed candidates through their contracts")
+		if len(rep.Fileable) > 0 || len(rep.Promotions) > 0 {
+			fmt.Fprintln(cmd.ErrOrStderr(), "nothing changed; add --apply to file the confirmed candidates and root pointers through their contracts")
 		}
 		return nil
 	}
