@@ -134,6 +134,14 @@ type Entry struct {
 	// TierReached is the deepest depth among Attempted, or -1.
 	TierReached int `json:"tier_reached"`
 	Hops        int `json:"hops"`
+	// WrongTurns is the retrieval session's count of collections hopped
+	// into and never shown from (issue F); 0 without a session.
+	WrongTurns int `json:"wrong_turns,omitempty"`
+	// Stages counts the session's searches by the planner stage that
+	// answered (exact | fuzzy | prefix) — a fuzzy or prefix answer means
+	// the agent's exact terms missed. Counts only; nil without a
+	// session.
+	Stages map[string]int `json:"stages,omitempty"`
 	// Quality is the consumer-reported quality, when given.
 	Quality *Quality `json:"quality,omitempty"`
 	// Fallback is what the agent did when meerkat did not have it.

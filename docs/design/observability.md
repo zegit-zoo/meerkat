@@ -568,7 +568,10 @@ and joins the log against the manifest; nobody else can.
 
 What the log keeps in plaintext, by decision (2026-09-17): the outcome,
 timings, path shape, quality scores, the fallback kind, summary and
-sources, and the **initial query**. The query is what a librarian reads
+sources, the retrieval session's wrong-turn count and its searches by
+planner stage (`wrong_turns`, `stages{exact,fuzzy,prefix}` — counts
+only, present when the report closed a tracked session), and the
+**initial query**. The query is what a librarian reads
 to judge how well the client asked and how well meerkat routed weak
 prompting; it is the primary input for improving tool descriptions and
 link wording. It is therefore data an operator must treat as

@@ -337,7 +337,7 @@ func reportOutcomeHandler(reg *collections.Registry, opts transportOptions) mcps
 		if args.quality != nil {
 			q = &retrieval.Quality{Accuracy: args.quality.Accuracy, Completeness: args.quality.Completeness, AnswerQuality: args.quality.AnswerQuality}
 		}
-		opts.Outcome.Sessions.End(ctx, key, args.outcome, q)
+		sum := opts.Outcome.Sessions.End(ctx, key, args.outcome, q)
 
 		// Path shape: the tree depth of each attempted collection this
 		// caller can see; -1 for anything else. Depths are numbers and
@@ -406,6 +406,10 @@ func reportOutcomeHandler(reg *collections.Registry, opts transportOptions) mcps
 				Hops:         len(args.attempted),
 				Quality:      args.quality,
 				IntakeID:     intakeID,
+			}
+			if sum != nil {
+				entry.WrongTurns = sum.WrongTurns
+				entry.Stages = sum.Stages
 			}
 			if args.fallback.Kind != FallbackNone {
 				fb := args.fallback

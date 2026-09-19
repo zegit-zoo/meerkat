@@ -117,6 +117,7 @@ type Session struct {
 	shown          map[string]bool
 	hot            bool
 	tierReached    int
+	stages         map[string]int
 	ended          bool
 }
 
@@ -162,9 +163,12 @@ func (s *Session) Step() error {
 
 // Search records a search scoped to collection ("" for an unscoped
 // one) that returned hits, at tier (-1 unknown), against a collection
-// that was resident before the call or not. It enforces the hop and
-// attempt limits.
-func (s *Session) Search(collection string, tier int, hits int, resident bool) error {
+// that was resident before the call or not, answered by the planner
+// stage named ("" when unknown). It enforces the hop and attempt
+// limits. Stages are counted so the session's summary can say how
+// often the exact terms missed and a fuzzy or prefix stage answered —
+// the librarian's prompt-quality signal (meerkat-mob issue #21).
+func (s *Session) Search(collection string, tier int, hits int, resident bool, stage string) error {
 	if s == nil {
 		return nil
 	}
@@ -172,6 +176,12 @@ func (s *Session) Search(collection string, tier int, hits int, resident bool) e
 	defer s.mu.Unlock()
 	now := s.tracker.now()
 	s.attempts++
+	if stage != "" {
+		if s.stages == nil {
+			s.stages = map[string]int{}
+		}
+		s.stages[stage]++
+	}
 	if s.lastCollection != "" && collection != "" && collection != s.lastCollection {
 		s.hops++
 	}
@@ -246,6 +256,9 @@ type Summary struct {
 	FirstContext  time.Duration // 0 if never
 	FirstRelevant time.Duration
 	Duration      time.Duration
+	// Stages counts the session's searches by the planner stage that
+	// answered (exact | fuzzy | prefix); nil when none was recorded.
+	Stages map[string]int
 }
 
 // End closes the session with an outcome (and the consumer's quality,
@@ -276,6 +289,12 @@ func (s *Session) end(ctx context.Context, outcome string, q *Quality) *Summary 
 	s.ended = true
 	now := s.tracker.now()
 	sum := &Summary{Outcome: outcome, Hops: s.hops, Steps: s.steps, Attempts: s.attempts, Hot: s.hot, TierReached: s.tierReached, Duration: now.Sub(s.started)}
+	if len(s.stages) > 0 {
+		sum.Stages = make(map[string]int, len(s.stages))
+		for k, v := range s.stages {
+			sum.Stages[k] = v
+		}
+	}
 	for _, c := range s.touched[min(1, len(s.touched)):] {
 		if !s.shown[c] {
 			sum.WrongTurns++

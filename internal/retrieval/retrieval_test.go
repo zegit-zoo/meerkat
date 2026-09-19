@@ -33,7 +33,7 @@ func TestSession_ThreeHopsThenFound(t *testing.T) {
 		if err := s.Step(); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.Search(st.coll, st.tier, st.hits, st.resident); err != nil {
+		if err := s.Search(st.coll, st.tier, st.hits, st.resident, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -64,10 +64,10 @@ func TestSession_WrongTurnsExcludeTheStart(t *testing.T) {
 	ctx := context.Background()
 	tr := New(0, Limits{})
 	_, s := tr.Begin(ctx, "k")
-	_ = s.Search("root", 0, 1, true)
-	_ = s.Search("platform", 1, 1, true)
-	_ = s.Search("vendors", 1, 0, true)
-	_ = s.Search("flux", 2, 1, true)
+	_ = s.Search("root", 0, 1, true, "exact")
+	_ = s.Search("platform", 1, 1, true, "fuzzy")
+	_ = s.Search("vendors", 1, 0, true, "exact")
+	_ = s.Search("flux", 2, 1, true, "")
 	s.Show("flux", 2, true)
 	sum := tr.End(ctx, "k", OutcomeFound, nil)
 	// Hops: root->platform, platform->vendors, vendors->flux = 3; wrong
@@ -75,6 +75,9 @@ func TestSession_WrongTurnsExcludeTheStart(t *testing.T) {
 	// collection is not a turn.
 	if sum.Hops != 3 || sum.WrongTurns != 2 || !sum.Hot {
 		t.Errorf("summary = %+v", sum)
+	}
+	if sum.Stages["exact"] != 2 || sum.Stages["fuzzy"] != 1 || len(sum.Stages) != 2 {
+		t.Errorf("stages = %v", sum.Stages)
 	}
 }
 
@@ -84,9 +87,9 @@ func TestSession_GaveUpAndProxies(t *testing.T) {
 	clock, now := newClock(time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC))
 	tr.now = now
 	_, s := tr.Begin(ctx, "g")
-	_ = s.Search("root", 0, 0, true)
+	_ = s.Search("root", 0, 0, true, "")
 	*clock = clock.Add(3 * time.Second)
-	_ = s.Search("platform", 1, 0, true)
+	_ = s.Search("platform", 1, 0, true, "")
 	sum := tr.End(ctx, "g", OutcomeGaveUp, nil)
 	if sum.FirstContext != 0 || sum.FirstRelevant != 0 || sum.Outcome != OutcomeGaveUp || sum.Duration != 3*time.Second {
 		t.Errorf("gave up with no hits: %+v", sum)
@@ -95,21 +98,21 @@ func TestSession_GaveUpAndProxies(t *testing.T) {
 	// A show followed by another search is not the relevant context
 	// unless the report says found.
 	_, s = tr.Begin(ctx, "p")
-	_ = s.Search("root", 0, 1, true)
+	_ = s.Search("root", 0, 1, true, "")
 	*clock = clock.Add(time.Second)
 	s.Show("root", 0, true)
 	*clock = clock.Add(time.Second)
-	_ = s.Search("platform", 1, 1, true)
+	_ = s.Search("platform", 1, 1, true, "")
 	sum = tr.End(ctx, "p", OutcomeNotFound, nil)
 	if sum.FirstRelevant != 0 {
 		t.Errorf("a show followed by a search is not relevant on not_found: %+v", sum)
 	}
 	_, s = tr.Begin(ctx, "q")
-	_ = s.Search("root", 0, 1, true)
+	_ = s.Search("root", 0, 1, true, "")
 	*clock = clock.Add(time.Second)
 	s.Show("root", 0, true)
 	*clock = clock.Add(time.Second)
-	_ = s.Search("platform", 1, 1, true)
+	_ = s.Search("platform", 1, 1, true, "")
 	sum = tr.End(ctx, "q", OutcomeFound, nil)
 	if sum.FirstRelevant != time.Second {
 		t.Errorf("a found report confirms the last show: %+v", sum)
@@ -122,7 +125,7 @@ func TestSession_Limits(t *testing.T) {
 	_, s := tr.Begin(ctx, "l")
 	for _, c := range []string{"a", "b", "c"} {
 		_ = s.Step()
-		if err := s.Search(c, 1, 1, true); err != nil {
+		if err := s.Search(c, 1, 1, true, ""); err != nil {
 			if lim, ok := IsLimit(err); !ok || lim.Limit != "hops" || lim.Max != 2 || c != "c" {
 				t.Fatalf("hop limit: %v at %s", err, c)
 			}
@@ -131,13 +134,13 @@ func TestSession_Limits(t *testing.T) {
 	_, s2 := tr.Begin(ctx, "a")
 	var err error
 	for i := 0; i < 4; i++ {
-		err = s2.Search("x", 0, 0, true)
+		err = s2.Search("x", 0, 0, true, "")
 	}
 	if lim, ok := IsLimit(err); !ok || lim.Limit != "attempts" {
 		t.Errorf("attempt limit: %v", err)
 	}
 	s2.Show("x", 0, true) // a show resets attempts
-	if err := s2.Search("x", 0, 0, true); err != nil {
+	if err := s2.Search("x", 0, 0, true, ""); err != nil {
 		t.Errorf("attempts must reset after a show: %v", err)
 	}
 	_, s3 := tr.Begin(ctx, "s")
@@ -160,7 +163,7 @@ func TestTracker_SweepAndNilSafety(t *testing.T) {
 	clock, now := newClock(time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC))
 	tr.now = now
 	_, quiet := tr.Begin(ctx, "quiet")
-	_ = quiet.Search("root", 0, 1, true)
+	_ = quiet.Search("root", 0, 1, true, "")
 	_, shown := tr.Begin(ctx, "shown")
 	shown.Show("root", 0, true)
 	_, fresh := tr.Begin(ctx, "fresh")
@@ -181,7 +184,7 @@ func TestTracker_SweepAndNilSafety(t *testing.T) {
 	if err := ns.Step(); err != nil {
 		t.Error("nil session step")
 	}
-	if err := ns.Search("a", 0, 1, true); err != nil {
+	if err := ns.Search("a", 0, 1, true, ""); err != nil {
 		t.Error("nil session search")
 	}
 	ns.Show("a", 0, true)

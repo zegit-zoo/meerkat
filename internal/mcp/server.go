@@ -477,7 +477,7 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 			}
 		}
 		stage := string(collections.StageOf(results))
-		sessErr := sess.Search(targetName, tier, len(results), resident)
+		sessErr := sess.Search(targetName, tier, len(results), resident, stage)
 		telemetry.Record(ctx).Searched(telemetry.OutcomeOK, time.Since(started).Seconds(), len(results), stage)
 		span.SetAttributes(
 			telemetry.KeySearchResults.Int(len(results)),

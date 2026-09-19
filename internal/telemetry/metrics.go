@@ -488,7 +488,7 @@ func (m *Metrics) LibrarianFinding(kind string) {
 		return
 	}
 	switch kind {
-	case "dangling", "stale", "cull", "missing_link", "needs_human", "promotion":
+	case "dangling", "stale", "cull", "missing_link", "needs_human", "promotion", "prompt_quality":
 	default:
 		kind = "other"
 	}
