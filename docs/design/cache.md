@@ -115,7 +115,10 @@ with the most travelled paths already resident.
 Promotion of a very hot deep path toward tier 0 is proposed by the
 librarian from the temperature data and lands through the update
 contract; the cache never rewrites content. The temperature records are
-the input; nothing here moves a page.
+the input; nothing here moves a page. The pass itself — top-N hot
+collections at depth ≥ 2 without a root pointer, filed as a pointer
+page through the root's contract — is described in
+[intake.md](intake.md#the-librarian).
 
 ## Seams
 

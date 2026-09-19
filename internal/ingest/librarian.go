@@ -30,7 +30,9 @@ import (
 //   - missing links: collections agents keep trying and giving up in,
 //     read from the traversal log (issue G) and matched by hashed name,
 //   - parked intake items that need a human,
-//   - staged candidates with enough confirmations to file.
+//   - staged candidates with enough confirmations to file,
+//   - promotions: hot deep collections that deserve a pointer from the
+//     root (promotion.go).
 //
 // Nothing is modified unless Apply is called, and Apply files only what
 // the collection's update contract allows: `direct` writes the page
@@ -67,6 +69,9 @@ type Report struct {
 	// Fileable lists staged candidates with the required confirmations,
 	// by target collection and contract method.
 	Fileable []Fileable `json:"fileable,omitempty"`
+	// Promotions lists hot deep collections proposed for a root pointer,
+	// hottest first. Each also appears in Findings as a promotion.
+	Promotions []Promotion `json:"promotions,omitempty"`
 }
 
 // Fileable is a confirmed candidate and how its collection takes it.
@@ -98,7 +103,12 @@ type LibrarianOpts struct {
 	// MinGiveUps is how many gave_up/not_found sessions that tried a
 	// collection make a missing-link finding; default 3.
 	MinGiveUps int
-	Now        func() time.Time
+	// PromotionTopN caps promotion proposals per run; default 5.
+	// PromotionMinDepth is the shallowest tree depth that counts as
+	// deep; default 2.
+	PromotionTopN     int
+	PromotionMinDepth int
+	Now               func() time.Time
 }
 
 // Librarian inspects the registry and the intake store and reports.
@@ -109,6 +119,12 @@ func Librarian(ctx context.Context, reg *collections.Registry, store *intake.Sto
 	}
 	if opts.MinGiveUps <= 0 {
 		opts.MinGiveUps = 3
+	}
+	if opts.PromotionTopN <= 0 {
+		opts.PromotionTopN = DefaultPromotionTopN
+	}
+	if opts.PromotionMinDepth <= 0 {
+		opts.PromotionMinDepth = DefaultPromotionMinDepth
 	}
 	now := opts.Now()
 	rep := &Report{At: now}
@@ -162,6 +178,16 @@ func Librarian(ctx context.Context, reg *collections.Registry, store *intake.Sto
 					Detail: fmt.Sprintf("%d sessions searched here and gave up in the last %d days; propose a pointer or related: entry for what they asked (initial queries are in the traversal log)", counts[n], opts.Days)})
 				m.LibrarianFinding(FindingMissingLink)
 			}
+		}
+		// Promotions: hot deep collections without a root pointer.
+		proms, err := promotions(ctx, reg, opts.Log, opts)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range proms {
+			rep.Promotions = append(rep.Promotions, p)
+			rep.Findings = append(rep.Findings, Finding{Kind: FindingPromotion, Collection: p.Hub, Page: p.PageID(), Count: int(min(p.Temperature, 1<<30)), Detail: p.detail()})
+			m.LibrarianFinding(FindingPromotion)
 		}
 	}
 
@@ -278,8 +304,13 @@ type Applied struct {
 // collection's contract: `direct` writes the page into the collection's
 // memory store (global scope) and marks the intake item filed;
 // `merge-request` and `none` produce instructions and change nothing.
+// Promotion proposals are filed the same way into the root hub (see
+// applyPromotions); their Applied.IntakeID is "promote:<collection>".
 func Apply(ctx context.Context, reg *collections.Registry, store *intake.Store, rep *Report) ([]Applied, error) {
-	var out []Applied
+	out, err := applyPromotions(ctx, reg, rep)
+	if err != nil {
+		return out, err
+	}
 	for _, f := range rep.Fileable {
 		a := Applied{IntakeID: f.IntakeID}
 		c, err := reg.Get(f.Collection)
