@@ -306,6 +306,17 @@ func roleFailure(t Task, pagePath, executor string) string {
 			return executor + " neither verified nor failed the candidate"
 		}
 		return ""
+	case RoleLibrarian:
+		// The field-only check needs the pre-run snapshot and lives in
+		// FinalizeRewrites; here only "still a page" is checked.
+		b, err := os.ReadFile(pagePath) //nolint:gosec // G304: inside the working copy.
+		if err != nil {
+			return "page missing after " + executor + " run"
+		}
+		if _, err := kb.ParsePage(t.PageID, t.PagePath, b); err != nil {
+			return "page does not parse after " + executor + " run: " + err.Error()
+		}
+		return ""
 	}
 	if status, _ := readStatus(pagePath); status == "placeholder" {
 		return "still placeholder after " + executor + " run"
@@ -318,6 +329,8 @@ func buildInstruction(t Task, workdir, branch string) string {
 	switch t.Role {
 	case RoleResearcher, RoleValidator:
 		return buildRoleInstruction(t, workdir, branch)
+	case RoleLibrarian:
+		return buildRewriteInstruction(t, workdir, branch)
 	}
 	return buildPerPageInstruction(t, workdir, branch)
 }

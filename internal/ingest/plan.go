@@ -42,6 +42,11 @@ type Task struct {
 	IntakeID string `json:"intake_id,omitempty"`
 	RawPath  string `json:"raw_path,omitempty"`
 	TargetKB string `json:"target_kb,omitempty"`
+
+	// Librarian rewrites (rewrite.go): the one frontmatter field the
+	// task may change and the queries that motivated it.
+	Field   string   `json:"field,omitempty"`
+	Queries []string `json:"queries,omitempty"`
 }
 
 // PlanOpts narrows what the planner emits.

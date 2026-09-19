@@ -120,6 +120,7 @@ func promptQuality(ctx context.Context, reg *collections.Registry, log *traversa
 		}
 	}
 	hints := pointerHints(reg)
+	pageHashes := map[string]string{} // hashed qualified page ID -> qualified, filled lazily
 
 	type bucket struct {
 		f       PromptFinding
@@ -131,9 +132,15 @@ func promptQuality(ctx context.Context, reg *collections.Registry, log *traversa
 		k := target + "\x00" + collection
 		b, ok := buckets[k]
 		if !ok {
-			b = &bucket{f: PromptFinding{Target: target, Collection: collection, Pages: pages}, queries: map[string]int{}, terms: map[string]bool{}}
+			b = &bucket{f: PromptFinding{Target: target, Collection: collection}, queries: map[string]int{}, terms: map[string]bool{}}
 			buckets[k] = b
 		}
+		for _, p := range pages {
+			if !contains(b.f.Pages, p) {
+				b.f.Pages = append(b.f.Pages, p)
+			}
+		}
+		sort.Strings(b.f.Pages)
 		b.f.Sessions++
 		b.queries[query]++
 		for _, t := range terms {
@@ -179,7 +186,7 @@ func promptQuality(ctx context.Context, reg *collections.Registry, log *traversa
 			if len(attempted) > 0 {
 				where = attempted[len(attempted)-1]
 			}
-			add(TargetDescription, where, nil, query, nil)
+			add(TargetDescription, where, pagesOf(reg, log, e.Pages, pageHashes), query, nil)
 		}
 		if e.WrongTurns > 0 && len(attempted) >= 2 {
 			start := attempted[0]
@@ -229,7 +236,7 @@ func promptQuality(ctx context.Context, reg *collections.Registry, log *traversa
 	return out, nil
 }
 
-// pointerHint is one pointer page's text, for term matching.
+// pointerText is one pointer page's text, for term matching.
 type pointerText struct {
 	id   string // qualified
 	text string // lower-cased title + hint + description
@@ -326,4 +333,42 @@ var stopword = map[string]bool{
 	"the": true, "and": true, "for": true, "how": true, "what": true, "where": true, "when": true, "why": true,
 	"with": true, "from": true, "that": true, "this": true, "are": true, "does": true, "can": true, "not": true,
 	"about": true, "into": true, "our": true, "you": true, "your": true, "which": true, "who": true,
+}
+
+// pagesOf resolves hashed qualified page IDs to the registry's own,
+// hashing every collection's pages on first need (cache is filled
+// once per run).
+func pagesOf(reg *collections.Registry, log *traversal.Log, hashed []string, cache map[string]string) []string {
+	if len(hashed) == 0 {
+		return nil
+	}
+	if len(cache) == 0 {
+		cache["\x00"] = "" // filled marker; a registry without pages stays filled
+		for _, c := range reg.All() {
+			refs, err := reg.Pages(c.Name)
+			if err != nil {
+				continue
+			}
+			for _, ref := range refs {
+				q := c.Name + ":" + ref.Page.ID
+				cache[log.Hash(q)] = q
+			}
+		}
+	}
+	var out []string
+	for _, h := range hashed {
+		if q, ok := cache[h]; ok && q != "" {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

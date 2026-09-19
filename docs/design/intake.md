@@ -41,7 +41,8 @@ success check. Prompts come from the content repo's
 |---|---|---|---|---|
 | researcher | raw items not yet done | `wiki/intake/<id>.md`, from the raw item materialised at `ingestion/intake/<id>.md` | the candidate exists and is not a placeholder | provenance stamped (`generated`, `last_ingested`, `intake_id`, `researcher_model`, `target_kb`), copied to `staged/<kb>/<id>.md`, raw item marked done |
 | validator | staged candidates without enough confirmations | the candidate's frontmatter only: a `verified:` entry `agent:validator:<model>` or a `failure_reason` | one or the other is present | two independent agent confirmations mark it validated; a `needs-human:` reason parks it; two failures park it |
-| librarian | the whole registry, the intake store, the traversal log | nothing without `--apply` | — | report; `--apply` files confirmed candidates through each collection's contract |
+| librarian | the whole registry, the intake store, the traversal log | nothing without `--apply` or `--execute` | — | report; `--apply` files confirmed candidates and root pointers through each collection's contract; `--execute` runs the prompt-quality rewrites (below) |
+| librarian (rewrite) | the report's hint, description and route findings | ONE frontmatter field (`hint:` or `description:`) on ONE page per task, in the content working copy | the page still parses | `FinalizeRewrites` compares with a pre-run snapshot: body and every other field byte-identical, the field changed, one line under 300 chars — else the snapshot is restored and the task reported `rejected` |
 
 Independence (Q7): a validator run whose `--model` equals the
 candidate's `researcher_model` is skipped with the reason; the two
@@ -105,8 +106,33 @@ reports:
   - *route*: sessions starting in a hub took a wrong turn first
     (`wrong_turns` > 0) → the hub's pointer hints do not separate its
     children.
-  Each finding quotes the queries (most frequent first). Report-only:
-  the rewrite stage that edits hints and descriptions is a later slice.
+  Each finding quotes the queries (most frequent first). Description
+  findings also list the pages sessions confirmed (matched by hash).
+
+### The rewrite stage
+
+`mk ingest --role librarian --execute --workdir-kb <copy> [--branch b]`
+runs the analysis and then, for every hint, route and description
+finding whose page is in that working copy, one executor task with the
+`librarian-rewrite` brief (`internal/ingest/prompts/librarian-rewrite.md`,
+overridable as `ingestion/prompts/librarian-rewrite.md`): the file, the
+one field it may change, the queries and the words no text mentions.
+Pages served from another repo or from a memory overlay are skipped
+with the reason. The commit message cites the queries. Rewrites go to
+`--branch`, default `librarian/rewrites`, never the content branch: a
+rewrite is confirmed by review of that branch before it serves.
+
+After the run each page is checked against its pre-run snapshot; any
+change beyond the one field restores the snapshot and reports the task
+as rejected (the agent's commit on the review branch is the operator's
+to discard). `meerkat_librarian_rewrites_total{action}` counts
+rewritten, unchanged, rejected and failed.
+
+Tool findings are not executed: the `mk_search` description lives in
+meerkat, not in a content repo. They are written to
+`ingestion/proposals/tool-description-<date>.md` in the working copy,
+with the queries, for a human to turn into a merge request on meerkat.
+Nothing is ever applied to a running server.
 
 Without `--apply` it changes nothing. With it, `direct` contracts get
 the page written into the collection's memory store at
@@ -123,14 +149,13 @@ pointer spelled out in the instructions.
 
 `meerkat_intake_items_total{stage,outcome}`,
 `meerkat_intake_age_seconds` (oldest unprocessed raw item at the last
-listing), `meerkat_librarian_findings_total{kind}`.
+listing), `meerkat_librarian_findings_total{kind}`,
+`meerkat_librarian_rewrites_total{action}`.
 
 ## Not in this slice
 
-- The prompt-quality *rewrite* stage (meerkat-mob #21, second half):
-  an agent role that edits pointer hints and page descriptions from the
-  analysis findings and proposes tool-description changes as a merge
-  request. The analysis stage above is in.
+- A rewrite that edits more than one field or page, or that touches
+  the tool text itself; both stay human work.
 - Forge issues for parked items (meerkat-mob #19).
 - Automated page moves for a promotion; only the root pointer is filed.
 - Attachments under `raw/<…>/<id>/attachments/`; the layout leaves
