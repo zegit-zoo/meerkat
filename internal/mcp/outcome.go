@@ -17,6 +17,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
+	"github.com/zegit-zoo/meerkat/internal/intake"
 	"github.com/zegit-zoo/meerkat/internal/memory"
 	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
@@ -451,7 +452,7 @@ func newID() string {
 // a unique key, so it is single-writer on every provider.
 func writeIntake(ctx context.Context, store memory.Store, g *authz.Grants, a outcomeArgs, now time.Time) (string, error) {
 	id := newID()
-	key := "raw/" + now.UTC().Format("2006-01-02") + "/" + id + ".md"
+	key := intake.RawKey(memory.Namespace(g.Identity()), now, id)
 	front := map[string]any{
 		"id":               id,
 		"type":             "research-raw",
@@ -483,7 +484,7 @@ func writeIntake(ctx context.Context, store memory.Store, g *authz.Grants, a out
 			body += "- " + s + "\n"
 		}
 	}
-	if _, err := store.Put(ctx, key, []byte(body), memory.CreateOnly()); err != nil {
+	if _, err := intake.New(store).PutRaw(ctx, memory.Namespace(g.Identity()), now, id, []byte(body)); err != nil {
 		return "", err
 	}
 	return key, nil

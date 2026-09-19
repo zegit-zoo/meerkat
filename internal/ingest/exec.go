@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/zegit-zoo/meerkat/internal/kb"
 )
 
 // ExecOpts configures a Run.
@@ -238,7 +240,7 @@ func (e agentCLIExecutor) Exec(ctx context.Context, t Task, env ExecEnv) Result 
 		r.FailReason = "task page_path escapes workdir"
 		return r
 	}
-	if status, _ := readStatus(pagePath); status == "reviewed" {
+	if status, _ := readStatus(pagePath); t.Role == "" && status == "reviewed" {
 		r.FinishedAt = time.Now()
 		r.ExitStatus = "ok"
 		r.FailReason = "skipped (already reviewed)"
@@ -252,7 +254,7 @@ func (e agentCLIExecutor) Exec(ctx context.Context, t Task, env ExecEnv) Result 
 	subCtx, cancel := context.WithTimeout(ctx, wallClock)
 	defer cancel()
 
-	instruction := buildPerPageInstruction(t, env.WorkdirKB, env.Branch)
+	instruction := buildInstruction(t, env.WorkdirKB, env.Branch)
 	cmd := e.cli.buildCmd(subCtx, t, env, instruction)
 
 	var combined strings.Builder
@@ -269,15 +271,73 @@ func (e agentCLIExecutor) Exec(ctx context.Context, t Task, env ExecEnv) Result 
 		r.ExitStatus = "failed"
 		r.FailReason = trimErr(err.Error(), combined.String())
 	default:
-		// Verify status moved off placeholder.
-		if status, _ := readStatus(pagePath); status == "placeholder" {
+		// Verify the run did what the role requires.
+		if reason := roleFailure(t, pagePath, e.cli.name); reason != "" {
 			r.ExitStatus = "failed"
-			r.FailReason = "still placeholder after " + e.cli.name + " run"
+			r.FailReason = reason
 		} else {
 			r.ExitStatus = "ok"
 		}
 	}
 	return r
+}
+
+// roleFailure is the post-run success check per role: "" means ok.
+func roleFailure(t Task, pagePath, executor string) string {
+	switch t.Role {
+	case RoleResearcher:
+		if _, err := os.Stat(pagePath); err != nil {
+			return "no candidate page written by " + executor
+		}
+		if status, _ := readStatus(pagePath); status == "placeholder" || status == "ingest-failed" {
+			return "candidate is " + status + " after " + executor + " run"
+		}
+		return ""
+	case RoleValidator:
+		b, err := os.ReadFile(pagePath) //nolint:gosec // G304: inside the working copy.
+		if err != nil {
+			return "candidate page missing after " + executor + " run"
+		}
+		p, err := kb.ParsePage(t.PageID, t.PagePath, b)
+		if err != nil {
+			return "candidate does not parse after " + executor + " run: " + err.Error()
+		}
+		if len(p.Front.Verified) == 0 && p.Front.FailureReason == "" {
+			return executor + " neither verified nor failed the candidate"
+		}
+		return ""
+	}
+	if status, _ := readStatus(pagePath); status == "placeholder" {
+		return "still placeholder after " + executor + " run"
+	}
+	return ""
+}
+
+// buildInstruction dispatches on the task's role.
+func buildInstruction(t Task, workdir, branch string) string {
+	switch t.Role {
+	case RoleResearcher, RoleValidator:
+		return buildRoleInstruction(t, workdir, branch)
+	}
+	return buildPerPageInstruction(t, workdir, branch)
+}
+
+func buildRoleInstruction(t Task, workdir, branch string) string {
+	commitMsg := fmt.Sprintf("intake(%s): %s %s", t.Role, t.IntakeID, idBasename(t.PageID))
+	return fmt.Sprintf(`You are the Meerkat %s agent for **one intake item**.
+Working directory: %s
+Candidate page: `+"`%s`"+` (id: `+"`%s`"+`, intake id `+"`%s`"+`)
+The role prompt follows. Do exactly this one item, commit + push, then stop.
+**IMPORTANT: Do this work yourself. DO NOT use the Task tool to delegate.**
+After writing, run (in this order, with retry-on-conflict up to 3 times):
+    git pull --rebase --quiet || true
+    git add %s
+    git commit -m "%s"
+    git push origin %s
+When done, print exactly: ITEM_DONE: %s
+Then stop. No further items.
+---
+%s`, t.Role, workdir, t.PagePath, t.PageID, t.IntakeID, t.PagePath, commitMsg, branch, t.IntakeID, t.Prompt)
 }
 
 func isPathWithinBase(base, path string) bool {

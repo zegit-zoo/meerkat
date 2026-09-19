@@ -210,6 +210,37 @@ func (l *Log) RecordTemperatures(ctx context.Context, byName map[string]Temperat
 	return l.sink.Put(ctx, key, body)
 }
 
+// ReadSessions returns the session entries of the last days (temperature
+// records are skipped). Identifiers come back hashed, as stored; the
+// caller matches them by hashing what it knows with Hash.
+func (l *Log) ReadSessions(ctx context.Context, days int) ([]Entry, error) {
+	if l == nil || days <= 0 {
+		return nil, nil
+	}
+	var out []Entry
+	now := l.now().UTC()
+	for i := 0; i < days; i++ {
+		objs, err := l.sink.ReadDay(ctx, now.AddDate(0, 0, -i).Format("2006-01-02"))
+		if err != nil {
+			return nil, err
+		}
+		for _, body := range objs {
+			var probe struct {
+				Kind string `json:"kind"`
+			}
+			if json.Unmarshal(body, &probe) == nil && probe.Kind == KindTemperature {
+				continue
+			}
+			var e Entry
+			if err := json.Unmarshal(body, &e); err != nil || e.Version == 0 {
+				continue
+			}
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
 // ReadTemperatures folds the temperature records of the last days into
 // one map keyed by hashed name: the latest record per hash wins, so a
 // restart sees the counters as they were last flushed.

@@ -174,3 +174,9 @@ type ExecEnv struct {
   MCP tools); meerkat only conveys `host` in the prompt.
 - **`mk ingest sources` / planner enrichment** generalization beyond category
   routing (e.g. service-catalog enrichment) stays deployment-specific.
+
+## Intake roles
+
+The raw intake pipeline — researcher, validator and librarian roles over the
+`intake:` store, run through `mk ingest --role` on the same executor seam —
+is described in [intake.md](intake.md) (meerkat-mob issue H).

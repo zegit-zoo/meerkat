@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -14,7 +15,9 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/ingest"
+	"github.com/zegit-zoo/meerkat/internal/intake"
 	"github.com/zegit-zoo/meerkat/internal/sources"
+	"github.com/zegit-zoo/meerkat/internal/traversal"
 )
 
 func newIngestCmd() *cobra.Command {
@@ -102,6 +105,12 @@ type ingestFlags struct {
 	maxConsecFail int
 	reverse       bool
 	trustSources  bool
+	role          string
+	from          string
+	namespace     string
+	only          string
+	apply         bool
+	days          int
 }
 
 var iflags ingestFlags
@@ -113,6 +122,9 @@ func ingestFlagSet() *flagSet {
 }
 
 func runIngest(cmd *cobra.Command, args []string) error {
+	if iflags.role != "" {
+		return runIngestRole(cmd)
+	}
 	// The wiki dir comes from content-source.yaml (layout.wiki) so Task
 	// page paths match the content repo's layout. Absent/none config falls
 	// back to the default "wiki".
@@ -234,6 +246,140 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		ok, failed, timeout, totalDur.Round(time.Second))
 	if failed+timeout > 0 {
 		os.Exit(1)
+	}
+	return nil
+}
+
+// runIngestRole is `mk ingest --role ...`: the intake pipeline's
+// researcher, validator and librarian (meerkat-mob issue H).
+func runIngestRole(cmd *cobra.Command) error {
+	role, err := ingest.ParseRole(iflags.role)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	var store *intake.Store
+	if activeIntake != nil {
+		ms, err := activeIntake.Open(ctx, "")
+		if err != nil {
+			return fmt.Errorf("intake: %w", err)
+		}
+		store = intake.New(ms)
+	}
+
+	if role == ingest.RoleLibrarian {
+		return runLibrarian(cmd, ctx, store)
+	}
+	if store == nil {
+		return errors.New("--role " + string(role) + " needs an intake: store in content-source.yaml")
+	}
+	if iflags.from != "intake" {
+		return fmt.Errorf("--from %q is not supported; only intake", iflags.from)
+	}
+	workdir := iflags.workdirKB
+	branch := iflags.branch
+	if workdir == "" {
+		wc, err := contentsource.ResolveWorkingCopy(".", cmd.ErrOrStderr())
+		if err != nil {
+			return fmt.Errorf("resolve content working copy (or pass --workdir-kb): %w", err)
+		}
+		workdir = wc.Path
+		if branch == "" {
+			branch = wc.Branch
+		}
+	}
+	if branch == "" {
+		branch = "main"
+	}
+	abs, _ := filepath.Abs(workdir)
+	cfg, _ := contentsource.Load(".")
+	tasks, skips, err := ingest.PlanIntake(ctx, store, ingest.IntakePlanOpts{
+		Role: role, Namespace: iflags.namespace, Only: iflags.only, Workdir: abs,
+		WikiDir: cfg.Content.Layout.Wiki, Model: iflags.model, SubagentType: iflags.subagent, WallClockCap: iflags.wallClockCap,
+	})
+	if err != nil {
+		return fmt.Errorf("plan %s: %w", role, err)
+	}
+	for _, s := range skips {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  skip  %s  — %s\n", s.IntakeID, s.Reason)
+	}
+	if len(tasks) == 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "no %s work in %s — nothing to do\n", role, store.Describe())
+		return nil
+	}
+	if !iflags.execute {
+		if err := ingest.WriteJSONL(cmd.OutOrStdout(), tasks); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "\nplanned %d %s tasks (add --execute to run)\n", len(tasks), role)
+		return nil
+	}
+	if iflags.dryRun {
+		for _, t := range tasks {
+			fmt.Fprintf(cmd.OutOrStdout(), "would execute: %s %s -> %s  model=%s\n", t.Role, t.IntakeID, t.PagePath, t.Model)
+		}
+		return nil
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "executing %d %s tasks  workdir=%s  branch=%s  parallel=%d\n", len(tasks), role, abs, branch, iflags.maxParallel)
+	results, err := ingest.Run(ctx, tasks, ingest.ExecOpts{
+		WorkdirKB: abs, Branch: branch, ExecutorName: iflags.executorName, MaxParallel: iflags.maxParallel,
+		Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(), MaxConsecutiveFailures: iflags.maxConsecFail, TrustSources: iflags.trustSources,
+	})
+	if err != nil {
+		return err
+	}
+	fins, err := ingest.Finalize(ctx, store, abs, results, time.Now())
+	if err != nil {
+		return fmt.Errorf("finalize: %w", err)
+	}
+	var failed int
+	for _, f := range fins {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %-9s %s  %s\n", f.Action, f.IntakeID, f.Detail)
+		if f.Action == "failed" {
+			failed++
+		}
+		if f.Action == "parked" {
+			fmt.Fprintf(cmd.ErrOrStderr(), "needs-human: intake %s parked — %s\n", f.IntakeID, f.Detail)
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of %d %s tasks failed", failed, len(fins), role)
+	}
+	return nil
+}
+
+func runLibrarian(cmd *cobra.Command, ctx context.Context, store *intake.Store) error {
+	reg := registry()
+	var log *traversal.Log
+	if activeObservability != nil && activeObservability.TraversalLog != nil {
+		l, err := traversal.Open(ctx, activeObservability.TraversalLog, traversal.NewS3Sink)
+		if err != nil {
+			return fmt.Errorf("observability.traversal_log: %w", err)
+		}
+		log = l
+	}
+	rep, err := ingest.Librarian(ctx, reg, store, ingest.LibrarianOpts{Log: log, Days: iflags.days})
+	if err != nil {
+		return err
+	}
+	rep.Write(cmd.OutOrStdout())
+	fmt.Fprintf(cmd.ErrOrStderr(), "\n%d findings: %d dangling, %d stale, %d cull, %d missing links, %d need a human; %d candidates fileable\n",
+		len(rep.Findings), rep.Count(ingest.FindingDangling), rep.Count(ingest.FindingStale), rep.Count(ingest.FindingCull),
+		rep.Count(ingest.FindingMissingLink), rep.Count(ingest.FindingNeedsHuman), len(rep.Fileable))
+	if !iflags.apply {
+		if len(rep.Fileable) > 0 {
+			fmt.Fprintln(cmd.ErrOrStderr(), "nothing changed; add --apply to file the confirmed candidates through their contracts")
+		}
+		return nil
+	}
+	applied, err := ingest.Apply(ctx, reg, store, rep)
+	if err != nil {
+		return err
+	}
+	for _, a := range applied {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %s  %s\n", a.Action, a.IntakeID, a.Detail)
 	}
 	return nil
 }

@@ -69,20 +69,24 @@ type Metrics struct {
 	retrievalCompleteness  *prometheus.HistogramVec
 	retrievalAnswerQuality *prometheus.HistogramVec
 	retrievalLimitReached  *prometheus.CounterVec
-	sourceResolves         *prometheus.CounterVec
-	sourceDuration         *prometheus.HistogramVec
-	sourceCache            *prometheus.CounterVec
-	sourceBytes            *prometheus.CounterVec
-	searches               *prometheus.CounterVec
-	searchDuration         *prometheus.HistogramVec
-	searchResults          prometheus.Histogram
-	ambiguous              prometheus.Counter
-	memorySaves            *prometheus.CounterVec
-	memoryDuration         *prometheus.HistogramVec
-	memoryErrors           *prometheus.CounterVec
-	toolPayload            *prometheus.HistogramVec
-	exportFailures         *prometheus.CounterVec
-	exportSpansDrop        prometheus.Counter
+
+	intakeItems       *prometheus.CounterVec
+	intakeOldest      prometheus.Gauge
+	librarianFindings *prometheus.CounterVec
+	sourceResolves    *prometheus.CounterVec
+	sourceDuration    *prometheus.HistogramVec
+	sourceCache       *prometheus.CounterVec
+	sourceBytes       *prometheus.CounterVec
+	searches          *prometheus.CounterVec
+	searchDuration    *prometheus.HistogramVec
+	searchResults     prometheus.Histogram
+	ambiguous         prometheus.Counter
+	memorySaves       *prometheus.CounterVec
+	memoryDuration    *prometheus.HistogramVec
+	memoryErrors      *prometheus.CounterVec
+	toolPayload       *prometheus.HistogramVec
+	exportFailures    *prometheus.CounterVec
+	exportSpansDrop   prometheus.Counter
 }
 
 // Bucket sets. Named so the choice behind each is reviewable.
@@ -215,6 +219,18 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "meerkat_retrieval_limit_reached_total",
 			Help: "Retrieval sessions that hit a traversal limit, by limit (hops, steps, attempts).",
 		}, []string{"limit"}),
+		intakeItems: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "meerkat_intake_items_total",
+			Help: "Intake objects written, by stage (raw, staged, done, parked) and outcome (written, skipped, failed).",
+		}, []string{"stage", "outcome"}),
+		intakeOldest: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "meerkat_intake_age_seconds",
+			Help: "Age of the oldest unprocessed raw intake item at the last listing; 0 when none.",
+		}),
+		librarianFindings: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "meerkat_librarian_findings_total",
+			Help: "Findings of a librarian run, by kind (dangling, stale, cull, missing_link, needs_human).",
+		}, []string{"kind"}),
 		treeDepth: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "meerkat_tree_depth",
 			Help: "Deepest knowledge base declared in the tree this process serves (root = 0; 0 for a flat deployment; the hard cap is 5).",
@@ -288,6 +304,7 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 			m.retrievalFirstContext, m.retrievalFirstRelevant, m.retrievalGiveUp, m.retrievalHops, m.retrievalSteps,
 			m.retrievalWrongTurns, m.retrievalSessions, m.retrievalAccuracy, m.retrievalCompleteness,
 			m.retrievalAnswerQuality, m.retrievalLimitReached,
+			m.intakeItems, m.intakeOldest, m.librarianFindings,
 			m.sourceResolves, m.sourceDuration, m.sourceCache, m.sourceBytes,
 			m.searches, m.searchDuration, m.searchResults, m.ambiguous,
 			m.memorySaves, m.memoryDuration, m.memoryErrors,
@@ -437,6 +454,45 @@ func boundedCull(s string) string {
 		return s
 	}
 	return "other"
+}
+
+// IntakeItem counts one intake write by stage and outcome.
+func (m *Metrics) IntakeItem(stage, outcome string) {
+	if m == nil {
+		return
+	}
+	switch stage {
+	case "raw", "staged", "done", "parked":
+	default:
+		stage = "other"
+	}
+	switch outcome {
+	case "written", "skipped", "failed":
+	default:
+		outcome = "other"
+	}
+	m.intakeItems.WithLabelValues(stage, outcome).Inc()
+}
+
+// IntakeOldest publishes the age of the oldest unprocessed raw item.
+func (m *Metrics) IntakeOldest(seconds float64) {
+	if m == nil {
+		return
+	}
+	m.intakeOldest.Set(seconds)
+}
+
+// LibrarianFinding counts one finding of a librarian run by kind.
+func (m *Metrics) LibrarianFinding(kind string) {
+	if m == nil {
+		return
+	}
+	switch kind {
+	case "dangling", "stale", "cull", "missing_link", "needs_human":
+	default:
+		kind = "other"
+	}
+	m.librarianFindings.WithLabelValues(kind).Inc()
 }
 
 // RetrievalOutcome counts one mk_report_outcome call. outcome and
