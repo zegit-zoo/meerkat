@@ -8,7 +8,7 @@ Sources it cited: {{sources}}
 
 Write the candidate page at `{{page_path}}` as OKF markdown with YAML frontmatter:
 
-```
+```markdown
 ---
 id: {{page_id}}
 title: <a title an agent would search for>
@@ -31,6 +31,7 @@ extra:
 ```
 
 Rules:
+
 - Every claim must be traceable to a listed source; say "unknown" rather than guess.
 - Keep the body under 2 KiB unless the material demands more; prefer a runbook shape (when, do, verify).
 - Do not read or write any other page. Do not delegate. Commit only `{{page_path}}`.

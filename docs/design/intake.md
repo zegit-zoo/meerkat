@@ -12,7 +12,7 @@ step idempotent.
 Under the `intake:` store's prefix (any `memory:`-style backend: local,
 GCS, S3; `internal/intake`):
 
-```
+```text
 raw/<namespace>/<yyyy-mm-dd>/<id>/page.md   what mk_report_outcome deposited
 staged/<kb>/<id>.md                         a researcher's candidate page
 done/<id>.md                                processed marker (idempotency)

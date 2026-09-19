@@ -137,7 +137,7 @@ the same as a one-element list, per §5.2/§11.
 `YYYY-MM-DD` date, not a relative TTL — §5.5); an absent or unparsable
 `stale_after` is never stale.
 
-```
+```text
 $ mk show tables/orders --json
 {
   "id": "tables/orders",

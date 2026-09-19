@@ -41,7 +41,10 @@ pre-commit install --hook-type pre-push    # gates `git push`
 
 What each hook stage runs:
 
-- **commit-time**: `gitleaks` (secrets scan, per `.gitleaks.toml`);
+- **commit-time**: hygiene (end-of-file newline, trailing whitespace,
+  YAML syntax, merge markers, files over 2 MiB); `gitleaks` (secrets
+  scan, per `.gitleaks.toml`); `markdownlint` (per `.markdownlint.yaml`,
+  with `--fix`; content fixtures are excluded in `.markdownlintignore`);
   `golangci-lint` (per `.golangci.yml`: errcheck, govet, staticcheck,
   unused, gosec, misspell, unconvert, unparam, prealloc, whitespace,
   bodyclose, plus gofmt/goimports); a config-verify check that runs
@@ -70,6 +73,7 @@ locally before you push:
 | Test | `make cover-check` | full test suite with `-race` (needs `CGO_ENABLED=1`), then fails if total coverage drops below the floor in `Makefile` (`COVERAGE_MIN`, currently `48`) |
 | Vulnerability scan | `make vuln` | govulncheck against the actual import graph |
 | gitleaks | `make gitleaks` | scans history + working tree for committed secrets, per `.gitleaks.toml` |
+| Markdown lint | `npx markdownlint-cli@0.45.0 --config .markdownlint.yaml '**/*.md'` (or the pre-commit hook) | every `*.md` outside `.markdownlintignore` passes `markdownlint` |
 
 A convenience target runs the fast subset in one shot:
 
@@ -156,8 +160,8 @@ not a landing spot for outside work.
    squash-worthy commit history helps but isn't required; the PR
    title/commits feed the changelog.
 
-CI must pass (lint, test+coverage, vuln, gitleaks) before a PR is
-merged.
+CI must pass (lint, test+coverage, vuln, gitleaks, markdown lint)
+before a PR is merged.
 
 ## Branch and tag protection
 

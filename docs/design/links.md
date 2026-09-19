@@ -77,7 +77,7 @@ page's own frontmatter.
 `/readyz` stays ready. A broken link is a content bug to fix in the
 content repository, and the tool for that is:
 
-```
+```sh
 mk lint          # prints every dangling entry, exit 1 if any
 mk lint --json   # {pages, links, dangling: [{collection, page, link, reason, pointer}]}
 ```

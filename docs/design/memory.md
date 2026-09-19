@@ -89,7 +89,7 @@ space** a memory goes. Nothing chooses **whose space that is.**
 
 ### The namespace itself
 
-```
+```text
 sha256(issuer + "\x00" + subject)[:16]   , prefixed with a readable slug of the subject
 ```
 
@@ -152,13 +152,13 @@ and a note a caller kept for themselves — a correction, a preference, a
 summary of a conversation — was readable by every other reader of the
 collection.
 
-#27 closes that. **A personal memory is readable by the principal whose
+Issue #27 closes that. **A personal memory is readable by the principal whose
 namespace it is in, and by nobody else.** Not merely refused to
 everybody else: *absent*. It does not appear in their search results,
 their listing, their page counts or their snippets; asking for its ID
 answers exactly as asking for an ID nobody ever wrote; and it is not
 counted by the ambiguity error. That is the same invisibility property
-#9 established for collections ([hosted-mcp.md](hosted-mcp.md)), applied
+Issue #9 established for collections ([hosted-mcp.md](hosted-mcp.md)), applied
 one level down, and it is held to the same standard by the same kind of
 test.
 
@@ -175,7 +175,7 @@ and only one of them cannot be forgotten or forged:
 
 So the owner is derived, at every enforcement point, from the ID:
 
-```
+```text
 memory/personal/<namespace>/<slug>   private to <namespace>
 anything else                        visible to every reader of the collection
 ```
@@ -209,7 +209,7 @@ The load-bearing implementation decision. Visibility is a **mandatory
 clause in the bleve query**, conjoined with the existing title/id/body
 disjunction:
 
-```
+```text
 Conjunction(
     Disjunction( owner:public , owner:own:<caller> ),   ← boost 0
     Disjunction( title^5 , id^3 , body , category boosts... ),
@@ -375,7 +375,7 @@ process.
 
 ### Why `global-write` is a new capability
 
-#9 defined `read`, `personal-write`, `team-write` and `admin`. "Global"
+Issue #9 defined `read`, `personal-write`, `team-write` and `admin`. "Global"
 had no capability, and the two available shortcuts were both wrong:
 
 - **Overload `admin`.** `admin` explicitly implies *every capability,
@@ -395,12 +395,12 @@ neither `read`, `personal-write` nor `team-write` confers it.
 
 ## Invisibility on the write path
 
-#9's load-bearing rule is that an unauthorized collection is *invisible,
+Issue #9's load-bearing rule is that an unauthorized collection is *invisible,
 not denied*, and that it is enforced by narrowing the registry once
 rather than by a check per operation. The write path inherits that
 mechanism rather than reimplementing it:
 
-```
+```text
 request → verify token → evaluate policy → Registry.Restrict(grants.CanRead)  → read handlers
                                         └→ Registry.Restrict(grants.CanWrite)
                                                .WithMemory()                  → mk_save_memory
@@ -448,7 +448,7 @@ doc comment now says so explicitly, since that is now load-bearing.
 A memory store is **a directory, or a GCS prefix, that is NOT part of
 the collection's served content tree.**
 
-```
+```text
 <store>/personal/<namespace>/<slug>.md
 <store>/team/<slug>.md
 <store>/global/<slug>.md
@@ -515,7 +515,7 @@ unconditional overwrite**: the zero `Precondition` is refused by both
 backends, because an unconditional write is exactly how two agents
 saving to the same key silently lose one of the two memories.
 
-```
+```text
 version given      →  update exactly that revision
 replace: true      →  read the current revision, then update from it
 neither            →  create-only
@@ -670,7 +670,7 @@ under the owner its store key says, and a test pins exactly that.
 
 Minimal, on purpose.
 
-```
+```text
 <store>/_staging/<scope>/<namespace>/<slug>.md      status: pending-review
 ```
 
@@ -697,7 +697,7 @@ promoted values, so nothing else needs editing.
 
 ## Tool surface
 
-```
+```text
 mk_save_memory(scope, title, content, [key], [tags], [version], [replace], [collection])
   → {status, collection, scope, namespace, id, version, location, searchable, note}
 ```

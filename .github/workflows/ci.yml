@@ -74,6 +74,13 @@ jobs:
       - name: govulncheck
         run: make vuln
 
+  markdown:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - run: npx --yes markdownlint-cli@0.45.0 --config .markdownlint.yaml '**/*.md' --ignore node_modules
+
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest

@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -21,7 +22,12 @@ import (
 
 func main() {
 	root := cli.NewRootCmd()
-	w := os.Stdout
+	// Render into a buffer so the file can end with exactly one newline
+	// (the last command's separator would otherwise leave a blank
+	// trailing line, which markdownlint rejects).
+	var buf bytes.Buffer
+	w := &buf
+	defer func() { _, _ = os.Stdout.WriteString(strings.TrimRight(buf.String(), "\n") + "\n") }()
 
 	fmt.Fprintf(w, "# meerkat CLI reference\n\n")
 	fmt.Fprintf(w, "Auto-generated from the cobra command tree.\n")
@@ -29,7 +35,7 @@ func main() {
 	fmt.Fprintf(w, "Source of truth: `internal/cli/*.go`. "+
 		"Source generator: `internal/clidocs/clidocs.go`.\n\n")
 
-	fmt.Fprintf(w, "## Synopsis\n\n```\n%s\n```\n\n", strings.TrimSpace(root.Long))
+	fmt.Fprintf(w, "## Synopsis\n\n```text\n%s\n```\n\n", strings.TrimSpace(root.Long))
 	if root.Example != "" {
 		fmt.Fprintf(w, "## Examples\n\n```sh\n%s\n```\n\n", strings.TrimSpace(root.Example))
 	}
@@ -87,12 +93,15 @@ func render(w io.Writer, cmd *cobra.Command) {
 		fmt.Fprintf(w, "%s\n\n", cmd.Short)
 	}
 	if cmd.Long != "" && cmd.Long != cmd.Short {
-		fmt.Fprintf(w, "%s\n\n", strings.TrimSpace(cmd.Long))
+		// Long is terminal help text, not markdown: fence it so bare
+		// URLs, "+"-prefixed lines and blank runs render (and lint) as
+		// the text they are.
+		fmt.Fprintf(w, "```text\n%s\n```\n\n", strings.TrimSpace(cmd.Long))
 	}
-	fmt.Fprintf(w, "**Usage**\n\n```\n%s\n```\n\n", cmd.UseLine())
+	fmt.Fprintf(w, "#### Usage\n\n```text\n%s\n```\n\n", cmd.UseLine())
 
 	if subs := visibleSubcommands(cmd); len(subs) > 0 {
-		fmt.Fprintf(w, "**Subcommands**\n\n")
+		fmt.Fprintf(w, "#### Subcommands\n\n")
 		for _, s := range subs {
 			fmt.Fprintf(w, "- `%s` — %s\n", s.Name(), s.Short)
 		}
@@ -100,14 +109,14 @@ func render(w io.Writer, cmd *cobra.Command) {
 	}
 
 	if cmd.HasAvailableLocalFlags() {
-		fmt.Fprintf(w, "**Flags**\n\n```\n%s```\n\n", cmd.LocalFlags().FlagUsages())
+		fmt.Fprintf(w, "#### Flags\n\n```text\n%s```\n\n", cmd.LocalFlags().FlagUsages())
 	}
 	if cmd.HasAvailableInheritedFlags() {
-		fmt.Fprintf(w, "**Inherited flags**\n\n```\n%s```\n\n", cmd.InheritedFlags().FlagUsages())
+		fmt.Fprintf(w, "#### Inherited flags\n\n```text\n%s```\n\n", cmd.InheritedFlags().FlagUsages())
 	}
 
 	if cmd.Example != "" {
-		fmt.Fprintf(w, "**Examples**\n\n```sh\n%s\n```\n\n", strings.TrimSpace(cmd.Example))
+		fmt.Fprintf(w, "#### Examples\n\n```sh\n%s\n```\n\n", strings.TrimSpace(cmd.Example))
 	}
 	fmt.Fprintf(w, "---\n\n")
 }

@@ -157,7 +157,7 @@ burst of failed searches every time a new generation lands.
 
 So the snapshot is reference-counted:
 
-```
+```text
 acquire()   under snapMu.RLock: read the pointer AND take a reference,
             indivisibly
 install()   under snapMu.Lock: publish the new snapshot, then drop the
@@ -276,7 +276,7 @@ to the structured log and to authenticated collection discovery.
 All labelled by the collection's configuration **ordinal** and the target
 **kind** (`content` | `memory`), and by nothing else:
 
-```
+```text
 meerkat_refresh_attempts_total{collection,kind}
 meerkat_refresh_changes_total{collection,kind}
 meerkat_refresh_failures_total{collection,kind}

@@ -5,7 +5,7 @@ code added · **Builds on:** [multi-collection.md](multi-collection.md) ·
 **Issue:** #1
 
 *(This is not a spec for a shipped feature. It answers the questions issue
-#1 asked, with measurements, and recommends a plan — implementing it is
+Issue #1 asked, with measurements, and recommends a plan — implementing it is
 future work.)*
 
 ## The ask
@@ -116,7 +116,7 @@ never links them into a binary and plain `go test ./...` / `make test`
 never runs their bodies (Go only executes `Benchmark*` functions when
 `-bench` is passed). Run them with:
 
-```
+```sh
 go test -run '^$' -bench . -benchmem -benchtime=1x ./internal/indexfilter/...
 ```
 
