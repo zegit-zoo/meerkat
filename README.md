@@ -70,36 +70,25 @@ Two consequences worth knowing up front:
 Releases are published to [GitHub Releases](https://github.com/zegit-zoo/meerkat/releases).
 
 ```bash
-# pick your platform
 PLATFORM=darwin_arm64   # darwin_arm64 / darwin_amd64 / linux_amd64 / linux_arm64
 
-# download + extract the latest release in one step
-gh release download \
-  --repo zegit-zoo/meerkat \
-  -p "meerkat_*_${PLATFORM}.tar.gz" \
-  --output - \
-  | tar -xz -C ~/.local/bin meerkat
-
-ln -sf meerkat ~/.local/bin/mk     # convenience short alias
+gh release download --repo zegit-zoo/meerkat \
+  -p "meerkat_*_${PLATFORM}.tar.gz" --output - \
+  | tar -xz -C ~/.local/bin meerkat      # no tag argument = latest release
+ln -sf meerkat ~/.local/bin/mk           # convenience short alias
 meerkat version
 ```
 
-No tag is pinned above — `gh release download` with no tag argument
-fetches the latest release. If you hit GitHub's anonymous API rate
+Windows ships a `.zip` instead. If you hit GitHub's anonymous API rate
 limit, `gh auth login` (or `export GH_TOKEN=...`) raises it; see
-[docs/INSTALL.md](docs/INSTALL.md) for a curl/wget alternative and
+[docs/INSTALL.md](docs/INSTALL.md) for Windows, a curl/wget alternative and
 signature verification.
 
-On macOS with Homebrew, the `mk` shorthand above can collide with
-`homebrew/core/mk` (the unrelated Plan 9 `mk` build tool) if it's
-also installed — whichever one is first on `$PATH` wins, silently.
-Nothing detects that for you on this path: the tap formula declares
-`conflicts_with "mk"` so `brew` refuses the pair outright, but a
-tarball install is outside `brew`'s view. See [Homebrew `mk`
-collision](docs/INSTALL.md#homebrew-mk-collision) for `$PATH`
-ordering / alias workarounds.
-
-If `~/.local/bin` isn't on your `$PATH`, add it (see [docs/INSTALL.md](docs/INSTALL.md)).
+A tarball install is outside `brew`'s view, so the `conflicts_with`
+guard above does not apply: if `homebrew/core/mk` is also installed,
+whichever `mk` is first on `$PATH` wins, silently. See [Homebrew `mk`
+collision](docs/INSTALL.md#homebrew-mk-collision). If `~/.local/bin`
+isn't on your `$PATH`, add it.
 
 ### From source
 
@@ -113,14 +102,9 @@ make install            # → ~/.local/bin/{meerkat,mk}
 ### Updating
 
 ```bash
-mk update --check       # newest GitHub release
-mk update               # download + verified swap
+mk update --check       # newest GitHub release (works everywhere)
+mk update               # download + verified swap; refuses on a brew install
 ```
-
-Installed with `brew`? Use `brew upgrade meerkat` instead — `mk
-update` detects a Cellar install and refuses, since brew would undo
-the swap on its next run. `mk update --check` still reports the
-newest release either way.
 
 ### Container image
 
@@ -184,6 +168,7 @@ mk list --prefix systems/backend/
 mk list --category policies --status placeholder
 mk list --owner team-payments --json
 mk list --type "BigQuery Table"                       # OKF's concept-kind field — see docs/OKF.md
+mk lint                                               # dangling related:/pointer targets; exit 1 if any
 
 # Multiple collections (when content-source.yaml declares any)
 mk list --collections                                 # what's mounted
@@ -200,15 +185,16 @@ mk ingest                                             # plan all stale tasks (JS
 mk ingest --source policies                           # plan one source
 mk ingest --source policies --execute --max-parallel 4
 mk ingest --page concepts/Rate-Limiting --execute
-mk ingest sources                                     # show embedded source registry
+mk ingest sources                                     # show the source registry in view
 mk ingest --batch-file batch.jsonl                    # write plan to file
 
 # Operations
 mk update --check                                     # newest GitHub release
-mk version
+mk version                                            # incl. kb_source: what is being served
 ```
 
-Full per-command help: `mk <cmd> --help`.
+Full per-command help: `mk <cmd> --help`; generated reference in
+[docs/CLI.md](docs/CLI.md).
 
 ## OpenCode integration
 
@@ -226,13 +212,16 @@ Add to `~/.config/opencode/opencode.json`:
 }
 ```
 
-Restart OpenCode. Three tools become available to the agent:
+Restart OpenCode. Five tools become available to the agent, plus
+`mk_save_memory` when a collection declares a store:
 
 | Tool | Args | Returns |
 |---|---|---|
-| `mk_search` | `query`, `limit?` | `[{id, title, score, snippet, category, status}]` |
-| `mk_show` | `id` | `{id, title, body, front, trust_tier, stale}` (parsed frontmatter, plus two OKF-derived advisory signals — see [docs/OKF.md](docs/OKF.md#trust-and-lifecycle)) |
-| `mk_list` | `prefix?`, `category?`, `status?`, `owner?`, `type?` | `[{id, title, category, status, owner, type, source}]` |
+| `mk_search` | `query`, `limit?`, `collection?`, `bundle?`, `session_id?` | `[{id, title, score, snippet, category, status}]` |
+| `mk_show` | `id`, `collection?`, `session_id?` | `{id, title, body, front, trust_tier, stale}` (parsed frontmatter, plus two OKF-derived advisory signals — see [docs/OKF.md](docs/OKF.md#trust-and-lifecycle)) |
+| `mk_list` | `prefix?`, `category?`, `status?`, `owner?`, `type?`, `collection?` | `[{id, title, category, status, owner, type, source}]` |
+| `mk_list_collections` | — | `[{name, type, source, pages, capabilities, …}]` — what this caller may read (see [Multiple collections](#multiple-collections)) |
+| `mk_report_outcome` | `outcome`, `initial_query?`, `pages?`, `attempted?`, `quality?`, `fallback?`, `session_id?` | `{recorded, logged, intake_id?}` — see [Reporting outcomes](#reporting-outcomes-mk_report_outcome) |
 | `mk_save_memory` | `scope`, `title`, `content`, `key?`, `tags?`, `version?`, `replace?` | `{status, id, version, location, searchable}` — only when a collection declares a [`memory:`](#memory-mk_save_memory) store |
 
 ## Hosted MCP server (Streamable HTTP + OIDC)
@@ -245,8 +234,8 @@ hosted transport instead:
 mk mcp serve-http --port 4005          # http://127.0.0.1:4005/mcp
 ```
 
-It exposes the same `mk_search` / `mk_show` / `mk_list` tools over the MCP
-Streamable HTTP transport, with concurrent sessions, plus:
+It exposes the same tools as `mk mcp serve` over the MCP Streamable HTTP
+transport, with concurrent sessions, plus:
 
 | endpoint | auth | what it is |
 |---|---|---|
@@ -511,8 +500,10 @@ mk http serve --port 4004
 ```
 
 Register `http://127.0.0.1:4004/openapi.json` as a Tool Server in OpenWebUI.
-The same three tools are available as `POST /search`, `POST /show`,
-`POST /list`. `/healthz` and `/openapi.json` are exempt from auth.
+The search/show/list tools are available as `POST /search`, `POST /show`,
+`POST /list`, and `GET /collections` enumerates what's mounted. `/healthz`
+and `/openapi.json` are exempt from auth; everything else needs the bearer
+token, and the server refuses to start without one.
 
 If OpenWebUI runs on another host, don't just add `--host 0.0.0.0` —
 meerkat has no TLS of its own, so that puts the bearer token on the
@@ -912,20 +903,10 @@ ID. `content:` and `collections:` are mutually exclusive.
 **Order matters.** It is the order collections are searched, listed, and
 disambiguated in.
 
-```bash
-mk list --collections                      # what's mounted
-mk list --collections --json               # name, type, provenance, page count
-
-mk search "incident"                       # every collection, merged by score
-mk search "incident" --collection runbooks # just one
-
-mk list                                    # every collection, IDs qualified
-mk list --collection architecture          # just one
-
-mk show runbooks:incidents/paging          # a page ID qualified by collection
-mk show incidents/paging --collection runbooks   # equivalent
-mk show incidents/paging                   # tried in order (see below)
-```
+Beyond the examples in ["Use"](#use) above, `mk list --collections --json`
+reports each one's name, type, provenance and page count, and `mk show
+incidents/paging --collection runbooks` is equivalent to the
+`runbooks:incidents/paging` qualified form.
 
 **Routing rules**, with several collections mounted:
 
@@ -994,9 +975,10 @@ collections:
 The contract is **declared, never inferred** from the source type: a
 serving mirror and a contribution repo are different addresses, and only
 you know which is which. The one rule meerkat enforces is that
-`method: direct` needs a backend a write can land in (a local directory or
-a GCS prefix) — declaring it on a `type: url` archive, a `gcs` bundle or
-the embedded build fails at **startup**, not at the first lost write.
+`method: direct` needs a backend a write can land in (a local directory, or
+a GCS or S3 *prefix*) — declaring it on a `type: url` archive, a `gcs`/`s3`
+bundle or the embedded fallback fails at **startup**, not at the first lost
+write.
 
 What a caller is *told* depends on what that caller may do. Without
 `global-write` on a `direct` collection they are pointed at the staging
@@ -1232,9 +1214,10 @@ serves queries against a partial one.
 ## Build / test / release
 
 ```bash
-make build           # binary in bin/meerkat (+ bin/mk symlink)
-make test            # go test -race ./...
+make build           # binary in bin/meerkat (+ bin/mk symlink); runs `make sync` first
+make test            # go test -race -count=1 ./...
 make test-cover      # ... with coverage
+make cover-check     # ... and fail below COVERAGE_MIN
 make smoke           # end-to-end CLI sanity: version + list + search + show
 make sync            # populate embed dirs from content-source.yaml (no-op, empty KB, if absent)
 make install         # → ~/.local/bin/{meerkat,mk}
@@ -1254,86 +1237,84 @@ make release-check     # validate .goreleaser.yaml
 make release-snapshot  # local cross-platform build, no publish
 ```
 
-`.github/workflows/ci.yml` runs four independent jobs — `lint`, `test`,
-`vuln`, `gitleaks` — in parallel on every push to `main` and every pull
-request; there's no job-to-job dependency. `.github/workflows/release.yml`
-runs separately, triggered by a version tag: it re-runs the full gate (adding
-`gosec`) on the tagged commit, then publishes via goreleaser only if that
-passes.
+`.github/workflows/ci.yml` runs on every push to `main` and every pull
+request, with no job-to-job dependency: `lint` (golangci-lint, `go mod tidy`
+drift, `make docs-check`), `test` (`make cover-check`), `vuln`
+(govulncheck), `markdown` (markdownlint over every `*.md`), `gitleaks`, and
+`s3-conformance`, a matrix that replays the object-store assumptions against
+a real [Garage](https://garagehq.deuxfleurs.fr/) and
+[Versity Gateway](https://github.com/versity/versitygw).
+`.github/workflows/release.yml` is separate, triggered by a `v*.*.*` tag: a
+`verify` job re-runs lint, tests, govulncheck, gosec and gitleaks on the
+tagged commit, and only if it passes do `goreleaser` and `docker` run.
+
+The `goreleaser` job cross-builds, generates SPDX SBOMs (via syft), signs
+the checksums file with cosign keyless (Fulcio + Rekor), and publishes a
+GitHub Release; the `docker` job builds and signs the multi-arch image.
+Both run with **no content source**, which is why everything they publish
+carries an empty knowledge base by design. See
+[docs/RELEASE.md](docs/RELEASE.md) and [docs/INSTALL.md](docs/INSTALL.md)
+for the consumer-side verification flow, and ["Embedding content at build
+time"](#optional-embedding-content-at-build-time) to bake content into a
+binary you build yourself.
 
 Contributions go through a normal fork → branch → pull-request flow against
-`main`; CI must pass before merge. There's no direct push to `main`.
-
-Run the full local CI gate (`go vet` + `gofmt` + `go test -race` +
-`docs-check`) before pushing — saves a round-trip:
-
-```bash
-make pre-push          # one-shot
-make install-hooks     # installs .git/hooks/pre-push so it runs
-                       # automatically on every `git push`
-                       # (skip with `git push --no-verify`)
-```
-
-The `release` job uses goreleaser to cross-build, generate SBOMs
-(via syft), sign the checksums file with cosign keyless (Fulcio +
-Rekor), and publish a GitHub Release. See `docs/INSTALL.md` for the
-verification flow on the consumer side.
-
-Embedded content comes from whatever `content-source.yaml` points at (see
-["The knowledge base ships empty"](#use) above and
-[docs/design/content-sources.md](docs/design/content-sources.md)). To refresh
-embedded content after the upstream source changes, just rebuild:
+`main`; there's no direct push. Run the same gates locally first — the
+[pre-commit](https://pre-commit.com/) hooks in
+[CONTRIBUTING.md](CONTRIBUTING.md) enforce them at commit and push time:
 
 ```bash
-make build     # runs `make sync`, which re-resolves content-source.yaml
-```
-
-If you're using `type: submodule`, update the submodule first:
-
-```bash
-make kb-update   # git submodule update --remote --recursive
-make build
+pre-commit install && pre-commit install --hook-type pre-push   # once per clone
+make pre-push          # one-shot: lint + test + docs-check
+make pre-release       # ... plus vuln + gosec + gitleaks, before tagging
 ```
 
 ## Repo layout
 
 ```text
-cmd/meerkat/main.go         entrypoint
+cmd/
+  meerkat/            entrypoint
+  meerkat-bootstrap/  standalone installer for a verified upstream release
 internal/
-  kb/         Page + Frontmatter, //go:embed all:content
+  contentsource/  content-source.yaml: runtime resolution (local / url /
+                  gcs / s3), build-time sync (local / git / submodule),
+                  collections, tree, auth/observability/intake blocks
+  contentsync/    `make sync`: the build-time embed tool (not in the binary)
   kbdir/      resolves --kb-dir/MEERKAT_KB_DIR, adapts it onto kb/sources
-  contentsource/  content-source.yaml: build-time sync + runtime resolution
-                  (local / git / submodule / url / gcs), collections
+  kb/         Page + Frontmatter over the resolved (or embedded) content
   collections/    named collections + search/show/list routing across them
+  refresh/    opt-in runtime reconciliation: the refresh: controller
   search/     Bleve in-memory BM25 index
-  sources/    embeds sources.yaml + prompts + templates
+  sources/    sources.yaml + prompts + templates
   ingest/     Plan(opts) + Run(ctx, tasks) — planner + executor
-  mcp/        MCP server (mk_search / mk_show / mk_list / mk_save_memory) —
-              stdio and the hosted Streamable HTTP transport, probes,
-              metrics, access log
+  intake/     raw intake store: deposits, candidate pages, parked items
+  mcp/        MCP server (mk_search / mk_show / mk_list / mk_list_collections
+              / mk_report_outcome / mk_save_memory) — stdio and the hosted
+              Streamable HTTP transport, probes, metrics, access log
+  retrieval/  retrieval sessions and their SLIs
+  traversal/  opt-in traversal log, with page IDs and names HMAC-hashed
   telemetry/  opt-in OpenTelemetry: the observability: block, spans,
               OTLP export, bounded domain metrics. Returns nil when
               nothing opted in, and every method tolerates one
-  memory/     writable memory stores (local dir / GCS prefix) with
+  memory/     writable memory stores (local dir / GCS or S3 prefix) with
               optimistic locking, identity-derived namespaces, staging
+  s3api/      the one S3 client shape (content sources + memory stores)
+  auth/       borrowed git-host credentials (gh token, OS keyring)
   authn/      OIDC discovery/JWKS verification + the bearer gate (RFC 9728)
   authz/      capability model, access policy, per-collection grants
   http/       HTTP/OpenAPI server with bearer auth
   update/     mk update — gh token, GitHub Releases download, atomic swap
-  cli/        cobra command tree
-  clidocs/    docs/CLI.md generator (cobra tree -> single-file MD)
-docs/
-  CLI.md        auto-generated CLI reference (make docs)
-  INSTALL.md    install + verify + troubleshooting
-  CONTAINER.md  running the OCI image (read-only fs, cache-dir mount, verify)
-  SECURITY.md   threat model + scanner suite + fix workflows
-content-source.yaml   optional, not shipped; tells `make sync` (build) or
-                      meerkat itself (runtime) where KB content lives
-                      (local path / git repo / submodule / url archive /
-                      GCS object or prefix), as one source or several
-                      named collections, plus the optional auth: policy,
-                      the optional observability: block, per-collection
-                      memory: stores and update: contracts
+  cli/        cobra command tree; clidocs/ generates docs/CLI.md from it
+docs/         CLI.md (generated), INSTALL, CONTAINER, RELEASE, SECURITY,
+              SEARCH, OKF, INGESTION, INTEGRATION-*; design/ per subsystem
+content-source.yaml   optional, never shipped; tells meerkat at runtime —
+                      or `make sync` at build time — where KB content
+                      lives (local path / url archive / GCS or S3 object
+                      or prefix; git repo or submodule at build time), as
+                      one source or several named collections, plus the
+                      optional auth: policy, the optional observability:
+                      block, per-collection memory: stores and update:
+                      contracts
 ```
 
 ## See also
@@ -1342,43 +1323,30 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
   — official meerkat documentation
 - [zegit.dev/documentation/meerkat-cli.html](https://zegit.dev/documentation/meerkat-cli.html)
   — CLI reference and integration guides
-- [docs/CONTAINER.md](docs/CONTAINER.md) — running the OCI image (read-only
-  root filesystem, the cache-dir mount, cosign verification)
+- [docs/INSTALL.md](docs/INSTALL.md) — install, verify, troubleshoot;
+  [docs/CONTAINER.md](docs/CONTAINER.md) — running the OCI image;
+  [docs/RELEASE.md](docs/RELEASE.md) — tagging and the release gate
+- [docs/SEARCH.md](docs/SEARCH.md) — query syntax and the fallback stages;
+  [docs/SECURITY.md](docs/SECURITY.md) — threat model and scanners
 - [docs/OKF.md](docs/OKF.md) — serving an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
   (Open Knowledge Format) bundle unmodified, and what meerkat does with
   its frontmatter
-- [docs/design/content-sources.md](docs/design/content-sources.md) — how
-  `content-source.yaml` maps a content repo onto the embed dirs
-- [docs/design/multi-collection.md](docs/design/multi-collection.md) —
-  mounting several named collections at once, the routing/disambiguation
-  rules, and the GCS backend's generation-keyed caching
-- [docs/design/hot-reload.md](docs/design/hot-reload.md) — `refresh:`:
-  the metadata-probe/atomic-snapshot-swap model that lets a running
-  server pick up a new GCS generation and lets replicas converge on a
-  shared memory store, why a pinned `generation:` refuses it, and what a
-  failed refresh leaves serving
-- [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md) — the hosted
-  Streamable HTTP MCP server: OIDC, the capability model, and why an
-  unauthorized collection is made invisible rather than denied
-- [docs/design/observability.md](docs/design/observability.md) —
-  `observability:`: the span taxonomy and `meerkat.*` attribute
-  namespace, the config-vs-`OTEL_*` precedence rule and its two
-  deliberate inversions, why a span is held to a stricter disclosure
-  standard than the access log beside it, and how a collector outage is
-  kept out of the request path
-- [docs/design/memory.md](docs/design/memory.md) — `mk_save_memory`: why
-  the personal namespace is structurally unspoofable, why a personal
-  memory is private to READ as well as to write (and why that filter has
-  to live inside the search query), the scope→capability table, the
-  optimistic-locking scheme, and the staging shape
-- [docs/design/update-contract.md](docs/design/update-contract.md) — the
-  per-collection `update:` contract: why it is declared rather than
-  inferred, and how the path a caller is shown is narrowed to what that
-  caller can actually do
-- [docs/design/ingestion-pipeline.md](docs/design/ingestion-pipeline.md) —
-  how `mk ingest` populates placeholder pages from that content repo
-- [docs/design/index-filtering.md](docs/design/index-filtering.md) — an
-  assessment (not yet implemented) of index-time frontmatter filtering
-  for very large knowledge bases, with measurements
-- Your own content repo holds the KB pages and `ingestion/sources.yaml` —
-  meerkat only needs a `content-source.yaml` pointing at it
+
+Design notes, each linked from the section it explains:
+[content-sources](docs/design/content-sources.md),
+[multi-collection](docs/design/multi-collection.md),
+[hot-reload](docs/design/hot-reload.md),
+[hosted-mcp](docs/design/hosted-mcp.md),
+[observability](docs/design/observability.md),
+[memory](docs/design/memory.md),
+[update-contract](docs/design/update-contract.md),
+[ingestion-pipeline](docs/design/ingestion-pipeline.md),
+[intake](docs/design/intake.md),
+[tree](docs/design/tree.md),
+[cache](docs/design/cache.md),
+[links](docs/design/links.md),
+[object-stores](docs/design/object-stores.md),
+[index-filtering](docs/design/index-filtering.md).
+
+Your own content repo holds the KB pages and `ingestion/sources.yaml` —
+meerkat only needs to be pointed at it.
