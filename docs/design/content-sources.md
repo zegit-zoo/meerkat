@@ -25,10 +25,10 @@ disk at run time). One binary still equals one knowledge base.
   Explicitly out of scope; the offline single-binary guarantee stays strict.
   *(2026-07-29: implemented, under different flag names — `--kb-dir`/
   `MEERKAT_KB_DIR`, `--content-source`/`MEERKAT_CONTENT_SOURCE`, and a
-  `type: url` content-source.yaml source. See the README's ["Serving
-  content at runtime"](../../README.md#serving-content-at-runtime) section
-  for the current reference; the single-binary offline guarantee is
-  unchanged when none of these are configured.)*
+  `type: url` content-source.yaml source. See the README's ["Loading
+  content"](../../README.md#loading-content) section for the current
+  reference; the single-binary offline guarantee is unchanged when none of
+  these are configured.)*
 - **Ingestion pipeline rebuild** (generalizing `mk ingest`'s planner/executor
   and multi-host source fetching). Tracked as a follow-up (see §11).
 - **Multiple/merged content roots.** One content source per build for now.

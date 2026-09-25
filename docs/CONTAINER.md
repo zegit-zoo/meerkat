@@ -85,9 +85,8 @@ The one case that **does** need a writable path: pointing the running
 container at external content via `--content-source`/
 `MEERKAT_CONTENT_SOURCE` with `content.type: url`, `gcs` or `s3` (or
 discovery of a `type: local`/`url`/`gcs`/`s3` `content-source.yaml` under
-`$XDG_CONFIG_HOME`). See
-the README's ["Serving content at
-runtime"](../README.md#serving-content-at-runtime) for the full
+`$XDG_CONFIG_HOME`). See the README's
+["Loading content"](../README.md#loading-content) for the full
 resolution order and `type: url`'s cache semantics.
 
 The image sets `HOME=/home/nonroot`, `XDG_CACHE_HOME=/home/nonroot/.cache`,

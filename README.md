@@ -137,27 +137,29 @@ verification).
 A fresh install serves nothing until you point it at a knowledge base. The
 shortest way is a directory on disk in the
 [content-repo layout](#--kb-dir--meerkat_kb_dir) — no credentials, no config
-file, nothing fetched. For anything you'd rather not repeat on every
-invocation — an HTTPS archive, a GCS or S3 bucket, several named
-collections, auth, telemetry — write a `content-source.yaml` where meerkat
-discovers it:
+file, nothing fetched. For anything you'd rather not repeat every invocation
+— an HTTPS archive, a GCS or S3 bucket, several named collections, auth,
+telemetry — write a `content-source.yaml` where meerkat discovers it:
 
 ```bash
 mk --kb-dir ./meerkat-kb search "rate limiting"    # or: export MEERKAT_KB_DIR=…
 
-mkdir -p ~/.config/meerkat     # macOS: ~/Library/Application Support/meerkat
+CFG=~/.config/meerkat                                      # Linux
+[ "$(uname)" = Darwin ] && CFG="$HOME/Library/Application Support/meerkat"
+mkdir -p "$CFG"
 printf 'content:\n  type: local\n  path: /path/to/your-kb-repo\n' \
-  > ~/.config/meerkat/content-source.yaml
+  > "$CFG/content-source.yaml"
 mk list                                            # now serves that directory
 ```
 
-meerkat resolves **one** source per invocation, highest priority first:
-`--kb-dir`/`MEERKAT_KB_DIR`, then `--content-source`/`MEERKAT_CONTENT_SOURCE`,
-then `<user config dir>/meerkat/content-source.yaml`, then
-`./content-source.yaml`, then the binary's own embedded content — which is
-empty in every published release. `mk version` always reports which one won,
-as `kb_source`. Every backend, the precedence rules in full and the
-`content-source.yaml` schema: ["Loading content"](#loading-content).
+That config directory is the OS's own, not `~/.config` everywhere — hence the
+`uname` guard. meerkat then resolves **one** source per invocation, highest
+priority first: `--kb-dir`/`MEERKAT_KB_DIR`,
+`--content-source`/`MEERKAT_CONTENT_SOURCE`, `<user config dir>/meerkat/`,
+`./content-source.yaml`, then the binary's own embedded content — empty in
+every published release. `mk version` always reports which one won, as
+`kb_source`. Every backend and the rules in full:
+["Loading content"](#loading-content).
 
 ```bash
 # Knowledge base (answered locally, no service to call)
@@ -565,8 +567,9 @@ step reached only if the one above is unset (steps 1-2) or not found
    Wins outright over everything below.
 2. `--content-source` (or `MEERKAT_CONTENT_SOURCE`) — an explicit path to a
    `content-source.yaml`.
-3. `content-source.yaml` in `<user config dir>/meerkat/` (`~/.config/meerkat/`
-   on Linux, `~/Library/Application Support/meerkat/` on macOS).
+3. `content-source.yaml` in `<user config dir>/meerkat/` — `os.UserConfigDir()`:
+   `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows, and on
+   macOS `~/Library/Application Support`, which does **not** consult `XDG_CONFIG_HOME`.
 4. `content-source.yaml` in the working directory (wherever `mk`/`meerkat`
    is invoked from — not a repo root).
 5. The binary's embedded content — the fallback when none of the above
@@ -1328,9 +1331,7 @@ content-source.yaml   optional, never shipped; tells meerkat at runtime —
   [docs/RELEASE.md](docs/RELEASE.md) — tagging and the release gate
 - [docs/SEARCH.md](docs/SEARCH.md) — query syntax and the fallback stages;
   [docs/SECURITY.md](docs/SECURITY.md) — threat model and scanners
-- [docs/OKF.md](docs/OKF.md) — serving an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
-  (Open Knowledge Format) bundle unmodified, and what meerkat does with
-  its frontmatter
+- [docs/OKF.md](docs/OKF.md) — serving an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) (Open Knowledge Format) bundle unmodified, and what meerkat does with its frontmatter
 
 Design notes, each linked from the section it explains:
 [content-sources](docs/design/content-sources.md),
