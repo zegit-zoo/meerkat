@@ -190,3 +190,65 @@ func mustWriteCache(t *testing.T, root string, c notifyCache) {
 		t.Fatal(err)
 	}
 }
+
+// TestNagHint_HomebrewSwitch: a Homebrew-managed binary must be told
+// to run `brew upgrade meerkat`, never `mk update` — `mk update`
+// refuses on a Cellar install (see ErrHomebrewManaged), so the old
+// hint would have sent the user into a dead end.
+func TestNagHint_HomebrewSwitch(t *testing.T) {
+	cases := []struct {
+		name     string
+		homebrew bool
+		want     string
+	}{
+		{name: "self-managed install", homebrew: false, want: "`mk update`"},
+		{name: "homebrew install", homebrew: true, want: "`brew upgrade meerkat`"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nagHint(tc.homebrew); got != tc.want {
+				t.Errorf("nagHint(%v) = %q, want %q", tc.homebrew, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEmitNag_Wording pins the full nag line for both hints: both
+// versions present, and exactly one of the two commands named.
+func TestEmitNag_Wording(t *testing.T) {
+	cases := []struct {
+		name      string
+		homebrew  bool
+		wantHint  string
+		wantNoHit string
+	}{
+		{
+			name:      "self-managed install mentions mk update",
+			homebrew:  false,
+			wantHint:  "Run `mk update`.",
+			wantNoHit: "brew upgrade",
+		},
+		{
+			name:      "homebrew install mentions brew upgrade",
+			homebrew:  true,
+			wantHint:  "Run `brew upgrade meerkat`.",
+			wantNoHit: "mk update",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			emitNag(&buf, "v0.4.0", "v0.5.0", nagHint(tc.homebrew))
+			out := buf.String()
+			if !strings.Contains(out, "v0.5.0") || !strings.Contains(out, "v0.4.0") {
+				t.Errorf("nag missing version info: %q", out)
+			}
+			if !strings.Contains(out, tc.wantHint) {
+				t.Errorf("nag missing %q: %q", tc.wantHint, out)
+			}
+			if strings.Contains(out, tc.wantNoHit) {
+				t.Errorf("nag should not mention %q: %q", tc.wantNoHit, out)
+			}
+		})
+	}
+}

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/zegit-zoo/meerkat/internal/update"
 )
 
 // TestDecideProceed_DowngradeRefusedWithoutForce is the CLI-level
@@ -112,5 +115,65 @@ func TestResolveDestinationFlag_NoDestinationAndNothingOnPathErrors(t *testing.T
 	}
 	if !strings.Contains(err.Error(), "--destination") {
 		t.Errorf("expected error to mention --destination, got: %v", err)
+	}
+}
+
+// TestRefuseHomebrewDestination_CellarPathRefused: meerkat-bootstrap
+// installs over an existing binary in place, which is exactly what
+// must not happen inside a Homebrew Cellar — brew owns that file and
+// the next `brew upgrade` would discard the install. The destination
+// is given as the $HOMEBREW_PREFIX/bin-style symlink, since that is
+// what $PATH resolution (and so the default --destination) yields.
+func TestRefuseHomebrewDestination_CellarPathRefused(t *testing.T) {
+	prefix := t.TempDir()
+	cellarBin := filepath.Join(prefix, "Cellar", "meerkat", "0.11.1", "bin")
+	if err := os.MkdirAll(cellarBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(cellarBin, "meerkat")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	brewBin := filepath.Join(prefix, "bin")
+	if err := os.MkdirAll(brewBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(brewBin, "meerkat")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	err := refuseHomebrewDestination(link)
+	if err == nil {
+		t.Fatal("expected a Cellar destination to be refused")
+	}
+	if !errors.Is(err, update.ErrHomebrewManaged) {
+		t.Errorf("expected update.ErrHomebrewManaged, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "brew upgrade meerkat") {
+		t.Errorf("expected the brew upgrade hint, got: %v", err)
+	}
+}
+
+// TestRefuseHomebrewDestination_NormalPathAllowed: an ordinary
+// user-owned install is untouched by the guard.
+func TestRefuseHomebrewDestination_NormalPathAllowed(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "meerkat")
+	if err := os.WriteFile(dest, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseHomebrewDestination(dest); err != nil {
+		t.Errorf("expected a non-Cellar destination to pass, got: %v", err)
+	}
+}
+
+// TestRefuseHomebrewDestination_UnresolvablePathIsNotThisGuardsProblem:
+// a missing destination must fall through to the install flow's own
+// (much better) error, not be swallowed or rewritten here.
+func TestRefuseHomebrewDestination_UnresolvablePathIsNotThisGuardsProblem(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "definitely-not-here", "meerkat")
+	if err := refuseHomebrewDestination(missing); err != nil {
+		t.Errorf("expected a missing destination to pass through, got: %v", err)
 	}
 }

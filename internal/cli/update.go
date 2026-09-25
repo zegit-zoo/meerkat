@@ -35,6 +35,12 @@ token from gh's OAuth credential cache and sends it for the higher
 authenticated GitHub API rate limit — there are no PATs to paste
 either way.
 
+Installed via Homebrew (brew install zegit-zoo/tap/meerkat)? The
+binary lives in the Cellar and belongs to brew, so an in-place swap
+would be undone by the next 'brew upgrade'. This command refuses to
+touch such an install; run 'brew upgrade meerkat' instead. --check
+still works everywhere — it only reads.
+
 Examples:
   mk update --check                  # just print latest version
   mk update                          # interactive: prompt before swap
@@ -45,6 +51,17 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
 			defer cancel()
+
+			// Homebrew owns the Cellar: the binary, its mode, and the
+			// symlinks in $HOMEBREW_PREFIX/bin. Bail out before any
+			// network call, not just before the swap — there is no
+			// point spending a release lookup and a ~10MB download on
+			// an install we will refuse to touch. --check is exempt:
+			// it reads, it never writes.
+			homebrew := update.RunningFromHomebrew()
+			if homebrew && !checkOnly {
+				return update.ErrHomebrewManaged
+			}
 
 			cur := currentVersion()
 			rel, err := update.FetchByTag(ctx, pinTag)
@@ -59,6 +76,11 @@ Examples:
 				rel.TagName, rel.PublishedAt)
 
 			if checkOnly {
+				if homebrew {
+					fmt.Fprintf(cmd.OutOrStdout(),
+						"install: Homebrew-managed — update with `%s` (`mk update` is refused here)\n",
+						update.HomebrewUpgradeCommand)
+				}
 				return nil
 			}
 

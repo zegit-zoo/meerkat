@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -44,6 +45,10 @@ Unlike "mk update", install does not assume the binary already at
 its signing identity, at all. That gap -- not SemVer ordering -- is
 exactly what this command exists to cross, once, so every subsequent
 "mk update" can take over from there.
+
+A --destination inside a Homebrew Cellar is refused: brew owns that
+file, and the next "brew upgrade" would discard anything installed
+over it. Use "brew upgrade meerkat" there instead.
 
 Assets are only ever fetched from github.com/zegit-zoo/meerkat. The
 repository is public, so this works anonymously; a cached "gh auth
@@ -95,6 +100,9 @@ type installOptions struct {
 func runInstall(ctx context.Context, opts installOptions, out io.Writer) error {
 	destination, err := resolveDestinationFlag(opts.destination)
 	if err != nil {
+		return err
+	}
+	if err := refuseHomebrewDestination(destination); err != nil {
 		return err
 	}
 
@@ -276,4 +284,30 @@ func resolveDestinationFlag(destination string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no --destination given, and neither `meerkat` nor `mk` was found on $PATH — pass --destination explicitly")
+}
+
+// refuseHomebrewDestination rejects a --destination that resolves into
+// a Homebrew Cellar, for the same reason `mk update` refuses to
+// self-update there (see update.ErrHomebrewManaged): brew owns that
+// file, and the next `brew upgrade`/`brew reinstall` would silently
+// discard whatever we installed over it.
+//
+// The path is resolved through symlinks first, exactly like
+// InstallAtomic's own resolveDestination does — the default
+// --destination comes from $PATH, which for a Homebrew install lands
+// on the symlink in $HOMEBREW_PREFIX/bin rather than on the Cellar
+// path it points at.
+//
+// An unresolvable path is not this guard's problem: the install flow
+// reports missing/broken destinations with a far better message a few
+// steps later, so we stay silent rather than pre-empting it.
+func refuseHomebrewDestination(destination string) error {
+	resolved, err := filepath.EvalSymlinks(destination)
+	if err != nil {
+		return nil
+	}
+	if update.IsHomebrewInstall(resolved) {
+		return fmt.Errorf("destination %s resolves to %s: %w", destination, resolved, update.ErrHomebrewManaged)
+	}
+	return nil
 }
