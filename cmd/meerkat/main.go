@@ -1,9 +1,10 @@
-// Command meerkat is a knowledge-base CLI: it embeds a body of Markdown
+// Command meerkat is a knowledge-base CLI: it loads a body of Markdown
 // and serves it over CLI, MCP, and HTTP.
 //
-// All wiki content is embedded into the binary at build time from the
-// configured content source. See internal/cli for the command tree and
-// internal/kb for the content access API.
+// The binary carries no content of its own — it resolves a knowledge base at
+// runtime (--kb-dir/MEERKAT_KB_DIR, or a content-source.yaml), and embedding
+// content at build time is an optional secondary path. See internal/cli for
+// the command tree and internal/kb for the content access API.
 package main
 
 import (

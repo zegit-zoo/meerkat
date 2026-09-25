@@ -360,7 +360,8 @@ content:
   # contribution address are different by design, and only you know which is
   # which. meerkat reasons about type: in exactly one place — it REFUSES
   # method: direct at load time on a backend a write cannot land in (type:
-  # url, type: gcs with object:, type: none, type: git/submodule), because
+  # url, type: gcs or type: s3 with object:, type: none, type: git/submodule),
+  # because
   # such a write would go nowhere, or into a content-addressed cache that the
   # next content change replaces.
   #
@@ -396,8 +397,9 @@ content:
   #
   #   # (b) method: direct — this collection's own backend IS the source of
   #   #     truth and may be written to. Valid ONLY for type: local (a
-  #   #     directory) or type: gcs with prefix: (an object prefix) — the
-  #   #     same notion of "writable" the memory: block above uses.
+  #   #     directory) or type: gcs / type: s3 with prefix: (an object prefix
+  #   #     served as a directory tree) — the same notion of "writable" the
+  #   #     memory: block above uses.
   #   #     repo/host/branch/path are refused here: there is no contribution
   #   #     repo to name. instructions: is still allowed.
   # update:

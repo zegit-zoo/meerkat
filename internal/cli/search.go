@@ -20,8 +20,9 @@ func newSearchCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
-		Short: "Full-text search across the embedded wiki",
-		Long: `Run a BM25 full-text search over every embedded wiki page.
+		Short: "Full-text search across the loaded knowledge base",
+		Long: `Run a BM25 full-text search over every page in the loaded knowledge
+base.
 
 Title and ID matches are boosted so page-name lookups (e.g. "onboarding",
 "rate-limiting") rank above incidental body mentions.

@@ -253,7 +253,7 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 			"published release).")
 
 	root.AddGroup(
-		&cobra.Group{ID: groupKB, Title: "Knowledge base (always available, offline):"},
+		&cobra.Group{ID: groupKB, Title: "Knowledge base (answered locally, no service to call):"},
 		&cobra.Group{ID: groupServer, Title: "Servers:"},
 		&cobra.Group{ID: groupOps, Title: "Operations:"},
 	)

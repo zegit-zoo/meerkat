@@ -82,11 +82,11 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).
 
 ## Commands
 
-### Knowledge base (always available, offline)
+### Knowledge base (answered locally, no service to call)
 
 - [`meerkat lint`](#meerkat-lint) — Check related: links and pointer targets across the mounted collections
 - [`meerkat list`](#meerkat-list) — List wiki pages, optionally filtered
-- [`meerkat search`](#meerkat-search) — Full-text search across the embedded wiki
+- [`meerkat search`](#meerkat-search) — Full-text search across the loaded knowledge base
 - [`meerkat show`](#meerkat-show) — Print a single wiki page
 
 ### Servers
@@ -170,7 +170,7 @@ meerkat
 - `lint` — Check related: links and pointer targets across the mounted collections
 - `list` — List wiki pages, optionally filtered
 - `mcp` — Run an MCP (Model Context Protocol) server
-- `search` — Full-text search across the embedded wiki
+- `search` — Full-text search across the loaded knowledge base
 - `show` — Print a single wiki page
 - `update` — Check for or install meerkat updates
 - `version` — Print version information
@@ -311,7 +311,7 @@ meerkat ingest [flags]
 
 #### Subcommands
 
-- `sources` — List the embedded ingestion source registry
+- `sources` — List the ingestion source registry
 
 #### Flags
 
@@ -351,10 +351,11 @@ meerkat ingest [flags]
 
 ### `meerkat ingest sources`
 
-List the embedded ingestion source registry
+List the ingestion source registry
 
 ```text
-Print every source from the embedded sources.yaml.
+Print every source from the loaded knowledge base's
+ingestion/sources.yaml.
 ```
 
 #### Usage
@@ -425,7 +426,7 @@ meerkat lint [flags]
 List wiki pages, optionally filtered
 
 ```text
-List pages embedded in this meerkat binary.
+List the pages in the loaded knowledge base.
 
 Filters compose (AND):
   --prefix    page ID prefix, e.g. "systems/backend/"
@@ -524,7 +525,7 @@ Serve the meerkat KB tools over MCP/stdio
 ```text
 Run a Model Context Protocol server on stdio. Exposes:
 
-  mk_search       - full-text search across the embedded KB
+  mk_search       - full-text search across the loaded KB
   mk_show         - retrieve one page by ID (returns body + frontmatter)
   mk_list         - list pages, optionally filtered (prefix/category/status/owner)
   mk_save_memory  - save a personal/team/global memory, searchable at once
@@ -688,10 +689,11 @@ meerkat mcp serve-http [flags]
 
 ### `meerkat search`
 
-Full-text search across the embedded wiki
+Full-text search across the loaded knowledge base
 
 ```text
-Run a BM25 full-text search over every embedded wiki page.
+Run a BM25 full-text search over every page in the loaded knowledge
+base.
 
 Title and ID matches are boosted so page-name lookups (e.g. "onboarding",
 "rate-limiting") rank above incidental body mentions.
