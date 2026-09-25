@@ -132,7 +132,16 @@ Additional hardening in place:
   `*.github.com`, and `*.githubusercontent.com` for token-bearing
   release/download requests.
 - Ingest executor validates that task `page_path` resolves within the
-  configured KB workdir before reading/writing page files.
+  configured KB workdir before reading/writing page files, and `Finalize`
+  (`internal/ingest/roles.go`) does the candidate read and both candidate
+  writes through an `os.Root` opened on that workdir, addressed by the
+  relative page path. The lexical check is a cheap pre-filter only: it
+  compares `filepath.Abs`/`Rel` results and so cannot see symlinks, and the
+  agent run whose results are being finalized is exactly who could plant
+  one. `os.Root` re-resolves every component against the open directory and
+  refuses to leave it, so a link inside the working copy that points outside
+  is refused by the kernel rather than trusted by a string comparison
+  (`TestFinalize_SymlinkOutOfWorkingCopyIsRefused`).
 - `type: url` / `type: gcs` content archive extraction (`internal/contentsource/archive.go`)
   treats every entry as hostile: symlink and hardlink entries are skipped
   outright (never created, never followed — the same escape vector

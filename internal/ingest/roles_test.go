@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -228,6 +229,74 @@ func TestValidator_DisagreementParksAndNeedsHumanParks(t *testing.T) {
 	results, _ = Run(ctx, tasks, ExecOpts{WorkdirKB: workdir3, Executor: &fakeAgent{mode: "noop"}, Out: os.Stderr, Err: os.Stderr})
 	if results[0].ExitStatus != "failed" || !strings.Contains(results[0].FailReason, "no candidate page") {
 		t.Errorf("noop researcher = %+v", results[0])
+	}
+}
+
+// TestFinalize_SymlinkOutOfWorkingCopyIsRefused proves the containment in
+// Finalize is the operating system's, not a string comparison. A symlink
+// planted inside the working copy — by the very agent run whose results are
+// being finalized — that points at a directory outside it passes
+// isPathWithinBase, because filepath.Abs/Rel never resolve links. The os.Root
+// the candidate read and both candidate writes go through refuses it, so the
+// file outside is neither read into the intake store nor overwritten.
+func TestFinalize_SymlinkOutOfWorkingCopyIsRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink needs a privilege we can't assume on windows")
+	}
+	ctx := context.Background()
+	st, _ := intakeFixture(t)
+	before, _ := st.ListStaged(ctx)
+
+	workdir := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "it1.md")
+	const original = "---\nid: secret\ntitle: Not Yours\ntype: Runbook\nstatus: verified\n---\n# Secret\n"
+	if err := os.WriteFile(victim, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workdir, "wiki"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(workdir, "wiki", "intake")); err != nil {
+		t.Skipf("symlinks unavailable here: %v", err)
+	}
+
+	const pagePath = "wiki/intake/it1.md"
+	// Precondition: the cheap lexical pre-check sees nothing wrong with this
+	// path. That is exactly why os.Root has to be the gate behind it.
+	if !isPathWithinBase(workdir, filepath.Join(workdir, filepath.FromSlash(pagePath))) {
+		t.Fatal("precondition: isPathWithinBase is expected to accept the symlinked path")
+	}
+
+	results := []Result{{
+		Task:       Task{Role: RoleResearcher, IntakeID: "it1", TargetKB: "flux", PageID: "intake/it1", PagePath: pagePath},
+		ExitStatus: "ok",
+	}}
+	fins, err := Finalize(ctx, st, workdir, results, time.Now())
+	if err != nil {
+		t.Fatalf("Finalize errored instead of failing the one item: %v", err)
+	}
+	if len(fins) != 1 || fins[0].Action != "failed" || !strings.Contains(fins[0].Detail, "escapes the working copy") {
+		t.Fatalf("finalize = %+v; want one failed item naming the working-copy escape", fins)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != original {
+		t.Errorf("a file outside the working copy was rewritten:\n%s", got)
+	}
+	if after, _ := st.ListStaged(ctx); len(after) != len(before) {
+		t.Errorf("content from outside the working copy was staged: %d -> %d", len(before), len(after))
+	}
+
+	// The lexical pre-check still catches the plain ".." case on its own.
+	results[0].Task.PagePath = "../" + filepath.Base(outside) + "/it1.md"
+	fins, err = Finalize(ctx, st, workdir, results, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fins) != 1 || fins[0].Action != "failed" || !strings.Contains(fins[0].Detail, "escapes the working copy") {
+		t.Fatalf("dot-dot path = %+v; want a failed item naming the working-copy escape", fins)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != original {
+		t.Errorf("a file outside the working copy was rewritten via \"..\":\n%s", got)
 	}
 }
 
