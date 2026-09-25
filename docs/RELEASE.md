@@ -2,18 +2,19 @@
 
 ## CI pipeline
 
-Every push to `main` and every pull request (`.github/workflows/ci.yml`)
-runs four independent jobs in parallel — there's no job-to-job dependency:
+Every push to `main` and every pull request runs the repo's gates as
+independent jobs in parallel — there's no job-to-job dependency, so one
+failure doesn't mask the rest. Which jobs those are changes as gates are
+added, so this page deliberately doesn't list them:
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the source of
+truth, the README's ["Build / test /
+release"](../README.md#build--test--release) section names the `make` target
+that runs each check locally, and [SECURITY.md](SECURITY.md) explains what
+the security scanners catch.
 
-| Job | What it checks |
-|-----|----------------|
-| `lint` | `go vet`, `gofmt`, `go mod tidy` drift, `docs/CLI.md` sync |
-| `test` | `go test -race` + coverage report (`coverage.out`) |
-| `vuln` | `govulncheck ./...` — known CVEs in the import graph |
-| `gitleaks` | Full-history scan for committed secrets |
-
-`gosec` (static security analysis, HIGH severity gate) isn't part of this
-flat CI run — it's part of the tag-triggered release gate below.
+The tag-triggered release workflow below re-runs the **full** gate —
+including `gosec`, the HIGH-severity static-analysis pass — against the
+exact tagged SHA before anything is published.
 
 ## Release flow
 
