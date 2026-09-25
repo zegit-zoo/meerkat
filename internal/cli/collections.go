@@ -70,7 +70,13 @@ func addCollectionFlag(cmd *cobra.Command, target *string, verb string) {
 }
 
 // completeCollections completes --collection from the mounted set.
-func completeCollections(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+// Like every completion function in completion.go it re-resolves the
+// content first, so `mk search --content-source X --collection <TAB>`
+// offers X's collections rather than the default one (#77).
+func completeCollections(cmd *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if err := completionContent(cmd); err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
 	var out []string
 	for _, n := range registry().Names() {
 		if strings.HasPrefix(n, toComplete) {

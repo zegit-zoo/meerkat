@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -131,87 +132,11 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 		// or embedded fallback). It runs for every subcommand since none
 		// of them define their own PersistentPreRun.
 		//
-		// --kb-dir/MEERKAT_KB_DIR is resolved first and, if set, wins
-		// outright — this branch is unchanged from before content-source
-		// resolution existed. Only when it's unset does content-source.yaml
-		// discovery (internal/contentsource.ResolveRuntime) run.
+		// The work itself lives in resolveContent so shell completion can
+		// run the identical resolution — see completion.go for why it has
+		// to run it a second time.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if dir := kbdir.Resolve(kbDirFlag); dir != "" {
-				source, err := kbdir.Configure(dir)
-				if err != nil {
-					return err
-				}
-				kbSourceProvenance = source
-				activeRegistry = collections.Global(source)
-				// --kb-dir means "ignore content-source.yaml entirely", so
-				// no auth: block is discovered either. `mk mcp serve-http
-				// --kb-dir X` gets its policy from --auth-config or runs
-				// unauthenticated — the same rule as for content.
-				activeAuth = nil
-				// Same rule for observability:. A --kb-dir deployment that
-				// wants tracing turns it on through the standard OTEL_*
-				// environment (and MEERKAT_TRACES_ENABLED), which is how a
-				// container with no config file was always going to do it.
-				activeObservability = nil
-				activeIntake = nil
-				activeCache = nil
-				activeSessions = nil
-				return nil
-			}
-			resolved, err := contentsource.ResolveRuntimeCollections(cmd.Context(), contentSourceFlag)
-			if err != nil {
-				return err
-			}
-			// The auth: block lives in the same content-source.yaml the
-			// collections came from. Reading it here — once per
-			// invocation, alongside content resolution — is what lets `mk
-			// mcp serve-http` pick it up without re-running discovery.
-			// It is inert for every other subcommand.
-			auth, err := contentsource.LoadRuntimeAuth(contentSourceFlag)
-			if err != nil {
-				return err
-			}
-			activeAuth = auth
-			obs, err := contentsource.LoadRuntimeObservability(contentSourceFlag)
-			if err != nil {
-				return err
-			}
-			activeObservability = obs
-			intake, err := contentsource.LoadRuntimeIntake(contentSourceFlag)
-			if err != nil {
-				return err
-			}
-			activeIntake = intake
-			cacheSpec, err := contentsource.LoadRuntimeCache(contentSourceFlag)
-			if err != nil {
-				return err
-			}
-			activeCache = cacheSpec
-			sessionsSpec, err := contentsource.LoadRuntimeSessions(contentSourceFlag)
-			if err != nil {
-				return err
-			}
-			activeSessions = sessionsSpec
-			// Point the process-global KB filesystem at the FIRST resolved
-			// collection. For every single-collection configuration (which
-			// is every configuration that predates collections) that is
-			// simply "the" collection, and this line is exactly the call
-			// this function always made. For a multi-collection config it
-			// is what internal/sources, `mk ingest` and shell completion —
-			// none of which are collection-aware yet — read through; the
-			// collection-aware surfaces (search/show/list, MCP, HTTP) go
-			// through the registry below instead and see all of them.
-			primary := resolved[0]
-			if _, err := kbdir.ConfigureLayout(primary.Dir, primary.Source.Layout); err != nil {
-				return err
-			}
-			reg, err := collections.Open(cmd.Context(), resolved)
-			if err != nil {
-				return err
-			}
-			activeRegistry = reg
-			kbSourceProvenance = reg.Provenance()
-			return nil
+			return resolveContent(cmd.Context(), kbDirFlag, contentSourceFlag)
 		},
 		// PersistentPostRun fires after every (sub-)command's RunE.
 		// We use it to nag about new releases — but only when the
@@ -259,6 +184,101 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 	addToGroup(groupServer, newMCPCmd(), newHTTPCmd())
 	addToGroup(groupOps, newIngestCmd(), newUpdateCmd(), newVersionCmd())
 	return root
+}
+
+// resolveContent resolves the content this invocation serves and points
+// internal/kb + internal/sources (and the collection registry + the
+// active auth/observability/intake/cache/sessions blocks) at the result.
+// kbDir and contentSource are the raw --kb-dir / --content-source flag
+// values; the matching environment variables are applied inside, so a
+// caller that has no flag value simply passes "".
+//
+// It is the single content-resolution path: the root command's
+// PersistentPreRunE calls it once per invocation, and the shell
+// completion functions call it again when a flag carries a location the
+// hook could not see yet (completion.go).
+//
+// --kb-dir/MEERKAT_KB_DIR is resolved first and, if set, wins outright —
+// this branch is unchanged from before content-source resolution
+// existed. Only when it's unset does content-source.yaml discovery
+// (internal/contentsource.ResolveRuntime) run.
+func resolveContent(ctx context.Context, kbDir, contentSource string) error {
+	if dir := kbdir.Resolve(kbDir); dir != "" {
+		source, err := kbdir.Configure(dir)
+		if err != nil {
+			return err
+		}
+		kbSourceProvenance = source
+		activeRegistry = collections.Global(source)
+		// --kb-dir means "ignore content-source.yaml entirely", so
+		// no auth: block is discovered either. `mk mcp serve-http
+		// --kb-dir X` gets its policy from --auth-config or runs
+		// unauthenticated — the same rule as for content.
+		activeAuth = nil
+		// Same rule for observability:. A --kb-dir deployment that
+		// wants tracing turns it on through the standard OTEL_*
+		// environment (and MEERKAT_TRACES_ENABLED), which is how a
+		// container with no config file was always going to do it.
+		activeObservability = nil
+		activeIntake = nil
+		activeCache = nil
+		activeSessions = nil
+		return nil
+	}
+	resolved, err := contentsource.ResolveRuntimeCollections(ctx, contentSource)
+	if err != nil {
+		return err
+	}
+	// The auth: block lives in the same content-source.yaml the
+	// collections came from. Reading it here — once per
+	// invocation, alongside content resolution — is what lets `mk
+	// mcp serve-http` pick it up without re-running discovery.
+	// It is inert for every other subcommand.
+	auth, err := contentsource.LoadRuntimeAuth(contentSource)
+	if err != nil {
+		return err
+	}
+	activeAuth = auth
+	obs, err := contentsource.LoadRuntimeObservability(contentSource)
+	if err != nil {
+		return err
+	}
+	activeObservability = obs
+	intake, err := contentsource.LoadRuntimeIntake(contentSource)
+	if err != nil {
+		return err
+	}
+	activeIntake = intake
+	cacheSpec, err := contentsource.LoadRuntimeCache(contentSource)
+	if err != nil {
+		return err
+	}
+	activeCache = cacheSpec
+	sessionsSpec, err := contentsource.LoadRuntimeSessions(contentSource)
+	if err != nil {
+		return err
+	}
+	activeSessions = sessionsSpec
+	// Point the process-global KB filesystem at the FIRST resolved
+	// collection. For every single-collection configuration (which
+	// is every configuration that predates collections) that is
+	// simply "the" collection, and this line is exactly the call
+	// this function always made. For a multi-collection config it
+	// is what internal/sources, `mk ingest` and shell completion —
+	// none of which are collection-aware yet — read through; the
+	// collection-aware surfaces (search/show/list, MCP, HTTP) go
+	// through the registry below instead and see all of them.
+	primary := resolved[0]
+	if _, err := kbdir.ConfigureLayout(primary.Dir, primary.Source.Layout); err != nil {
+		return err
+	}
+	reg, err := collections.Open(ctx, resolved)
+	if err != nil {
+		return err
+	}
+	activeRegistry = reg
+	kbSourceProvenance = reg.Provenance()
+	return nil
 }
 
 // Execute runs the root command and returns an exit code suitable
