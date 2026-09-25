@@ -65,22 +65,27 @@ prefix cache nor reports a spurious change to hot reload.
 
 Observed by the opt-in conformance tests
 (`internal/contentsource/s3_conformance_test.go`,
-`internal/memory/s3_conformance_test.go`); `scripts/garage-up.sh`
-starts the Garage the CI job runs them against. A row that changes
-fails the test and must be updated here in the same change.
+`internal/memory/s3_conformance_test.go`); `scripts/garage-up.sh` and
+`scripts/versitygw-up.sh` start the two stores the CI job runs them
+against. A row that changes fails the test and must be updated here in
+the same change. MinIO was dropped from the matrix on 2026-09-25,
+because its community edition was archived and its public container
+images were withdrawn (Docker Hub on 2026-09-11, quay.io answering 401
+since), leaving nothing for CI to pull; Versity Gateway took its place
+as the provider that enforces conditional writes.
 
-| Property | AWS S3 | Garage 2.4 | MinIO | GCS |
+| Property | AWS S3 | Garage 2.4 | Versity GW 1.8 | GCS |
 |---|---|---|---|---|
 | addressing | virtual-host (default) | path-style (`path_style: true`) | path-style | n/a |
-| `region:` | from the default chain or `region:` | must match `s3_region` (default `garage`) | any | n/a |
+| `region:` | from the default chain or `region:` | must match `s3_region` (default `garage`) | any (CI uses `us-east-1`) | n/a |
 | ETag on `HeadObject` / listing | yes | yes | yes | generation |
 | `GetObject` + `If-Match` refused with 412 | yes | **yes** (observed) | yes | yes (`ifGenerationMatch`) |
 | `PutObject` + `If-None-Match: *` refused | yes | **no — silently accepted** (observed) | yes | yes |
 | `PutObject` + `If-Match` refused | yes | **no — silently accepted** (observed) | yes | yes |
 | shared memory store safe | yes | **no** — `single_writer: true` required | yes | yes |
 | listing pagination (>1000 keys) | yes | yes (observed, 1005 keys) | yes | iterator |
-| bucket lifecycle rules | yes | **no** | yes | yes |
-| SSE-S3 (`sse: AES256`) | yes | ignored (encrypts at rest by its own config) | yes | n/a |
+| bucket lifecycle rules | yes | **no** | not verified | yes |
+| SSE-S3 (`sse: AES256`) | yes | ignored (encrypts at rest by its own config) | not verified | n/a |
 | request checksums (`x-amz-checksum-*`, aws-chunked) | required-only | required-only | required-only | n/a |
 
 "Observed" cells were measured against `dxflrs/garage:v2.4.1` on
@@ -88,9 +93,16 @@ fails the test and must be updated here in the same change.
 release — when the conformance test starts failing on the Garage row,
 lift the row, the `providerEnforcesWrites` table in
 `internal/memory/s3_conformance_test.go`, and the refusal message in
-`internal/memory/s3.go` together. Columns without "observed" are the provider's documented
-behaviour; MinIO and AWS rows are asserted by the same tests when the
-CI matrix runs them (`MEERKAT_TEST_S3_PROVIDER=minio|aws`).
+`internal/memory/s3.go` together. Columns without "observed" are the
+provider's documented behaviour; the Versity Gateway and AWS rows are
+asserted by the same tests when the CI matrix runs them
+(`MEERKAT_TEST_S3_PROVIDER=versitygw|aws`). The Versity Gateway column
+is its documented behaviour for the posix backend: v1.8.0 made
+conditional `PutObject` evaluation atomic per key and evaluates the
+read preconditions. Two Versity Gateway cells say "not verified":
+nothing in meerkat depends on lifecycle rules (see "Retention is an
+application job" below) or on SSE against this provider, and no test
+exercises either — do not read them as a "yes".
 
 ### What the Garage gap means
 
@@ -130,7 +142,7 @@ one rule, which the memory store is the first instance of:
 > own keys — a ULID per intake item, one log object per session, one
 > flusher per collection instance — and never have two processes update
 > one key. Multi-writer on a single key needs backend-enforced
-> conditional writes, and therefore AWS S3, MinIO or GCS.
+> conditional writes, and therefore AWS S3, Versity Gateway or GCS.
 
 Designs that respect it are provider-neutral for free; designs that
 need a shared counter or an append-in-place object are AWS/GCS-only and

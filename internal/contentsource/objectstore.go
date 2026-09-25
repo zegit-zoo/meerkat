@@ -44,8 +44,8 @@ type storedObject struct {
 // object-store test in this repo runs against a fake implementation —
 // there is no test anywhere that needs real credentials, a real bucket,
 // or the network. The conformance tests that do talk to a real Garage,
-// MinIO or AWS are opt-in through an environment variable and skip
-// otherwise.
+// Versity Gateway or AWS are opt-in through an environment variable and
+// skip otherwise.
 type objectStore interface {
 	// Attrs returns the current metadata for one object.
 	Attrs(ctx context.Context, bucket, object string) (storedObject, error)

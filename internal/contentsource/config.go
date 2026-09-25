@@ -63,9 +63,10 @@ const (
 	// key material of any kind. Runtime-only, like TypeURL. See FetchGCS.
 	TypeGCS = "gcs"
 	// TypeS3 loads content from an S3-compatible bucket — AWS S3, or a
-	// self-hosted store such as Garage or MinIO — in the same two modes
-	// as TypeGCS: a single .tar.gz object (keyed by ETag) or an object
-	// prefix served as a directory tree (keyed by a listing fingerprint).
+	// self-hosted store such as Garage or Versity Gateway — in the same
+	// two modes as TypeGCS: a single .tar.gz object (keyed by ETag) or an
+	// object prefix served as a directory tree (keyed by a listing
+	// fingerprint).
 	// Credentials resolve through the AWS default chain — the schema
 	// carries no key material of any kind. Runtime-only. See FetchS3 and
 	// docs/design/object-stores.md.

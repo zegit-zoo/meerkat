@@ -112,7 +112,8 @@ jobs:
   # those fakes encode (ETags, If-Match on reads, conditional writes,
   # pagination) against each provider, and fails when a provider's
   # observed behaviour drifts from the table in
-  # docs/design/object-stores.md.
+  # docs/design/object-stores.md. Versity Gateway replaced MinIO on
+  # 2026-09-25, when MinIO's public container images were withdrawn.
   s3-conformance:
     name: Object store conformance (${{ matrix.provider }})
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
@@ -120,7 +121,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        provider: [garage, minio]
+        provider: [garage, versitygw]
     env:
       CGO_ENABLED: "1"
     steps:

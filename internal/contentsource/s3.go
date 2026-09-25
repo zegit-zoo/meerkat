@@ -14,8 +14,8 @@ import (
 )
 
 // s3.go implements type: s3 — an S3-compatible bucket (AWS S3, Garage,
-// MinIO, ...) as a runtime content source, in the same two modes as
-// type: gcs:
+// Versity Gateway, ...) as a runtime content source, in the same two
+// modes as type: gcs:
 //
 //   - object: a single .tar.gz bundle, keyed by the object's ETag. S3
 //     has no generation counter; the ETag is the provider's token for

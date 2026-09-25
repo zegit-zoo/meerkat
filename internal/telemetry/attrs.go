@@ -148,9 +148,9 @@ const (
 	// Never the bucket, never the object name.
 	KeyGCSOperation = attribute.Key("meerkat.gcs.operation")
 	// KeyS3Operation is the same vocabulary for an S3-compatible store
-	// (AWS, Garage, MinIO): attrs | list | read. Never the bucket, the
-	// key, or the endpoint — an endpoint names a deployment's storage
-	// topology as surely as a bucket does.
+	// (AWS, Garage, Versity Gateway): attrs | list | read. Never the
+	// bucket, the key, or the endpoint — an endpoint names a deployment's
+	// storage topology as surely as a bucket does.
 	KeyS3Operation = attribute.Key("meerkat.s3.operation")
 
 	// --- memory --------------------------------------------------------

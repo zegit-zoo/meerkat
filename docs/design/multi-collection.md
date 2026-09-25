@@ -335,7 +335,7 @@ unverified directory.
   reader drains. The per-collection index arrangement paid off a second
   time here — a refresh rebuilds exactly one collection's index and leaves
   the others alone, which one shared index could not have done.
-- **Other object stores.** Done for S3 (AWS, Garage, MinIO): the seam is
+- **Other object stores.** Done for S3 (AWS, Garage, Versity Gateway): the seam is
   now the provider-neutral `objectStore` interface plus a `storeKind` per
   provider, with the fetch, probe and cache logic shared — see
   `docs/design/object-stores.md`. Azure Blob would be one more adapter.

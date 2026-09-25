@@ -124,7 +124,7 @@ path (`meerkat/content/gcs/…` and `meerkat/content/s3/…`) and take their
 credentials from the environment only: Application Default Credentials
 for GCS, the AWS default chain for S3 — `AWS_ACCESS_KEY_ID` /
 `AWS_SECRET_ACCESS_KEY` (plus `AWS_REGION` if the source has no
-`region:`) for a Garage or MinIO key, or an IRSA / web-identity token on
+`region:`) for a Garage or Versity Gateway key, or an IRSA / web-identity token on
 EKS. Pass them with `-e` or a secret mount; there is no field for them
 in `content-source.yaml`. See `docs/design/object-stores.md`.
 
