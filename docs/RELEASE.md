@@ -79,8 +79,10 @@ The tap's `bump.yml` workflow:
    the `release.yml` workflow identity** — the same check documented in
    [Verifying a release](#verifying-a-release-consumer-side) below —
    before reading a single hash out of that file;
-4. pins the per-platform SHA-256s into the formula and opens/merges the
-   bump.
+4. pins the per-platform SHA-256s into the formula, then runs
+   `brew style`, `brew audit --strict`, `brew install` and `brew test`
+   against the regenerated formula on the runner, and only if all of
+   that passes pushes the bump commit to the tap's `main`.
 
 If the signature doesn't verify, the workflow fails and the formula
 keeps pointing at the previous release: a bad or unsigned release can
