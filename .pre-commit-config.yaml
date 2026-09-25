@@ -1,15 +1,47 @@
 # Commit gate: hygiene + secrets + lint (Go and Markdown). Push gate: docs-check, tests, govulncheck.
+#
+# Stage assignment in pre-commit 4.x resolves in this order: a `stages:`
+# in THIS file wins; otherwise a `stages:` in the upstream repo's
+# .pre-commit-hooks.yaml wins; otherwise `default_stages` applies, and
+# its own default is *every* stage. Both fallbacks used to bite here,
+# and both are now spelled out rather than inherited:
+#
+#   1. docs-check, go-test and govulncheck named no stage, so they fell
+#      through to the all-stages default. Once a clone had run both
+#      `pre-commit install` and `pre-commit install --hook-type pre-push`
+#      (CONTRIBUTING.md requires both), the entire push gate — race test
+#      suite included — also ran on every `git commit`, contradicting
+#      the line at the top of this file. They now say `stages: [pre-push]`.
+#   2. end-of-file-fixer, trailing-whitespace and check-added-large-files
+#      declare `stages: [pre-commit, pre-push, manual]` upstream, which
+#      outranks `default_stages` — so setting the default alone would NOT
+#      have held them to commit time. They now say `stages: [pre-commit]`
+#      explicitly. That also stops the two fixers from rewriting files
+#      in the middle of a `git push`, which aborts the push with a dirty
+#      tree instead of just failing a check.
+#
+# default_stages then covers the rest (check-yaml, check-merge-conflict,
+# gitleaks, markdownlint and the two Go hooks), none of which declare a
+# stage upstream.
+default_stages: [pre-commit]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # The three `stages: [pre-commit]` below override an upstream
+      # manifest that also lists pre-push and manual — see the note at
+      # the top of this file.
       - id: end-of-file-fixer
+        stages: [pre-commit]
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
+        stages: [pre-commit]
       - id: check-yaml
       - id: check-merge-conflict
       - id: check-added-large-files
         args: [--maxkb=2048]
+        stages: [pre-commit]
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
@@ -22,26 +54,38 @@ repos:
       - id: markdownlint
         args: [--fix, --config, .markdownlint.yaml]
 
-  - repo: https://github.com/golangci/golangci-lint
-    rev: v2.14.0
-    hooks:
-      - id: golangci-lint
-        args: [--timeout, 5m]
-
+  # All Go gates go through the Makefile so there is one pinned
+  # golangci-lint (Makefile: GOLANGCI_LINT_VERSION, self-installed into
+  # .tools/) instead of one here, one in ci.yml and one in release.yml.
+  # These also inherit the Makefile's `export GOTOOLCHAIN`, which is what
+  # makes the linter typecheck against go.mod's Go rather than whatever
+  # the host has installed — the upstream golangci-lint hook ran in
+  # pre-commit's own environment and could not be told that.
+  #
   # docs-check, tests and govulncheck are meerkat-specific Makefile gates.
   - repo: local
     hooks:
+      - id: golangci-lint
+        name: golangci-lint (make lint)
+        entry: make lint
+        language: system
+        types: [go]
+        always_run: false
+        pass_filenames: false
+
       - id: golangci-lint-config-verify
         name: golangci-lint Config Verify
-        entry: golangci-lint config verify
+        entry: make lint-config
         language: system
         files: ^\.golangci\.yml$
+        always_run: false
         pass_filenames: false
 
       - id: docs-check
         name: CLI docs in sync (make docs-check)
         entry: make docs-check
         language: system
+        stages: [pre-push]
         pass_filenames: false
         always_run: true
 
@@ -49,6 +93,7 @@ repos:
         name: Go tests (race)
         entry: bash -c 'CGO_ENABLED=1 make test'
         language: system
+        stages: [pre-push]
         pass_filenames: false
         always_run: true
 
@@ -56,5 +101,6 @@ repos:
         name: govulncheck
         entry: make vuln
         language: system
+        stages: [pre-push]
         pass_filenames: false
         always_run: true
