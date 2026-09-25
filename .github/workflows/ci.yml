@@ -83,6 +83,24 @@ jobs:
       - name: govulncheck
         run: make vuln
 
+  # release.yml's `verify` job runs this same `make gosec` as a release gate.
+  gosec:
+    name: gosec
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    container: ${{ vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2') || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # No sync step: the gosec target already depends on `sync`, so the
+      # embed dirs are populated before the scan walks them.
+      - name: gosec
+        run: make gosec
+
   markdown:
     name: Markdown lint
     runs-on: ubuntu-latest

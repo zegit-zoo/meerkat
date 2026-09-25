@@ -11,7 +11,7 @@ catches, and how to fix the things they flag.
 | Tool | What it catches | Where | Severity gate |
 |------|-----------------|-------|----------------|
 | `govulncheck` | Known CVEs in our **actual import graph** (Go vuln DB) | CI (Vulnerability scan job) + `make vuln` | Hard fail on any reachable vuln |
-| `gosec` | Go-specific weaknesses (weak crypto, command injection, file traversal, hardcoded creds) | CI (inside golangci-lint) + `make gosec` | Hard fail on HIGH severity, medium confidence |
+| `gosec` | Go-specific weaknesses (weak crypto, command injection, file traversal, hardcoded creds) | CI (gosec job, and low-severity inside golangci-lint) + release gate + `make gosec` | Hard fail on HIGH severity, medium confidence |
 | `gitleaks` | Accidentally committed secrets (PATs, OAuth tokens, private keys) | CI (gitleaks job) + `make gitleaks` | Hard fail on any leak |
 | `goreleaser sboms` | SPDX SBOM generated per release artifact via syft | CI release workflow | Attached to the GitHub release |
 | `goreleaser signs` | Cosign keyless (Fulcio + Rekor) signature on the checksums file | CI release workflow | Cosign-verifiable transparency-logged signature |
