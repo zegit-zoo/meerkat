@@ -70,8 +70,9 @@ Labels every repo carries: `in-progress`, `needs-review`, `blocked` (plus GitHub
 - `golangci-lint` runs collide when two worktrees lint at once; serialize them.
 - A credential-helper test prompts when git can reach a terminal; run tests with
   `GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false`.
-- The S3 conformance job needs Garage and MinIO; locally use `scripts/garage-up.sh` and
-  `scripts/minio-up.sh` and set `MEERKAT_TEST_S3_ENDPOINT`.
+- The S3 conformance job needs Garage and Versity Gateway; locally use `scripts/garage-up.sh`
+  and `scripts/versitygw-up.sh` and set `MEERKAT_TEST_S3_ENDPOINT`. MinIO left the matrix on
+  2026-09-25 when its public container images were withdrawn.
 
 ## 6. Repo-specific: meerkat
 
@@ -93,7 +94,8 @@ SLIs, self-improving intake) is designed and tracked in the private repo
   `make docs-check`, and `markdownlint` all run in CI; the pre-commit hooks run the same set at
   commit and push time. Run them before opening a PR.
 - **Shared S3 state is single-writer-per-key.** Garage ignores `If-None-Match: *` and `If-Match`
-  on PUT; anything that needs multi-writer safety on one key must run on AWS, MinIO or GCS, and
+  on PUT; anything that needs multi-writer safety on one key must run on AWS, Versity Gateway
+  or GCS, and
   the startup probe refuses otherwise unless `single_writer: true` is declared.
 - **Never quote a vendor's authority when the vendor exposes it as a tool.** Vendor knowledge
   becomes a pointer page to the vendor's MCP server, not copied documentation.

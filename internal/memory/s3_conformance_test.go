@@ -26,15 +26,16 @@ import (
 // upgrade that changes the answer fails this test and forces the doc to
 // move with it. An unknown provider is reported, not judged.
 //
-// Opt-in through MEERKAT_TEST_S3_ENDPOINT; see scripts/garage-up.sh.
+// Opt-in through MEERKAT_TEST_S3_ENDPOINT; see scripts/garage-up.sh
+// and scripts/versitygw-up.sh.
 
 // providerEnforcesWrites is what docs/design/object-stores.md claims
 // per provider (MEERKAT_TEST_S3_PROVIDER) about If-None-Match: * and
 // If-Match on PutObject.
 var providerEnforcesWrites = map[string]bool{
-	"aws":    true,
-	"minio":  true,
-	"garage": false, // Garage 2.4: enforces If-Match on GET, ignores both headers on PUT.
+	"aws":       true,
+	"versitygw": true,  // Versity Gateway 1.8, posix backend: conditional PUT is atomic per key.
+	"garage":    false, // Garage 2.4: enforces If-Match on GET, ignores both headers on PUT.
 }
 
 func conformanceSpec(t *testing.T) (*Spec, *s3.Client) {

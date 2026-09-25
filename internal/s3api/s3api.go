@@ -33,7 +33,7 @@ import (
 // client: where the store is and how to address a bucket in it.
 type Config struct {
 	// Endpoint overrides the AWS endpoint, e.g. "https://s3.example.net"
-	// for Garage or MinIO. Empty means AWS.
+	// for Garage or Versity Gateway. Empty means AWS.
 	Endpoint string
 	// Region is the signing region. Empty defers to the default chain
 	// (AWS_REGION, the shared config); a region must come from

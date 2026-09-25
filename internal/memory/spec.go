@@ -16,7 +16,8 @@ const (
 	// BackendGCS stores them under a Google Cloud Storage prefix.
 	BackendGCS = "gcs"
 	// BackendS3 stores them under a prefix in an S3-compatible bucket
-	// (AWS S3, Garage, MinIO). See S3Store and docs/design/object-stores.md.
+	// (AWS S3, Garage, Versity Gateway). See S3Store and
+	// docs/design/object-stores.md.
 	BackendS3 = "s3"
 )
 
@@ -78,7 +79,7 @@ func PersonalVisibilities() []string { return []string{VisibilityPrivate, Visibi
 //	  prefix: kb/memory/
 //	  endpoint: https://s3.example.net   # omit for AWS
 //	  region: garage
-//	  path_style: true                   # Garage / MinIO; not AWS
+//	  path_style: true                   # Garage / versitygw; not AWS
 //	  sse: AES256                        # optional; SSE-S3 on AWS
 //
 // Absent, the collection is read-only and mk_save_memory refuses to
@@ -102,8 +103,8 @@ type Spec struct {
 	// Endpoint, Region and PathStyle address a type: s3 store, with the
 	// same meaning as on a type: s3 content source: Endpoint is the base
 	// URL for anything that is not AWS, Region the signing region,
-	// PathStyle the <endpoint>/<bucket>/ addressing Garage and MinIO
-	// need. SSE requests server-side encryption on every write
+	// PathStyle the <endpoint>/<bucket>/ addressing Garage and Versity
+	// Gateway need. SSE requests server-side encryption on every write
 	// ("AES256" for SSE-S3, "aws:kms" for SSE-KMS); Garage ignores it
 	// and encrypts at rest by its own configuration instead.
 	Endpoint  string `yaml:"endpoint,omitempty"`

@@ -22,7 +22,8 @@ import (
 )
 
 // S3Store is a memory store backed by a prefix in an S3-compatible
-// bucket: AWS S3, or a self-hosted store such as Garage or MinIO.
+// bucket: AWS S3, or a self-hosted store such as Garage or Versity
+// Gateway.
 //
 // # Optimistic locking, for real
 //
@@ -183,7 +184,7 @@ func (s *S3Store) verifyConditionalWrites(ctx context.Context) error {
 		return fmt.Errorf("%w: %s accepted a create-only write (If-None-Match: *) over an existing object — "+
 			"a shared memory store would lose updates here (Garage 2.4 is known to do this: it honours If-Match on GET but ignores "+
 			"If-None-Match: * and a stale If-Match on PUT); set single_writer: true if exactly one meerkat process writes this store, "+
-			"or use a backend that enforces conditional writes — AWS S3, MinIO, GCS (see docs/design/object-stores.md)",
+			"or use a backend that enforces conditional writes — AWS S3, Versity Gateway, GCS (see docs/design/object-stores.md)",
 			ErrConditionalWritesNotEnforced, s.Describe())
 	}
 	// If-Match against an ETag that is not current.
@@ -198,7 +199,7 @@ func (s *S3Store) verifyConditionalWrites(ctx context.Context) error {
 		return fmt.Errorf("%w: %s accepted an update (If-Match) against a stale ETag — "+
 			"a shared memory store would lose updates here (Garage 2.4 is known to do this: it honours If-Match on GET but ignores "+
 			"If-None-Match: * and a stale If-Match on PUT); set single_writer: true if exactly one meerkat process writes this store, "+
-			"or use a backend that enforces conditional writes — AWS S3, MinIO, GCS (see docs/design/object-stores.md)",
+			"or use a backend that enforces conditional writes — AWS S3, Versity Gateway, GCS (see docs/design/object-stores.md)",
 			ErrConditionalWritesNotEnforced, s.Describe())
 	}
 	return nil

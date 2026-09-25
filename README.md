@@ -612,7 +612,7 @@ MEERKAT_CONTENT_SOURCE=./content-source.yaml meerkat list
 - **`gcs`** loads a Google Cloud Storage `.tar.gz` object or bucket prefix —
   see below.
 - **`s3`** does the same from an S3-compatible bucket — AWS S3, Garage,
-  MinIO — see below.
+  Versity Gateway — see below.
 - **`git`** and **`submodule`** are build-time only (they need git and a
   working tree, which a shipped binary can't assume): naming one here fails
   with an explicit error rather than silently serving nothing. Run `make
@@ -717,8 +717,9 @@ overwrite cannot change what this binary serves.
 ### `type: s3`
 
 Loads content from an S3-compatible bucket — AWS S3, or a self-hosted
-store such as [Garage](https://garagehq.deuxfleurs.fr/) or MinIO — in the
-same two modes as `type: gcs`. Runtime-only.
+store such as [Garage](https://garagehq.deuxfleurs.fr/) or
+[Versity Gateway](https://github.com/versity/versitygw) — in the same
+two modes as `type: gcs`. Runtime-only.
 
 ```yaml
 # (a) bundle mode — one .tar.gz object, keyed by its ETag
@@ -735,7 +736,7 @@ content:
   prefix: kb/live/                  # stripped: kb/live/wiki/x.md -> wiki/x.md
   endpoint: https://s3.example.net  # required for anything that is not AWS
   region: garage                    # Garage checks it against its s3_region
-  path_style: true                  # Garage/MinIO: <endpoint>/<bucket>/…; not AWS
+  path_style: true                  # Garage/versitygw: <endpoint>/<bucket>/…; not AWS
 ```
 
 **Credentials: the AWS default chain, and nothing else.**
