@@ -53,6 +53,52 @@ The released artifacts are:
 > hit GitHub's anonymous API rate limit. Pulling the container image from
 > `ghcr.io` is likewise anonymous once the package is public.
 
+## Homebrew tap bump (after the release publishes)
+
+`brew install zegit-zoo/tap/meerkat` is served by a separate repository,
+[`zegit-zoo/homebrew-tap`](https://github.com/zegit-zoo/homebrew-tap),
+holding a single binary formula (`Formula/meerkat.rb`) that downloads
+the tarballs this release publishes.
+
+**Nothing in this repository's release workflow changes, and nothing
+here needs to know the tap exists.** The tap pulls; meerkat does not
+push. That is deliberate: goreleaser's `brews:`/`homebrew_casks:`
+blocks would require a cross-repo write token to live in *this* repo's
+secrets, which is exactly the kind of credential a release pipeline
+should not be holding. The bump runs in the tap instead, with only its
+own contents in scope.
+
+The tap's `bump.yml` workflow:
+
+1. runs on a 6-hourly cron (so a release is picked up within ~6 hours
+   with no action from anyone) or on manual dispatch;
+2. resolves the target tag — the newest `vX.Y.Z` release, or the one
+   given to the dispatch;
+3. downloads `meerkat_<v>_checksums.txt` and its
+   `...sigstore.json` bundle and **cosign-verifies the bundle against
+   the `release.yml` workflow identity** — the same check documented in
+   [Verifying a release](#verifying-a-release-consumer-side) below —
+   before reading a single hash out of that file;
+4. pins the per-platform SHA-256s into the formula and opens/merges the
+   bump.
+
+If the signature doesn't verify, the workflow fails and the formula
+keeps pointing at the previous release: a bad or unsigned release can
+never be pinned into the tap.
+
+To publish the bump immediately rather than waiting for the cron:
+
+```sh
+gh workflow run bump.yml --repo zegit-zoo/homebrew-tap -f tag=vX.Y.Z
+```
+
+Users on a brew install upgrade with `brew upgrade meerkat`; `mk
+update` refuses there (see
+[docs/INSTALL.md](INSTALL.md#updating-a-homebrew-install)), so the tap
+being stale is the only thing standing between a release and its
+Homebrew users — worth the manual dispatch on a release you care about
+landing fast.
+
 ## Tag protection
 
 `v*` tags are governed by a repository ruleset with no bypass:
