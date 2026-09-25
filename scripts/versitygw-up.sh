@@ -45,16 +45,21 @@ else
     -e ROOT_ACCESS_KEY="$ACCESS_KEY" -e ROOT_SECRET_KEY="$SECRET_KEY" \
     "$IMAGE" posix /data >/dev/null
 
+  # Readiness is "the gateway answers HTTP at all". versitygw's /health
+  # endpoint is opt-in (it 404s unless the path is configured), so an
+  # unauthenticated GET / is the probe: any status code means the
+  # listener is up, and a curl exit of 7 / a "000" code means it is not.
   ready=""
   for _ in $(seq 1 60); do
-    if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+    code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/" 2>/dev/null || true)"
+    if [[ -n "$code" && "$code" != "000" ]]; then
       ready=1
       break
     fi
     sleep 0.5
   done
   if [[ -z "$ready" ]]; then
-    echo "versitygw-up: no answer from GET http://127.0.0.1:${PORT}/health after 30s" >&2
+    echo "versitygw-up: no HTTP answer from http://127.0.0.1:${PORT}/ after 30s" >&2
     docker logs "$NAME" >&2 || true
     exit 1
   fi
