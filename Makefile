@@ -152,8 +152,8 @@ docs-check: ## CI gate: ensure docs/CLI.md is in sync with the cobra tree
 # Tune in the underlying tool config if you need to adjust.
 
 GOVULNCHECK_VERSION := latest
-GOSEC_VERSION       := v2.26.1
-GITLEAKS_VERSION    := v8.21.2
+GOSEC_VERSION       := v2.29.0
+GITLEAKS_VERSION    := v8.30.1
 
 GOBIN_DIR := $(shell go env GOBIN)
 ifeq ($(GOBIN_DIR),)
