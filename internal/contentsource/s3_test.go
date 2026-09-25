@@ -129,7 +129,11 @@ func TestFetchS3_BundleIsKeyedByETagAndReadWithIfMatch(t *testing.T) {
 	if f.cfg != (s3api.Config{Endpoint: "http://127.0.0.1:3900", Region: "garage", PathStyle: true}) {
 		t.Errorf("client built with %+v", f.cfg)
 	}
-	wantDir := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "meerkat", "content", "s3")
+	// Derive the expectation from os.UserCacheDir() rather than from
+	// XDG_CACHE_HOME: on macOS UserCacheDir ignores XDG and returns
+	// $HOME/Library/Caches, so the hardcoded form only passed on Linux.
+	base, _ := os.UserCacheDir()
+	wantDir := filepath.Join(base, "meerkat", "content", "s3")
 	if !strings.HasPrefix(dir, wantDir) || filepath.Base(dir) != etag {
 		t.Errorf("cache dir = %q, want under %s and named by the ETag", dir, wantDir)
 	}
