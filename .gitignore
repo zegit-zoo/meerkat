@@ -29,3 +29,8 @@ internal/sources/etc/*
 
 # content-source sync provenance stamp (written by `make sync`)
 .meerkat-content-stamp
+
+# Repo-local scanner installs: .tools/<name>@<version>/<name>, written
+# by the security targets in the Makefile. Never committed; drop them
+# with `make clean-tools` (`make clean` deliberately leaves them).
+/.tools/

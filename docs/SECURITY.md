@@ -40,8 +40,19 @@ make gitleaks        # gitleaks
 
 Each target self-installs the tool from a pinned version (see the
 `*_VERSION` block in `Makefile`) so devs don't need a separate
-setup step. Pinned versions keep results reproducible across the
-team.
+setup step. The install lands in a repo-local, version-named
+directory — `.tools/<name>@<version>/<name>` — and the target runs
+it from there by absolute path. **`$PATH` is never consulted**, so a
+Homebrew `gosec` or `gitleaks` earlier on your `$PATH` cannot quietly
+stand in for the pinned one and make your results differ from CI's;
+the version-named directory is also the stamp, since `GOBIN` pointed
+at it for exactly that `go install`. `govulncheck` is pinned the same
+way — its vulnerability *database* is still fetched live on every run,
+so the pin costs no freshness.
+
+`.tools/` is gitignored and excluded from the `gosec` walk. `make clean`
+deliberately leaves it in place (three tool builds are expensive to redo
+on every clean); `make clean-tools` removes it.
 
 ---
 
