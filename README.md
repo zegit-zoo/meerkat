@@ -23,13 +23,42 @@ and sources.
 
 ## Install
 
-First time install is manual; subsequent updates run via `mk update`.
-The repo is public, so both work anonymously — no login, token, or
-PAT required. If `gh auth login` has been run, `mk update` and the
+On macOS and Linuxbrew, install from the tap. Everywhere else, grab a
+release tarball; subsequent updates then run via `mk update`. The repo
+is public, so all of it works anonymously — no login, token, or PAT
+required. If `gh auth login` has been run, `mk update` and the
 commands below reuse the cached token for a higher GitHub API rate
 limit, but it's optional.
 
-### From a release tarball (recommended)
+### Homebrew (macOS / Linux) — recommended where `brew` is available
+
+```bash
+brew install zegit-zoo/tap/meerkat
+meerkat version
+
+brew upgrade meerkat               # how a brew install updates
+```
+
+The formula installs `meerkat`, the `mk` shorthand, and shell
+completions for bash/zsh/fish. It pins the sha256 of the same release
+tarballs linked below, taken from the cosign-verified checksums file —
+the tap re-verifies that signature on every bump, so `brew install`
+inherits the release's signing guarantees rather than replacing them.
+
+Two consequences worth knowing up front:
+
+- **`mk update` is disabled for Homebrew installs.** The binary lives
+  in the Cellar and belongs to `brew`; an in-place swap would be
+  undone by the next `brew upgrade`. `mk update` detects this and
+  refuses with a pointer to `brew upgrade meerkat`. `mk update
+  --check` still works — it only reads.
+- **The formula declares `conflicts_with "mk"`**, the unrelated Plan 9
+  `mk` build tool in homebrew/core. `brew` refuses to install both
+  rather than letting them fight over `$PATH`; see [Homebrew `mk`
+  collision](docs/INSTALL.md#homebrew-mk-collision) if you need both
+  tools on one machine.
+
+### From a release tarball (any platform)
 
 Releases are published to [GitHub Releases](https://github.com/zegit-zoo/meerkat/releases).
 
@@ -57,8 +86,11 @@ signature verification.
 On macOS with Homebrew, the `mk` shorthand above can collide with
 `homebrew/core/mk` (the unrelated Plan 9 `mk` build tool) if it's
 also installed — whichever one is first on `$PATH` wins, silently.
-See [Homebrew `mk` collision](docs/INSTALL.md#homebrew-mk-collision)
-for `$PATH` ordering / alias workarounds.
+Nothing detects that for you on this path: the tap formula declares
+`conflicts_with "mk"` so `brew` refuses the pair outright, but a
+tarball install is outside `brew`'s view. See [Homebrew `mk`
+collision](docs/INSTALL.md#homebrew-mk-collision) for `$PATH`
+ordering / alias workarounds.
 
 If `~/.local/bin` isn't on your `$PATH`, add it (see [docs/INSTALL.md](docs/INSTALL.md)).
 
@@ -77,6 +109,11 @@ make install            # → ~/.local/bin/{meerkat,mk}
 mk update --check       # newest GitHub release
 mk update               # download + verified swap
 ```
+
+Installed with `brew`? Use `brew upgrade meerkat` instead — `mk
+update` detects a Cellar install and refuses, since brew would undo
+the swap on its next run. `mk update --check` still reports the
+newest release either way.
 
 ### Container image
 

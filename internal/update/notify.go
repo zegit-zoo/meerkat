@@ -35,6 +35,9 @@ type notifyCache struct {
 //
 //	mk: a newer release is available — v0.4.1 (you have v0.4.0). Run `mk update`.
 //
+// For a Homebrew-managed binary the hint is `brew upgrade meerkat`
+// instead — `mk update` refuses to touch a Cellar install.
+//
 // Errors and missing-cache cases are silent. This is a courtesy,
 // not a critical path.
 func MaybeNotify(ctx context.Context, currentVersion string, w io.Writer) {
@@ -85,9 +88,32 @@ func emitNagIfNewer(w io.Writer, currentVersion, latestTag string) {
 	if !IsUpgrade(latestTag, currentVersion) {
 		return
 	}
+	// RunningFromHomebrew costs one os.Executable + one EvalSymlinks,
+	// and only on the runs where we are about to print a nag anyway —
+	// i.e. never on the overwhelmingly common "already current" path,
+	// which returned above. Nothing is cached: a stale answer here
+	// would be worse than the syscall, and a nag is by definition not
+	// a hot loop.
+	emitNag(w, currentVersion, latestTag, nagHint(RunningFromHomebrew()))
+}
+
+// nagHint picks the command the nag tells the user to run. A Homebrew
+// install can't self-update (see ErrHomebrewManaged), so pointing it at
+// `mk update` would send the user straight into a refusal.
+func nagHint(homebrew bool) string {
+	if homebrew {
+		return "`" + HomebrewUpgradeCommand + "`"
+	}
+	return "`mk update`"
+}
+
+// emitNag writes the nag line itself. Split out from emitNagIfNewer so
+// the wording — including the Homebrew/non-Homebrew hint switch — is
+// testable without a real binary sitting in a real Cellar.
+func emitNag(w io.Writer, currentVersion, latestTag, hint string) {
 	fmt.Fprintf(w,
-		"\nmk: a newer release is available — %s (you have %s). Run `mk update`.\n",
-		latestTag, currentVersion,
+		"\nmk: a newer release is available — %s (you have %s). Run %s.\n",
+		latestTag, currentVersion, hint,
 	)
 }
 

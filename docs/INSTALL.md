@@ -13,6 +13,9 @@ authenticated). See [Updating](#updating).
 
 Jump to:
 
+- [Install with Homebrew (macOS / Linux)](#install-with-homebrew-macos--linux)
+  - [Updating a Homebrew install](#updating-a-homebrew-install) (why
+    `mk update` refuses there)
 - [Install on macOS / Linux](#install-on-macos--linux)
 - [Homebrew `mk` collision](#homebrew-mk-collision)
 - [Atomic installs (macOS code signatures)](#atomic-installs-macos-code-signatures)
@@ -23,7 +26,82 @@ Jump to:
 - [Converging from a downstream fork](#converging-from-a-downstream-fork)
 - [Troubleshooting](#troubleshooting)
 
+## Install with Homebrew (macOS / Linux)
+
+Where `brew` is available — macOS, or Linuxbrew — this is the
+recommended path:
+
+```bash
+brew install zegit-zoo/tap/meerkat
+meerkat version
+```
+
+`zegit-zoo/tap` is a
+[Homebrew tap](https://github.com/zegit-zoo/homebrew-tap), i.e. a
+third-party formula repository; the command above taps it implicitly.
+The formula installs:
+
+- `meerkat` and the `mk` shorthand, and
+- shell completions for bash, zsh, and fish (no `make completion`
+  step, and no `compdef` wiring to add by hand).
+
+It is a **binary** formula: it downloads the same
+`meerkat_<v>_<os>_<arch>.tar.gz` release asset described below and
+pins its SHA-256 from the release's cosign-verified
+`meerkat_<v>_checksums.txt`. The tap's bump workflow re-verifies that
+Sigstore bundle against the `release.yml` workflow identity before
+writing any new hash into the formula, so `brew install` inherits the
+guarantees of [Verify the download](#verify-the-download) rather than
+replacing them with "trust the tap".
+
+### Updating a Homebrew install
+
+```bash
+brew upgrade meerkat
+```
+
+**`mk update` is disabled for Homebrew installs.** The binary lives
+in `$(brew --prefix)/Cellar/meerkat/<version>/bin/`, which `brew`
+owns: the file, its mode, the symlinks it wires into
+`$(brew --prefix)/bin`, and the install receipt. `mk update` swaps
+the running binary in place, so on a Cellar install it would leave
+`brew` reporting the old version and the next `brew upgrade`,
+`brew reinstall`, or dependent relink would silently discard the
+self-updated binary. `mk update` detects this before any download and
+refuses:
+
+```console
+$ mk update
+meerkat: this install is managed by Homebrew — replacing the binary in
+place would be undone by the next `brew upgrade`; run `brew upgrade
+meerkat` instead
+```
+
+`mk update --check` still works everywhere — it only reads — and
+names `brew upgrade meerkat` as the update path on a brew install.
+The same refusal applies to `meerkat-bootstrap --destination` when
+the destination resolves into a Cellar.
+
+Detection is by install location, not by a build flag: the resolved
+executable path (symlinks followed, since `$(brew --prefix)/bin/mk`
+is a symlink into the Cellar) either has a `Cellar` path component or
+sits under `$HOMEBREW_PREFIX/Cellar`. A tarball install that you
+placed in `/opt/homebrew/bin` yourself is *not* affected — it isn't
+in the Cellar, and `mk update` handles it normally.
+
+### The `mk` shorthand under Homebrew
+
+The formula declares `conflicts_with "mk"`, the unrelated Plan 9 `mk`
+build tool in homebrew/core, so `brew` refuses to install both rather
+than letting them fight over `$PATH`. See
+[Homebrew `mk` collision](#homebrew-mk-collision) for what to do if
+you need both tools on one machine.
+
 ## Install on macOS / Linux
+
+Use this path when `brew` isn't available or isn't wanted: Linux
+without Linuxbrew, CI images, or any time you want the binary
+somewhere `brew` doesn't manage.
 
 No login required — the repo is public. Install `gh` from
 <https://cli.github.com> if you don't have it, or use the curl/wget
@@ -86,6 +164,11 @@ by platform:
 | `/usr/local/bin` (Intel macOS) | `root:wheel` | ✗ requires sudo |
 | `/usr/local/bin` (Apple Silicon macOS) | `root:wheel` | ✗ requires sudo |
 | `/usr/bin`, `/bin` (Linux) | `root:root` | ✗ requires sudo |
+| `$(brew --prefix)/Cellar/meerkat/...` | you | ✗ refused — use `brew upgrade meerkat` |
+
+The Cellar row is not about permissions: the directory is yours to
+write, and `mk update` refuses anyway because `brew` owns what's in
+it. See [Updating a Homebrew install](#updating-a-homebrew-install).
 
 If you already installed to a root-owned directory and want to
 move to `~/.local/bin` so future `mk update`s don't need sudo:
@@ -110,6 +193,17 @@ convenience symlink to `meerkat`, so if both end up on `$PATH`,
 whichever directory comes first wins — silently, and without an
 error. Which `mk` runs depends entirely on shell startup order, not
 on which one you meant.
+
+**If you installed meerkat from the tap, `brew` prevents this for
+you**: the formula declares `conflicts_with "mk"`, so `brew` refuses
+to install `zegit-zoo/tap/meerkat` and `homebrew/core/mk` at the same
+time and tells you which one is in the way. Nothing silent happens.
+`brew unlink mk` / `brew unlink meerkat` lets you keep both formulae
+installed with only one linked at a time.
+
+Everything below applies to installs `brew` can't see — a release
+tarball, `make install`, or a binary you copied in by hand — where
+the collision is still yours to resolve.
 
 Check what actually resolves:
 
@@ -348,6 +442,13 @@ mk update --force                      # downgrade or re-install
 mk update --yes                        # skip confirmation
 ```
 
+**Homebrew installs update with `brew upgrade meerkat` instead** —
+`mk update` refuses to replace a binary in the Cellar, for the
+reasons in [Updating a Homebrew
+install](#updating-a-homebrew-install). Only `mk update --check`,
+which never writes anything, behaves identically on both kinds of
+install.
+
 `mk update` works with no authentication — the repo is public. If
 you've run `gh auth login`, `mk update` reuses the cached GitHub OAuth
 token via the `gh` CLI for a higher API rate limit; `gh auth status`
@@ -471,6 +572,15 @@ approach `make install` and `mk update` both already use (see [Atomic
 installs](#atomic-installs-macos-code-signatures) above) — so the
 symlink itself, and anything else nearby, is left untouched.
 
+One destination is refused outright: a path that resolves into a
+Homebrew Cellar. `brew` owns those files and would discard the
+install on its next run, so `meerkat-bootstrap` stops with the same
+message `mk update` gives — see [Updating a Homebrew
+install](#updating-a-homebrew-install). Since the default
+`--destination` is whatever `meerkat`/`mk` resolves to on `$PATH`,
+and a brew install puts a symlink there, this is checked against the
+symlink's resolved target rather than the path you typed.
+
 ### Rollback
 
 The previous binary is kept as `<destination>.old` until the newly
@@ -510,6 +620,7 @@ flag on `mk update` itself).
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
+| `mk update`: `this install is managed by Homebrew` | meerkat was installed with `brew install zegit-zoo/tap/meerkat`, so the binary lives in the Cellar and belongs to `brew` — an in-place swap would be undone by the next `brew upgrade` | Run `brew upgrade meerkat`. `mk update --check` still works. See [Updating a Homebrew install](#updating-a-homebrew-install). |
 | `mk update`: `install directory requires elevated privileges` | Binary installed in a root-owned directory (typically `/usr/local/bin` or `/usr/bin`) | Enter your password when `sudo` prompts. Permanent fix: move install to `~/.local/bin` (see [Why `~/.local/bin`](#why-localbin-and-not-usrlocalbin) above). |
 | `mk update`: `install with sudo failed` | `sudo` was unavailable, cancelled, or the final copy/move failed | Re-run `mk update` and complete the `sudo` prompt, or move install to `~/.local/bin`. |
 | `mk update`: `GitHub returned 401/403 ... likely the anonymous API rate limit` | Too many unauthenticated requests from your IP (60/hr) | `gh auth login` once for the higher authenticated rate limit (5000/hr), or wait an hour |

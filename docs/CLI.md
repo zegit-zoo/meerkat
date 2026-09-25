@@ -782,6 +782,12 @@ token from gh's OAuth credential cache and sends it for the higher
 authenticated GitHub API rate limit — there are no PATs to paste
 either way.
 
+Installed via Homebrew (brew install zegit-zoo/tap/meerkat)? The
+binary lives in the Cellar and belongs to brew, so an in-place swap
+would be undone by the next 'brew upgrade'. This command refuses to
+touch such an install; run 'brew upgrade meerkat' instead. --check
+still works everywhere — it only reads.
+
 Examples:
   mk update --check                  # just print latest version
   mk update                          # interactive: prompt before swap

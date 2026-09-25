@@ -191,6 +191,21 @@ release:
     docs/design/upstream-migration.md#converging-from-a-downstream-fork.
 
 # Distribution: tagged releases publish cross-built tarballs to the
-# GitHub Releases page. First-time install is manual (see README).
-# Subsequent updates flow through `mk update`.
-# (No Homebrew tap — keeps the supply chain to one repo.)
+# GitHub Releases page. First-time install is either `brew install
+# zegit-zoo/tap/meerkat` or a manual tarball download (see README).
+# Tarball installs then update through `mk update`; brew installs
+# through `brew upgrade meerkat` (`mk update` refuses to replace a
+# binary in the Cellar — see internal/update/homebrew.go).
+#
+# The Homebrew tap lives in its own repo, zegit-zoo/homebrew-tap, and
+# holds a binary formula that downloads the archives produced above,
+# pinning their sha256s from this release's cosign-verified
+# meerkat_<v>_checksums.txt. Its bump workflow re-verifies the Sigstore
+# bundle against the release.yml workflow identity before pinning
+# anything.
+#
+# Note the direction: the tap pulls, this repo does not push. goreleaser's
+# `brews:` / `homebrew_casks:` blocks are deliberately NOT used, because
+# they would require a cross-repo write token in this repository's
+# secrets — a credential a release pipeline has no business holding.
+# Bumping runs in the tap, scoped to the tap. See docs/RELEASE.md.
