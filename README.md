@@ -3,16 +3,23 @@
 Part of the [zegit](https://zegit.dev/) platform — meerkat *knows*.
 Full documentation: [zegit.dev/documentation/meerkat.html](https://zegit.dev/documentation/meerkat.html).
 
-Single-binary CLI that bundles a knowledge base and exposes it via:
+Single static binary that serves a knowledge base over:
 
-- **CLI** — `mk search`, `mk show`, `mk list`, `mk ingest`
+- **CLI** — `mk search`, `mk show`, `mk list`, `mk lint`, `mk ingest`
 - **MCP** server (Model Context Protocol) — for agent harnesses / OpenCode / Claude Desktop
 - **HTTP/OpenAPI** server with bearer-token auth — for OpenWebUI
 
-The wiki is **embedded into the binary at build time** so search/show/list
-work offline with zero runtime dependencies. The body of content and its
-ingestion sources are configuration — point meerkat at your own content
-and sources.
+**The binary carries no content of its own.** It **loads a knowledge base at
+runtime** — a directory on disk, a verified HTTPS archive, a GCS or S3
+bucket, or several of those mounted side by side as named collections —
+from a `--kb-dir` flag or a `content-source.yaml`. Nothing is fetched until
+you point it somewhere, and search/show/list then answer from the resolved
+content with no service to call. See ["Loading content"](#loading-content).
+
+A build from source can instead bake content into the binary for a
+self-contained offline artefact; that is the optional secondary path, and
+it is the only way to use a git repo or a submodule as the source — see
+["Embedding content at build time"](#optional-embedding-content-at-build-time).
 
 > **Early development — pre-1.0.** This project is still under active
 > development and should not be expected to be stable until 1.0. Commands,
@@ -131,42 +138,45 @@ docker run --rm --read-only --user 65532:65532 \
   http serve --host 0.0.0.0 --api-key "$MEERKAT_API_KEY"
 ```
 
-The image runs non-root (numeric UID/GID `65532`) on a distroless base
-and needs no writable filesystem for the default embedded-content path —
-`--read-only` above is not just permitted, it's the recommended way to
-run it. See [docs/CONTAINER.md](docs/CONTAINER.md) for the full run
-reference (read-only-fs flags, the cache-dir mount needed only for
-`--content-source` `type: url`, and cosign verification).
+The image runs non-root (numeric UID/GID `65532`) on a distroless base, and
+is built with no content source — so like every other published artefact it
+needs a runtime knowledge base (bind-mount a directory and pass `--kb-dir`,
+or mount a `content-source.yaml`). `--read-only` is not just permitted,
+it's the recommended way to run it: a `type: local` source writes nothing at
+all, and `type: url`/`gcs`/`s3` need only `/home/nonroot/.cache` to be
+writable. See [docs/CONTAINER.md](docs/CONTAINER.md) for the full run
+reference (read-only-fs flags, the content-cache mount, and cosign
+verification).
 
 ## Use
 
-> **The knowledge base ships empty.** The public repo intentionally embeds
-> no content — `internal/kb/content/` and `internal/sources/etc/` hold only
-> placeholders, so every example below returns nothing on a fresh build.
-> Point meerkat at your own content repo by adding a `content-source.yaml`
-> at the repo root, e.g.:
->
-> ```yaml
-> content:
->   type: local
->   path: ../your-kb-repo
-> ```
->
-> `type: local` needs no credentials of any kind — this is the default for
-> most users, who build from their own knowledge-base directory on disk.
-> (`type: git` and `type: submodule` also work — see
-> [`content-source.example.yaml`](content-source.example.yaml) and
-> [docs/design/content-sources.md](docs/design/content-sources.md) for the
-> full schema.) For `type: git`, a private GitHub repo (`host: github`)
-> automatically uses a cached `gh` CLI token if one is present; GitLab (or
-> any other host) has no credential borrowing — use a full clone URL / SSH
-> spec, or your normal git credential configuration, for private access.
-> `make build` runs `make sync`, which reads this file and populates the
-> embed dirs before compiling. To update content **without** rebuilding, see
-> ["Serving content at runtime"](#serving-content-at-runtime) below.
+A fresh install serves nothing until you point it at a knowledge base. The
+shortest way is a directory on disk in the
+[content-repo layout](#--kb-dir--meerkat_kb_dir) — no credentials, no config
+file, nothing fetched. For anything you'd rather not repeat on every
+invocation — an HTTPS archive, a GCS or S3 bucket, several named
+collections, auth, telemetry — write a `content-source.yaml` where meerkat
+discovers it:
 
 ```bash
-# Knowledge base (offline, always available)
+mk --kb-dir ./meerkat-kb search "rate limiting"    # or: export MEERKAT_KB_DIR=…
+
+mkdir -p ~/.config/meerkat     # macOS: ~/Library/Application Support/meerkat
+printf 'content:\n  type: local\n  path: /path/to/your-kb-repo\n' \
+  > ~/.config/meerkat/content-source.yaml
+mk list                                            # now serves that directory
+```
+
+meerkat resolves **one** source per invocation, highest priority first:
+`--kb-dir`/`MEERKAT_KB_DIR`, then `--content-source`/`MEERKAT_CONTENT_SOURCE`,
+then `<user config dir>/meerkat/content-source.yaml`, then
+`./content-source.yaml`, then the binary's own embedded content — which is
+empty in every published release. `mk version` always reports which one won,
+as `kb_source`. Every backend, the precedence rules in full and the
+`content-source.yaml` schema: ["Loading content"](#loading-content).
+
+```bash
+# Knowledge base (answered locally, no service to call)
 mk search "rate limiting"
 mk search "circuit breaker" --limit 20
 mk show concepts/Rate-Limiting
@@ -518,7 +528,7 @@ prompt declared in the source's entry in your content repo's
 `ingestion/sources.yaml`.
 
 ```text
-embedded sources.yaml
+sources.yaml (from the resolved content source)
         │
         ▼
 mk ingest (planner) ──► JSONL batch
@@ -552,13 +562,13 @@ The Go binary ships **without LLM credentials**. The actual model calls happen
 inside `opencode run` subprocess sessions, which inherit the user's OpenCode
 config (model providers, MCP server connections, etc).
 
-## Serving content at runtime
+## Loading content
 
-By default the wiki is embedded at build time (see ["Use"](#use) above), so
-picking up new content means rebuilding. Four other mechanisms serve content
-without a rebuild; `mk`/`meerkat` resolves one at startup, in this order —
-highest priority first, each step consulted only if the one above is unset
-(steps 1-2) or not found (steps 3-4):
+This is the main path: an installed meerkat carries no content and is told
+at startup where its knowledge base lives. Four mechanisms can say so, and
+`mk`/`meerkat` consults them in this order — highest priority first, each
+step reached only if the one above is unset (steps 1-2) or not found
+(steps 3-4):
 
 1. `--kb-dir` (or `MEERKAT_KB_DIR`) — an explicit content-repo directory.
    Wins outright over everything below.
@@ -568,9 +578,12 @@ highest priority first, each step consulted only if the one above is unset
    on Linux, `~/Library/Application Support/meerkat/` on macOS).
 4. `content-source.yaml` in the working directory (wherever `mk`/`meerkat`
    is invoked from — not a repo root).
-5. The embedded build — the fallback when none of the above apply (the
-   single-self-contained-binary property is unchanged when no directory or
-   config is present).
+5. The binary's embedded content — the fallback when none of the above
+   apply. Every published artefact (the Homebrew formula, the release
+   tarballs, the `ghcr.io` image) is built with no content source, so this
+   step serves an empty knowledge base unless you produced the binary
+   yourself and [embedded content at build
+   time](#optional-embedding-content-at-build-time).
 
 Once a step is used, its `content.type` decides the outcome on its own —
 including `type: none`, which resolves to the embedded fallback without
@@ -581,8 +594,9 @@ single source — see [Multiple collections](#multiple-collections).
 
 ### `--kb-dir` / `MEERKAT_KB_DIR`
 
-Points meerkat at a directory on disk instead of the embedded build — `mk
-search`/`show`/`list` then serve that content directly, no rebuild required:
+The simplest way in: point meerkat at a directory on disk and `mk
+search`/`show`/`list` serve that content directly, with no config file and
+no credentials:
 
 ```bash
 mk --kb-dir ./meerkat-kb search "rate limiting"
@@ -592,8 +606,7 @@ MEERKAT_KB_DIR=./meerkat-kb mk list
 Precedence: `--kb-dir` flag, then `MEERKAT_KB_DIR` (step 1 above).
 
 The directory uses the **content-repo layout** — the same layout
-`content-source.yaml` describes and `mk ingest` writes into — not the
-internal embed layout:
+`content-source.yaml` describes and `mk ingest` writes into:
 
 ```text
 meerkat-kb/
@@ -611,11 +624,11 @@ meerkat-kb/
 
 Because this is the same layout `mk ingest --execute` commits into, pointing
 `--kb-dir` at a working copy of your content repo means ingest output
-becomes visible with no rebuild between ingesting a page and searching it.
+becomes visible with nothing in between ingesting a page and searching it.
 
 A `--kb-dir` that doesn't exist is a hard error (exit 1). A directory that
 exists but is missing `wiki/`, `ingestion/`, or `templates/` degrades to
-empty for the missing piece — same as the public build's zero-content embed.
+empty for the missing piece — the same answer a content-free binary gives.
 
 `--kb-dir`/`MEERKAT_KB_DIR` always use the default paths shown above, even
 if a `content-source.yaml` elsewhere declares a custom `layout:` block — a
@@ -638,23 +651,21 @@ meerkat --content-source ./content-source.yaml list
 MEERKAT_CONTENT_SOURCE=./content-source.yaml meerkat list
 ```
 
-- **`none`** (or no file found at all) serves the embedded build.
-- **`local`** resolves a relative `path` against **the config file's own
-  directory** — not the working directory, and not a repo root. (This
-  differs from the build-time resolver, which resolves it against the repo
-  root `make sync` runs from.) An absolute `path` behaves the same either
-  way. A resolved directory that doesn't exist is a hard error, same as
-  `--kb-dir`.
-- **`url`** fetches and caches an HTTPS archive — see below.
-- **`gcs`** loads a Google Cloud Storage `.tar.gz` object or bucket prefix —
-  see below.
-- **`s3`** does the same from an S3-compatible bucket — AWS S3, Garage,
-  Versity Gateway — see below.
+- **`local`** — a directory on disk, no credentials. A relative `path`
+  resolves against **the config file's own directory** — not the working
+  directory, and not a repo root. (The build-time resolver differs: it
+  resolves against the repo root `make sync` runs from.) An absolute `path`
+  behaves the same either way. A resolved directory that doesn't exist is a
+  hard error, same as `--kb-dir`. A local source is re-read per request.
+- **`url`**, **`gcs`** and **`s3`** fetch, verify and cache a remote
+  archive or object prefix — one subsection each, below.
+- **`none`** (or no file found at all) serves the binary's embedded content,
+  which is empty in every published release.
 - **`git`** and **`submodule`** are build-time only (they need git and a
   working tree, which a shipped binary can't assume): naming one here fails
-  with an explicit error rather than silently serving nothing. Run `make
-  sync` to embed it at build time instead, or switch to `type: local`/
-  `type: url`/`type: gcs`/`type: s3` for a runtime-resolved source.
+  with an explicit error rather than silently serving nothing. Switch to
+  `type: local`/`url`/`gcs`/`s3` for a runtime-resolved source, or
+  [embed it at build time](#optional-embedding-content-at-build-time).
 
 A `layout:` block in this file **is** honoured at runtime for `type: local`,
 `type: url`, `type: gcs` and `type: s3` sources — unlike `--kb-dir`, above.
@@ -1095,28 +1106,18 @@ Like `url:`, the token after `@` on a `gcs:` or `s3:` line is a *checked*
 property of what's being served — the conditional read cannot return another
 generation or ETag — not a label, unlike `disk:`.
 
-With several collections mounted, `mk version --json` also carries a
-`collections` array (`name`, `type`, `source`) in configuration order, and
-the plain-text output itemises them, so a multi-collection deployment
-reports everything it serves:
+`mk version --json` also carries a `collections` array — `{name, type,
+source}` per collection, in configuration order — and the plain-text output
+itemises them, so a multi-collection deployment reports everything it
+serves. A single-collection deployment reports one entry named `default`,
+with `kb_source` unchanged from what it always was.
 
-```json
-{
-  "kb_source": "collections:2",
-  "collections": [
-    {"name": "runbooks", "type": "local", "source": "disk:/srv/runbooks-kb"},
-    {"name": "architecture", "type": "gcs", "source": "gcs://my-org-knowledge/bundles/architecture-v3.tar.gz@1748112233445566"}
-  ]
-}
-```
-
-A single-collection deployment reports one entry named `default`, with
-`kb_source` unchanged from what it always was.
-
-`kb_commit` is unchanged by any of this — it always names the build-time
-embedded content's commit, never a runtime directory's or archive's. See
-[docs/SECURITY.md](docs/SECURITY.md) for what that split means for
-provenance.
+`kb_commit` is a different field and answers a different question: it names
+the commit of the content **embedded at build time**, never a runtime
+directory's or archive's. On a published release it is therefore `none` —
+the runtime source's provenance is `kb_source`. See
+[docs/SECURITY.md](docs/SECURITY.md#kb_commit-vs-kb_source-the-provenance-split)
+for what that split means.
 
 ### OKF bundles
 
@@ -1144,21 +1145,51 @@ to meerkat's, the trust-tier/staleness signals it surfaces, and what's
 deliberately not implemented (cross-link resolution, the Attested
 Computation family).
 
+### Optional: embedding content at build time
+
+A build from source can bake a knowledge base into the binary instead, for a
+single artefact that carries its own content. It is **not** how the
+published releases are built and nothing above needs it — but it is the only
+way to use `type: git` or `type: submodule`, and the only way to get a
+`kb_commit` provenance stamp. Put a `content-source.yaml` at the **repo
+root** with a build-time type:
+
+```yaml
+content:
+  type: local            # or: git (repo/host/ref) | submodule
+  path: ../your-kb-repo  # relative to the repo root, or absolute
+```
+
+`make build` runs `make sync`, which resolves that file into
+`internal/kb/content/` and `internal/sources/etc/` before compiling; with no
+such file it leaves the committed empty placeholders alone. The resolved
+content commit is stamped in and reported by `mk version` as `kb_commit`.
+For `type: git`, a private GitHub repo (`host: github`) borrows a cached
+`gh` CLI token if one is present; GitLab and other hosts have no credential
+borrowing — use a full clone URL / SSH spec or your normal git credential
+configuration. Pin `ref` to a tag or SHA; a moving branch warns.
+
+Refreshing means rebuilding: `make build` re-resolves the source, and
+`make kb-update` (`git submodule update --remote --recursive`) updates a
+`type: submodule` source first. `make sync` will not fetch `type: url`,
+`gcs` or `s3` — those are runtime-only. Full schema:
+[content-source.example.yaml](content-source.example.yaml),
+[docs/design/content-sources.md](docs/design/content-sources.md).
+
 ## How search works
 
-Bleve full-text BM25 index, built in-memory at startup from the embedded
-markdown. Title gets ×5 boost, ID gets ×3, body baseline. Reference
-measurement from an internal deployment: cold-start ~150 ms on ~700 pages.
-The public repo ships no content, so your own cold-start time depends on
-the size of the content repo you point `content-source.yaml` at.
+Bleve full-text BM25 index, built in-memory at startup from whichever
+content was resolved. Title gets ×5 boost, ID gets ×3, body baseline.
+Reference measurement from an internal deployment: cold-start ~150 ms on
+~700 pages. Your own cold-start time depends on the size of the knowledge
+base you point meerkat at.
 
 ### Load speed with content from disk
 
-The figure above is for content embedded at build time. If you take the
-pristine binary and point it at your own knowledge base (see ["Serving
-content at runtime"](#serving-content-at-runtime)), the index is built from
-disk at startup instead — so the cost lands differently depending on how
-meerkat is run.
+The figure above was measured against content embedded at build time. Point
+a published binary at your own knowledge base (see ["Loading
+content"](#loading-content)) and the index is built from disk at startup
+instead — so the cost lands differently depending on how meerkat is run.
 
 Measured against [meerkat-bim](https://github.com/JonasLundin/meerkat-bim),
 an OKF bundle of 67 concepts / 0.72 MB of markdown (averaging ~10 KB per

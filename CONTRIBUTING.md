@@ -22,9 +22,15 @@ make build       # -> bin/meerkat (+ bin/mk symlink)
 `make build` depends on `make sync`, which populates the embedded
 content dirs from `content-source.yaml`. There's no `content-source.yaml`
 in this repo by default, so `sync` falls back to the committed empty
-placeholders — that's fine for building and running the test suite. To
-point the build at a real knowledge base, copy `content-source.example.yaml`
-to `content-source.yaml` and see `docs/INSTALL.md`.
+placeholders — that's fine for building and running the test suite.
+
+To exercise the binary against real content, point it at a knowledge
+base **at runtime** — `./bin/mk --kb-dir ../your-kb-repo search foo`, or
+a `content-source.yaml` — exactly as an installed meerkat does. That is
+the path users take, so it's the one to test against. Embedding content
+at build time is a separate, optional path (copy
+`content-source.example.yaml` to `content-source.yaml` at the repo
+root); both are described in the README's "Loading content".
 
 ## One-time setup: install the hooks
 
