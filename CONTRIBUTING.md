@@ -88,6 +88,9 @@ locally before you push:
 | Lint | `make lint` | golangci-lint: govet, staticcheck, errcheck, gosec, unused, misspell, unconvert, unparam, prealloc, whitespace, bodyclose, gofmt/goimports |
 | Lint → tidy check | `go mod tidy` (then `git diff --exit-code -- go.mod go.sum`) | `go.mod`/`go.sum` must already be tidy — drift fails CI |
 | Lint → docs check | `make docs-check` | `docs/CLI.md` is **generated** from the cobra command tree; if it's stale, CI fails |
+| Lint → lint config | `make lint-config` | `.golangci.yml` validates against the pinned golangci-lint's schema (the commit hook only runs when that file changes) |
+| Lint → toolchain pins | `make toolchain-check` | the Dockerfile's `ARG GO_VERSION` equals `go.mod`'s `toolchain` — bump both, and the golang base-image digest, together |
+| Hygiene | `make hygiene` | the commit-stage hygiene hooks (end-of-file, trailing whitespace, YAML syntax, merge markers, files over 2 MiB) over the whole tree, so a commit made without hooks is still checked |
 | Test | `make cover-check` | full test suite with `-race` (needs `CGO_ENABLED=1`), then fails if total coverage drops below the floor in `Makefile` (`COVERAGE_MIN`, currently `48`) |
 | Vulnerability scan | `make vuln` | govulncheck against the actual import graph |
 | gosec | `make gosec` | gosec's own high-severity pass over our code (HIGH severity + medium confidence fails); `release.yml`'s `verify` job runs this same target as a release gate |
@@ -108,9 +111,11 @@ the race test suite and `govulncheck` (lint is a commit-stage hook, so
 
 Security scans (`vuln`, `gosec`, `gitleaks`) run in CI as separate jobs
 and, apart from `vuln` on push, aren't part of the local gates since
-they're slower; run them together with `make pre-release` before tagging
-a release, or individually with `make vuln` / `make gosec` /
-`make gitleaks`. See `docs/SECURITY.md` for what each scanner catches
+they're slower; run them individually with `make vuln` / `make gosec` /
+`make gitleaks`, or run every CI gate that needs no external service
+with `make pre-release` before tagging a release: lint, the test suite
+with the coverage floor, docs-check, lint-config, toolchain-check,
+hygiene and the three scans. See `docs/SECURITY.md` for what each scanner catches
 and how to fix findings.
 
 ### If `docs/CLI.md` is out of sync

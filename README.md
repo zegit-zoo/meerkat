@@ -1287,7 +1287,7 @@ Contributions go through a normal fork → branch → pull-request flow against
 ```bash
 pre-commit install && pre-commit install --hook-type pre-push   # once per clone
 make pre-push          # one-shot: lint + test + docs-check
-make pre-release       # ... plus vuln + gosec + gitleaks, before tagging
+make pre-release       # every CI gate but the S3 conformance jobs, before tagging
 ```
 
 ## Repo layout

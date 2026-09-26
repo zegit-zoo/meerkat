@@ -41,6 +41,16 @@ jobs:
       - name: Lint
         run: make lint
 
+      # .golangci.yml is otherwise schema-checked only by a commit hook
+      # that fires when the file changes (#80 review).
+      - name: Lint config
+        run: make lint-config
+
+      # The Dockerfile's Go pin must match go.mod's toolchain; nothing
+      # else reads it (#80 review).
+      - name: Go toolchain pins agree
+        run: make toolchain-check
+
       - name: Check go.mod / go.sum tidy
         run: |
           go mod tidy
@@ -99,6 +109,21 @@ jobs:
       # embed dirs are populated before the scan walks them.
       - name: gosec
         run: make gosec
+
+  # The commit-stage hygiene hooks (end-of-file, whitespace, YAML, merge
+  # markers, large files) have no job of their own, so a commit made
+  # without hooks would skip them entirely (#80 review). Literal
+  # ubuntu-latest: pre-commit needs Python and pipx, which the ARC job
+  # container does not promise.
+  hygiene:
+    name: Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Hygiene hooks over the whole tree
+        env:
+          PRE_COMMIT: pipx run --spec pre-commit==4.6.2 pre-commit
+        run: make hygiene
 
   markdown:
     name: Markdown lint
