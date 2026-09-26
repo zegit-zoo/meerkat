@@ -178,8 +178,11 @@ release:
   footer: |
     ---
 
-    Run `mk version` to see the knowledge-base commit embedded in this
-    build.
+    These binaries ship with **no knowledge-base content** (`mk version`
+    reports `kb_commit: none`). Point meerkat at a knowledge base at
+    runtime — `--kb-dir`, or a `content-source.yaml` — and `mk version`
+    reports what it resolved as `kb_source`. See the README's
+    "Loading content".
 
     Third-party licenses for statically linked dependencies are
     included in each archive as `THIRD-PARTY-LICENSES.txt`.

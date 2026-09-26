@@ -25,7 +25,7 @@ concept files (and an optional `index.md`/`log.md`) sit directly under
 it, with no wrapping directory. meerkat's `--kb-dir` and
 `content-source.yaml` instead resolve against the **content-repo
 layout** (a `wiki/` subdirectory holding the pages — see the README's
-["Serving content at runtime"](../README.md#serving-content-at-runtime)),
+["Loading content"](../README.md#loading-content)),
 so point `layout.wiki` at the bundle root:
 
 ```yaml

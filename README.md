@@ -3,16 +3,23 @@
 Part of the [zegit](https://zegit.dev/) platform — meerkat *knows*.
 Full documentation: [zegit.dev/documentation/meerkat.html](https://zegit.dev/documentation/meerkat.html).
 
-Single-binary CLI that bundles a knowledge base and exposes it via:
+Single static binary that serves a knowledge base over:
 
-- **CLI** — `mk search`, `mk show`, `mk list`, `mk ingest`
+- **CLI** — `mk search`, `mk show`, `mk list`, `mk lint`, `mk ingest`
 - **MCP** server (Model Context Protocol) — for agent harnesses / OpenCode / Claude Desktop
 - **HTTP/OpenAPI** server with bearer-token auth — for OpenWebUI
 
-The wiki is **embedded into the binary at build time** so search/show/list
-work offline with zero runtime dependencies. The body of content and its
-ingestion sources are configuration — point meerkat at your own content
-and sources.
+**The binary carries no content of its own.** It **loads a knowledge base at
+runtime** — a directory on disk, a verified HTTPS archive, a GCS or S3
+bucket, or several of those mounted side by side as named collections —
+from a `--kb-dir` flag or a `content-source.yaml`. Nothing is fetched until
+you point it somewhere, and search/show/list then answer from the resolved
+content with no service to call. See ["Loading content"](#loading-content).
+
+A build from source can instead bake content into the binary for a
+self-contained offline artefact; that is the optional secondary path, and
+it is the only way to use a git repo or a submodule as the source — see
+["Embedding content at build time"](#optional-embedding-content-at-build-time).
 
 > **Early development — pre-1.0.** This project is still under active
 > development and should not be expected to be stable until 1.0. Commands,
@@ -63,36 +70,25 @@ Two consequences worth knowing up front:
 Releases are published to [GitHub Releases](https://github.com/zegit-zoo/meerkat/releases).
 
 ```bash
-# pick your platform
 PLATFORM=darwin_arm64   # darwin_arm64 / darwin_amd64 / linux_amd64 / linux_arm64
 
-# download + extract the latest release in one step
-gh release download \
-  --repo zegit-zoo/meerkat \
-  -p "meerkat_*_${PLATFORM}.tar.gz" \
-  --output - \
-  | tar -xz -C ~/.local/bin meerkat
-
-ln -sf meerkat ~/.local/bin/mk     # convenience short alias
+gh release download --repo zegit-zoo/meerkat \
+  -p "meerkat_*_${PLATFORM}.tar.gz" --output - \
+  | tar -xz -C ~/.local/bin meerkat      # no tag argument = latest release
+ln -sf meerkat ~/.local/bin/mk           # convenience short alias
 meerkat version
 ```
 
-No tag is pinned above — `gh release download` with no tag argument
-fetches the latest release. If you hit GitHub's anonymous API rate
+Windows ships a `.zip` instead. If you hit GitHub's anonymous API rate
 limit, `gh auth login` (or `export GH_TOKEN=...`) raises it; see
-[docs/INSTALL.md](docs/INSTALL.md) for a curl/wget alternative and
+[docs/INSTALL.md](docs/INSTALL.md) for Windows, a curl/wget alternative and
 signature verification.
 
-On macOS with Homebrew, the `mk` shorthand above can collide with
-`homebrew/core/mk` (the unrelated Plan 9 `mk` build tool) if it's
-also installed — whichever one is first on `$PATH` wins, silently.
-Nothing detects that for you on this path: the tap formula declares
-`conflicts_with "mk"` so `brew` refuses the pair outright, but a
-tarball install is outside `brew`'s view. See [Homebrew `mk`
-collision](docs/INSTALL.md#homebrew-mk-collision) for `$PATH`
-ordering / alias workarounds.
-
-If `~/.local/bin` isn't on your `$PATH`, add it (see [docs/INSTALL.md](docs/INSTALL.md)).
+A tarball install is outside `brew`'s view, so the `conflicts_with`
+guard above does not apply: if `homebrew/core/mk` is also installed,
+whichever `mk` is first on `$PATH` wins, silently. See [Homebrew `mk`
+collision](docs/INSTALL.md#homebrew-mk-collision). If `~/.local/bin`
+isn't on your `$PATH`, add it.
 
 ### From source
 
@@ -106,14 +102,9 @@ make install            # → ~/.local/bin/{meerkat,mk}
 ### Updating
 
 ```bash
-mk update --check       # newest GitHub release
-mk update               # download + verified swap
+mk update --check       # newest GitHub release (works everywhere)
+mk update               # download + verified swap; refuses on a brew install
 ```
-
-Installed with `brew`? Use `brew upgrade meerkat` instead — `mk
-update` detects a Cellar install and refuses, since brew would undo
-the swap on its next run. `mk update --check` still reports the
-newest release either way.
 
 ### Container image
 
@@ -131,42 +122,47 @@ docker run --rm --read-only --user 65532:65532 \
   http serve --host 0.0.0.0 --api-key "$MEERKAT_API_KEY"
 ```
 
-The image runs non-root (numeric UID/GID `65532`) on a distroless base
-and needs no writable filesystem for the default embedded-content path —
-`--read-only` above is not just permitted, it's the recommended way to
-run it. See [docs/CONTAINER.md](docs/CONTAINER.md) for the full run
-reference (read-only-fs flags, the cache-dir mount needed only for
-`--content-source` `type: url`, and cosign verification).
+The image runs non-root (numeric UID/GID `65532`) on a distroless base, and
+is built with no content source — so like every other published artefact it
+needs a runtime knowledge base (bind-mount a directory and pass `--kb-dir`,
+or mount a `content-source.yaml`). `--read-only` is not just permitted,
+it's the recommended way to run it: a `type: local` source writes nothing at
+all, and `type: url`/`gcs`/`s3` need only `/home/nonroot/.cache` to be
+writable. See [docs/CONTAINER.md](docs/CONTAINER.md) for the full run
+reference (read-only-fs flags, the content-cache mount, and cosign
+verification).
 
 ## Use
 
-> **The knowledge base ships empty.** The public repo intentionally embeds
-> no content — `internal/kb/content/` and `internal/sources/etc/` hold only
-> placeholders, so every example below returns nothing on a fresh build.
-> Point meerkat at your own content repo by adding a `content-source.yaml`
-> at the repo root, e.g.:
->
-> ```yaml
-> content:
->   type: local
->   path: ../your-kb-repo
-> ```
->
-> `type: local` needs no credentials of any kind — this is the default for
-> most users, who build from their own knowledge-base directory on disk.
-> (`type: git` and `type: submodule` also work — see
-> [`content-source.example.yaml`](content-source.example.yaml) and
-> [docs/design/content-sources.md](docs/design/content-sources.md) for the
-> full schema.) For `type: git`, a private GitHub repo (`host: github`)
-> automatically uses a cached `gh` CLI token if one is present; GitLab (or
-> any other host) has no credential borrowing — use a full clone URL / SSH
-> spec, or your normal git credential configuration, for private access.
-> `make build` runs `make sync`, which reads this file and populates the
-> embed dirs before compiling. To update content **without** rebuilding, see
-> ["Serving content at runtime"](#serving-content-at-runtime) below.
+A fresh install serves nothing until you point it at a knowledge base. The
+shortest way is a directory on disk in the
+[content-repo layout](#--kb-dir--meerkat_kb_dir) — no credentials, no config
+file, nothing fetched. For anything you'd rather not repeat every invocation
+— an HTTPS archive, a GCS or S3 bucket, several named collections, auth,
+telemetry — write a `content-source.yaml` where meerkat discovers it:
 
 ```bash
-# Knowledge base (offline, always available)
+mk --kb-dir ./meerkat-kb search "rate limiting"    # or: export MEERKAT_KB_DIR=…
+
+CFG=~/.config/meerkat                                      # Linux
+[ "$(uname)" = Darwin ] && CFG="$HOME/Library/Application Support/meerkat"
+mkdir -p "$CFG"
+printf 'content:\n  type: local\n  path: /path/to/your-kb-repo\n' \
+  > "$CFG/content-source.yaml"
+mk list                                            # now serves that directory
+```
+
+That config directory is the OS's own, not `~/.config` everywhere — hence the
+`uname` guard. meerkat then resolves **one** source per invocation, highest
+priority first: `--kb-dir`/`MEERKAT_KB_DIR`,
+`--content-source`/`MEERKAT_CONTENT_SOURCE`, `<user config dir>/meerkat/`,
+`./content-source.yaml`, then the binary's own embedded content — empty in
+every published release. `mk version` always reports which one won, as
+`kb_source`. Every backend and the rules in full:
+["Loading content"](#loading-content).
+
+```bash
+# Knowledge base (answered locally, no service to call)
 mk search "rate limiting"
 mk search "circuit breaker" --limit 20
 mk show concepts/Rate-Limiting
@@ -174,6 +170,7 @@ mk list --prefix systems/backend/
 mk list --category policies --status placeholder
 mk list --owner team-payments --json
 mk list --type "BigQuery Table"                       # OKF's concept-kind field — see docs/OKF.md
+mk lint                                               # dangling related:/pointer targets; exit 1 if any
 
 # Multiple collections (when content-source.yaml declares any)
 mk list --collections                                 # what's mounted
@@ -190,15 +187,16 @@ mk ingest                                             # plan all stale tasks (JS
 mk ingest --source policies                           # plan one source
 mk ingest --source policies --execute --max-parallel 4
 mk ingest --page concepts/Rate-Limiting --execute
-mk ingest sources                                     # show embedded source registry
+mk ingest sources                                     # show the source registry in view
 mk ingest --batch-file batch.jsonl                    # write plan to file
 
 # Operations
 mk update --check                                     # newest GitHub release
-mk version
+mk version                                            # incl. kb_source: what is being served
 ```
 
-Full per-command help: `mk <cmd> --help`.
+Full per-command help: `mk <cmd> --help`; generated reference in
+[docs/CLI.md](docs/CLI.md).
 
 ## OpenCode integration
 
@@ -216,13 +214,16 @@ Add to `~/.config/opencode/opencode.json`:
 }
 ```
 
-Restart OpenCode. Three tools become available to the agent:
+Restart OpenCode. Five tools become available to the agent, plus
+`mk_save_memory` when a collection declares a store:
 
 | Tool | Args | Returns |
 |---|---|---|
-| `mk_search` | `query`, `limit?` | `[{id, title, score, snippet, category, status}]` |
-| `mk_show` | `id` | `{id, title, body, front, trust_tier, stale}` (parsed frontmatter, plus two OKF-derived advisory signals — see [docs/OKF.md](docs/OKF.md#trust-and-lifecycle)) |
-| `mk_list` | `prefix?`, `category?`, `status?`, `owner?`, `type?` | `[{id, title, category, status, owner, type, source}]` |
+| `mk_search` | `query`, `limit?`, `collection?`, `bundle?`, `session_id?` | `[{id, title, score, snippet, category, status}]` |
+| `mk_show` | `id`, `collection?`, `session_id?` | `{id, title, body, front, trust_tier, stale}` (parsed frontmatter, plus two OKF-derived advisory signals — see [docs/OKF.md](docs/OKF.md#trust-and-lifecycle)) |
+| `mk_list` | `prefix?`, `category?`, `status?`, `owner?`, `type?`, `collection?` | `[{id, title, category, status, owner, type, source}]` |
+| `mk_list_collections` | — | `[{name, type, source, pages, capabilities, …}]` — what this caller may read (see [Multiple collections](#multiple-collections)) |
+| `mk_report_outcome` | `outcome`, `initial_query?`, `pages?`, `attempted?`, `quality?`, `fallback?`, `session_id?` | `{recorded, logged, intake_id?}` — see [Reporting outcomes](#reporting-outcomes-mk_report_outcome) |
 | `mk_save_memory` | `scope`, `title`, `content`, `key?`, `tags?`, `version?`, `replace?` | `{status, id, version, location, searchable}` — only when a collection declares a [`memory:`](#memory-mk_save_memory) store |
 
 ## Hosted MCP server (Streamable HTTP + OIDC)
@@ -235,8 +236,8 @@ hosted transport instead:
 mk mcp serve-http --port 4005          # http://127.0.0.1:4005/mcp
 ```
 
-It exposes the same `mk_search` / `mk_show` / `mk_list` tools over the MCP
-Streamable HTTP transport, with concurrent sessions, plus:
+It exposes the same tools as `mk mcp serve` over the MCP Streamable HTTP
+transport, with concurrent sessions, plus:
 
 | endpoint | auth | what it is |
 |---|---|---|
@@ -501,8 +502,10 @@ mk http serve --port 4004
 ```
 
 Register `http://127.0.0.1:4004/openapi.json` as a Tool Server in OpenWebUI.
-The same three tools are available as `POST /search`, `POST /show`,
-`POST /list`. `/healthz` and `/openapi.json` are exempt from auth.
+The search/show/list tools are available as `POST /search`, `POST /show`,
+`POST /list`, and `GET /collections` enumerates what's mounted. `/healthz`
+and `/openapi.json` are exempt from auth; everything else needs the bearer
+token, and the server refuses to start without one.
 
 If OpenWebUI runs on another host, don't just add `--host 0.0.0.0` —
 meerkat has no TLS of its own, so that puts the bearer token on the
@@ -518,7 +521,7 @@ prompt declared in the source's entry in your content repo's
 `ingestion/sources.yaml`.
 
 ```text
-embedded sources.yaml
+sources.yaml (from the resolved content source)
         │
         ▼
 mk ingest (planner) ──► JSONL batch
@@ -552,25 +555,29 @@ The Go binary ships **without LLM credentials**. The actual model calls happen
 inside `opencode run` subprocess sessions, which inherit the user's OpenCode
 config (model providers, MCP server connections, etc).
 
-## Serving content at runtime
+## Loading content
 
-By default the wiki is embedded at build time (see ["Use"](#use) above), so
-picking up new content means rebuilding. Four other mechanisms serve content
-without a rebuild; `mk`/`meerkat` resolves one at startup, in this order —
-highest priority first, each step consulted only if the one above is unset
-(steps 1-2) or not found (steps 3-4):
+This is the main path: an installed meerkat carries no content and is told
+at startup where its knowledge base lives. Four mechanisms can say so, and
+`mk`/`meerkat` consults them in this order — highest priority first, each
+step reached only if the one above is unset (steps 1-2) or not found
+(steps 3-4):
 
 1. `--kb-dir` (or `MEERKAT_KB_DIR`) — an explicit content-repo directory.
    Wins outright over everything below.
 2. `--content-source` (or `MEERKAT_CONTENT_SOURCE`) — an explicit path to a
    `content-source.yaml`.
-3. `content-source.yaml` in `<user config dir>/meerkat/` (`~/.config/meerkat/`
-   on Linux, `~/Library/Application Support/meerkat/` on macOS).
+3. `content-source.yaml` in `<user config dir>/meerkat/` — `os.UserConfigDir()`:
+   `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows, and on
+   macOS `~/Library/Application Support`, which does **not** consult `XDG_CONFIG_HOME`.
 4. `content-source.yaml` in the working directory (wherever `mk`/`meerkat`
    is invoked from — not a repo root).
-5. The embedded build — the fallback when none of the above apply (the
-   single-self-contained-binary property is unchanged when no directory or
-   config is present).
+5. The binary's embedded content — the fallback when none of the above
+   apply. Every published artefact (the Homebrew formula, the release
+   tarballs, the `ghcr.io` image) is built with no content source, so this
+   step serves an empty knowledge base unless you produced the binary
+   yourself and [embedded content at build
+   time](#optional-embedding-content-at-build-time).
 
 Once a step is used, its `content.type` decides the outcome on its own —
 including `type: none`, which resolves to the embedded fallback without
@@ -581,8 +588,9 @@ single source — see [Multiple collections](#multiple-collections).
 
 ### `--kb-dir` / `MEERKAT_KB_DIR`
 
-Points meerkat at a directory on disk instead of the embedded build — `mk
-search`/`show`/`list` then serve that content directly, no rebuild required:
+The simplest way in: point meerkat at a directory on disk and `mk
+search`/`show`/`list` serve that content directly, with no config file and
+no credentials:
 
 ```bash
 mk --kb-dir ./meerkat-kb search "rate limiting"
@@ -592,8 +600,7 @@ MEERKAT_KB_DIR=./meerkat-kb mk list
 Precedence: `--kb-dir` flag, then `MEERKAT_KB_DIR` (step 1 above).
 
 The directory uses the **content-repo layout** — the same layout
-`content-source.yaml` describes and `mk ingest` writes into — not the
-internal embed layout:
+`content-source.yaml` describes and `mk ingest` writes into:
 
 ```text
 meerkat-kb/
@@ -611,11 +618,11 @@ meerkat-kb/
 
 Because this is the same layout `mk ingest --execute` commits into, pointing
 `--kb-dir` at a working copy of your content repo means ingest output
-becomes visible with no rebuild between ingesting a page and searching it.
+becomes visible with nothing in between ingesting a page and searching it.
 
 A `--kb-dir` that doesn't exist is a hard error (exit 1). A directory that
 exists but is missing `wiki/`, `ingestion/`, or `templates/` degrades to
-empty for the missing piece — same as the public build's zero-content embed.
+empty for the missing piece — the same answer a content-free binary gives.
 
 `--kb-dir`/`MEERKAT_KB_DIR` always use the default paths shown above, even
 if a `content-source.yaml` elsewhere declares a custom `layout:` block — a
@@ -638,23 +645,21 @@ meerkat --content-source ./content-source.yaml list
 MEERKAT_CONTENT_SOURCE=./content-source.yaml meerkat list
 ```
 
-- **`none`** (or no file found at all) serves the embedded build.
-- **`local`** resolves a relative `path` against **the config file's own
-  directory** — not the working directory, and not a repo root. (This
-  differs from the build-time resolver, which resolves it against the repo
-  root `make sync` runs from.) An absolute `path` behaves the same either
-  way. A resolved directory that doesn't exist is a hard error, same as
-  `--kb-dir`.
-- **`url`** fetches and caches an HTTPS archive — see below.
-- **`gcs`** loads a Google Cloud Storage `.tar.gz` object or bucket prefix —
-  see below.
-- **`s3`** does the same from an S3-compatible bucket — AWS S3, Garage,
-  Versity Gateway — see below.
+- **`local`** — a directory on disk, no credentials. A relative `path`
+  resolves against **the config file's own directory** — not the working
+  directory, and not a repo root. (The build-time resolver differs: it
+  resolves against the repo root `make sync` runs from.) An absolute `path`
+  behaves the same either way. A resolved directory that doesn't exist is a
+  hard error, same as `--kb-dir`. A local source is re-read per request.
+- **`url`**, **`gcs`** and **`s3`** fetch, verify and cache a remote
+  archive or object prefix — one subsection each, below.
+- **`none`** (or no file found at all) serves the binary's embedded content,
+  which is empty in every published release.
 - **`git`** and **`submodule`** are build-time only (they need git and a
   working tree, which a shipped binary can't assume): naming one here fails
-  with an explicit error rather than silently serving nothing. Run `make
-  sync` to embed it at build time instead, or switch to `type: local`/
-  `type: url`/`type: gcs`/`type: s3` for a runtime-resolved source.
+  with an explicit error rather than silently serving nothing. Switch to
+  `type: local`/`url`/`gcs`/`s3` for a runtime-resolved source, or
+  [embed it at build time](#optional-embedding-content-at-build-time).
 
 A `layout:` block in this file **is** honoured at runtime for `type: local`,
 `type: url`, `type: gcs` and `type: s3` sources — unlike `--kb-dir`, above.
@@ -901,20 +906,10 @@ ID. `content:` and `collections:` are mutually exclusive.
 **Order matters.** It is the order collections are searched, listed, and
 disambiguated in.
 
-```bash
-mk list --collections                      # what's mounted
-mk list --collections --json               # name, type, provenance, page count
-
-mk search "incident"                       # every collection, merged by score
-mk search "incident" --collection runbooks # just one
-
-mk list                                    # every collection, IDs qualified
-mk list --collection architecture          # just one
-
-mk show runbooks:incidents/paging          # a page ID qualified by collection
-mk show incidents/paging --collection runbooks   # equivalent
-mk show incidents/paging                   # tried in order (see below)
-```
+Beyond the examples in ["Use"](#use) above, `mk list --collections --json`
+reports each one's name, type, provenance and page count, and `mk show
+incidents/paging --collection runbooks` is equivalent to the
+`runbooks:incidents/paging` qualified form.
 
 **Routing rules**, with several collections mounted:
 
@@ -983,9 +978,10 @@ collections:
 The contract is **declared, never inferred** from the source type: a
 serving mirror and a contribution repo are different addresses, and only
 you know which is which. The one rule meerkat enforces is that
-`method: direct` needs a backend a write can land in (a local directory or
-a GCS prefix) — declaring it on a `type: url` archive, a `gcs` bundle or
-the embedded build fails at **startup**, not at the first lost write.
+`method: direct` needs a backend a write can land in (a local directory, or
+a GCS or S3 *prefix*) — declaring it on a `type: url` archive, a `gcs`/`s3`
+bundle or the embedded fallback fails at **startup**, not at the first lost
+write.
 
 What a caller is *told* depends on what that caller may do. Without
 `global-write` on a `direct` collection they are pointed at the staging
@@ -1095,28 +1091,18 @@ Like `url:`, the token after `@` on a `gcs:` or `s3:` line is a *checked*
 property of what's being served — the conditional read cannot return another
 generation or ETag — not a label, unlike `disk:`.
 
-With several collections mounted, `mk version --json` also carries a
-`collections` array (`name`, `type`, `source`) in configuration order, and
-the plain-text output itemises them, so a multi-collection deployment
-reports everything it serves:
+`mk version --json` also carries a `collections` array — `{name, type,
+source}` per collection, in configuration order — and the plain-text output
+itemises them, so a multi-collection deployment reports everything it
+serves. A single-collection deployment reports one entry named `default`,
+with `kb_source` unchanged from what it always was.
 
-```json
-{
-  "kb_source": "collections:2",
-  "collections": [
-    {"name": "runbooks", "type": "local", "source": "disk:/srv/runbooks-kb"},
-    {"name": "architecture", "type": "gcs", "source": "gcs://my-org-knowledge/bundles/architecture-v3.tar.gz@1748112233445566"}
-  ]
-}
-```
-
-A single-collection deployment reports one entry named `default`, with
-`kb_source` unchanged from what it always was.
-
-`kb_commit` is unchanged by any of this — it always names the build-time
-embedded content's commit, never a runtime directory's or archive's. See
-[docs/SECURITY.md](docs/SECURITY.md) for what that split means for
-provenance.
+`kb_commit` is a different field and answers a different question: it names
+the commit of the content **embedded at build time**, never a runtime
+directory's or archive's. On a published release it is therefore `none` —
+the runtime source's provenance is `kb_source`. See
+[docs/SECURITY.md](docs/SECURITY.md#kb_commit-vs-kb_source-the-provenance-split)
+for what that split means.
 
 ### OKF bundles
 
@@ -1144,21 +1130,51 @@ to meerkat's, the trust-tier/staleness signals it surfaces, and what's
 deliberately not implemented (cross-link resolution, the Attested
 Computation family).
 
+### Optional: embedding content at build time
+
+A build from source can bake a knowledge base into the binary instead, for a
+single artefact that carries its own content. It is **not** how the
+published releases are built and nothing above needs it — but it is the only
+way to use `type: git` or `type: submodule`, and the only way to get a
+`kb_commit` provenance stamp. Put a `content-source.yaml` at the **repo
+root** with a build-time type:
+
+```yaml
+content:
+  type: local            # or: git (repo/host/ref) | submodule
+  path: ../your-kb-repo  # relative to the repo root, or absolute
+```
+
+`make build` runs `make sync`, which resolves that file into
+`internal/kb/content/` and `internal/sources/etc/` before compiling; with no
+such file it leaves the committed empty placeholders alone. The resolved
+content commit is stamped in and reported by `mk version` as `kb_commit`.
+For `type: git`, a private GitHub repo (`host: github`) borrows a cached
+`gh` CLI token if one is present; GitLab and other hosts have no credential
+borrowing — use a full clone URL / SSH spec or your normal git credential
+configuration. Pin `ref` to a tag or SHA; a moving branch warns.
+
+Refreshing means rebuilding: `make build` re-resolves the source, and
+`make kb-update` (`git submodule update --remote --recursive`) updates a
+`type: submodule` source first. `make sync` will not fetch `type: url`,
+`gcs` or `s3` — those are runtime-only. Full schema:
+[content-source.example.yaml](content-source.example.yaml),
+[docs/design/content-sources.md](docs/design/content-sources.md).
+
 ## How search works
 
-Bleve full-text BM25 index, built in-memory at startup from the embedded
-markdown. Title gets ×5 boost, ID gets ×3, body baseline. Reference
-measurement from an internal deployment: cold-start ~150 ms on ~700 pages.
-The public repo ships no content, so your own cold-start time depends on
-the size of the content repo you point `content-source.yaml` at.
+Bleve full-text BM25 index, built in-memory at startup from whichever
+content was resolved. Title gets ×5 boost, ID gets ×3, body baseline.
+Reference measurement from an internal deployment: cold-start ~150 ms on
+~700 pages. Your own cold-start time depends on the size of the knowledge
+base you point meerkat at.
 
 ### Load speed with content from disk
 
-The figure above is for content embedded at build time. If you take the
-pristine binary and point it at your own knowledge base (see ["Serving
-content at runtime"](#serving-content-at-runtime)), the index is built from
-disk at startup instead — so the cost lands differently depending on how
-meerkat is run.
+The figure above was measured against content embedded at build time. Point
+a published binary at your own knowledge base (see ["Loading
+content"](#loading-content)) and the index is built from disk at startup
+instead — so the cost lands differently depending on how meerkat is run.
 
 Measured against [meerkat-bim](https://github.com/JonasLundin/meerkat-bim),
 an OKF bundle of 67 concepts / 0.72 MB of markdown (averaging ~10 KB per
@@ -1201,9 +1217,10 @@ serves queries against a partial one.
 ## Build / test / release
 
 ```bash
-make build           # binary in bin/meerkat (+ bin/mk symlink)
-make test            # go test -race ./...
+make build           # binary in bin/meerkat (+ bin/mk symlink); runs `make sync` first
+make test            # go test -race -count=1 ./...
 make test-cover      # ... with coverage
+make cover-check     # ... and fail below COVERAGE_MIN
 make smoke           # end-to-end CLI sanity: version + list + search + show
 make sync            # populate embed dirs from content-source.yaml (no-op, empty KB, if absent)
 make install         # → ~/.local/bin/{meerkat,mk}
@@ -1223,86 +1240,84 @@ make release-check     # validate .goreleaser.yaml
 make release-snapshot  # local cross-platform build, no publish
 ```
 
-`.github/workflows/ci.yml` runs four independent jobs — `lint`, `test`,
-`vuln`, `gitleaks` — in parallel on every push to `main` and every pull
-request; there's no job-to-job dependency. `.github/workflows/release.yml`
-runs separately, triggered by a version tag: it re-runs the full gate (adding
-`gosec`) on the tagged commit, then publishes via goreleaser only if that
-passes.
+`.github/workflows/ci.yml` runs on every push to `main` and every pull
+request, with no job-to-job dependency: `lint` (golangci-lint, `go mod tidy`
+drift, `make docs-check`), `test` (`make cover-check`), `vuln`
+(govulncheck), `markdown` (markdownlint over every `*.md`), `gitleaks`, and
+`s3-conformance`, a matrix that replays the object-store assumptions against
+a real [Garage](https://garagehq.deuxfleurs.fr/) and
+[Versity Gateway](https://github.com/versity/versitygw).
+`.github/workflows/release.yml` is separate, triggered by a `v*.*.*` tag: a
+`verify` job re-runs lint, tests, govulncheck, gosec and gitleaks on the
+tagged commit, and only if it passes do `goreleaser` and `docker` run.
+
+The `goreleaser` job cross-builds, generates SPDX SBOMs (via syft), signs
+the checksums file with cosign keyless (Fulcio + Rekor), and publishes a
+GitHub Release; the `docker` job builds and signs the multi-arch image.
+Both run with **no content source**, which is why everything they publish
+carries an empty knowledge base by design. See
+[docs/RELEASE.md](docs/RELEASE.md) and [docs/INSTALL.md](docs/INSTALL.md)
+for the consumer-side verification flow, and ["Embedding content at build
+time"](#optional-embedding-content-at-build-time) to bake content into a
+binary you build yourself.
 
 Contributions go through a normal fork → branch → pull-request flow against
-`main`; CI must pass before merge. There's no direct push to `main`.
-
-Run the full local CI gate (`go vet` + `gofmt` + `go test -race` +
-`docs-check`) before pushing — saves a round-trip:
-
-```bash
-make pre-push          # one-shot
-make install-hooks     # installs .git/hooks/pre-push so it runs
-                       # automatically on every `git push`
-                       # (skip with `git push --no-verify`)
-```
-
-The `release` job uses goreleaser to cross-build, generate SBOMs
-(via syft), sign the checksums file with cosign keyless (Fulcio +
-Rekor), and publish a GitHub Release. See `docs/INSTALL.md` for the
-verification flow on the consumer side.
-
-Embedded content comes from whatever `content-source.yaml` points at (see
-["The knowledge base ships empty"](#use) above and
-[docs/design/content-sources.md](docs/design/content-sources.md)). To refresh
-embedded content after the upstream source changes, just rebuild:
+`main`; there's no direct push. Run the same gates locally first — the
+[pre-commit](https://pre-commit.com/) hooks in
+[CONTRIBUTING.md](CONTRIBUTING.md) enforce them at commit and push time:
 
 ```bash
-make build     # runs `make sync`, which re-resolves content-source.yaml
-```
-
-If you're using `type: submodule`, update the submodule first:
-
-```bash
-make kb-update   # git submodule update --remote --recursive
-make build
+pre-commit install && pre-commit install --hook-type pre-push   # once per clone
+make pre-push          # one-shot: lint + test + docs-check
+make pre-release       # ... plus vuln + gosec + gitleaks, before tagging
 ```
 
 ## Repo layout
 
 ```text
-cmd/meerkat/main.go         entrypoint
+cmd/
+  meerkat/            entrypoint
+  meerkat-bootstrap/  standalone installer for a verified upstream release
 internal/
-  kb/         Page + Frontmatter, //go:embed all:content
+  contentsource/  content-source.yaml: runtime resolution (local / url /
+                  gcs / s3), build-time sync (local / git / submodule),
+                  collections, tree, auth/observability/intake blocks
+  contentsync/    `make sync`: the build-time embed tool (not in the binary)
   kbdir/      resolves --kb-dir/MEERKAT_KB_DIR, adapts it onto kb/sources
-  contentsource/  content-source.yaml: build-time sync + runtime resolution
-                  (local / git / submodule / url / gcs), collections
+  kb/         Page + Frontmatter over the resolved (or embedded) content
   collections/    named collections + search/show/list routing across them
+  refresh/    opt-in runtime reconciliation: the refresh: controller
   search/     Bleve in-memory BM25 index
-  sources/    embeds sources.yaml + prompts + templates
+  sources/    sources.yaml + prompts + templates
   ingest/     Plan(opts) + Run(ctx, tasks) — planner + executor
-  mcp/        MCP server (mk_search / mk_show / mk_list / mk_save_memory) —
-              stdio and the hosted Streamable HTTP transport, probes,
-              metrics, access log
+  intake/     raw intake store: deposits, candidate pages, parked items
+  mcp/        MCP server (mk_search / mk_show / mk_list / mk_list_collections
+              / mk_report_outcome / mk_save_memory) — stdio and the hosted
+              Streamable HTTP transport, probes, metrics, access log
+  retrieval/  retrieval sessions and their SLIs
+  traversal/  opt-in traversal log, with page IDs and names HMAC-hashed
   telemetry/  opt-in OpenTelemetry: the observability: block, spans,
               OTLP export, bounded domain metrics. Returns nil when
               nothing opted in, and every method tolerates one
-  memory/     writable memory stores (local dir / GCS prefix) with
+  memory/     writable memory stores (local dir / GCS or S3 prefix) with
               optimistic locking, identity-derived namespaces, staging
+  s3api/      the one S3 client shape (content sources + memory stores)
+  auth/       borrowed git-host credentials (gh token, OS keyring)
   authn/      OIDC discovery/JWKS verification + the bearer gate (RFC 9728)
   authz/      capability model, access policy, per-collection grants
   http/       HTTP/OpenAPI server with bearer auth
   update/     mk update — gh token, GitHub Releases download, atomic swap
-  cli/        cobra command tree
-  clidocs/    docs/CLI.md generator (cobra tree -> single-file MD)
-docs/
-  CLI.md        auto-generated CLI reference (make docs)
-  INSTALL.md    install + verify + troubleshooting
-  CONTAINER.md  running the OCI image (read-only fs, cache-dir mount, verify)
-  SECURITY.md   threat model + scanner suite + fix workflows
-content-source.yaml   optional, not shipped; tells `make sync` (build) or
-                      meerkat itself (runtime) where KB content lives
-                      (local path / git repo / submodule / url archive /
-                      GCS object or prefix), as one source or several
-                      named collections, plus the optional auth: policy,
-                      the optional observability: block, per-collection
-                      memory: stores and update: contracts
+  cli/        cobra command tree; clidocs/ generates docs/CLI.md from it
+docs/         CLI.md (generated), INSTALL, CONTAINER, RELEASE, SECURITY,
+              SEARCH, OKF, INGESTION, INTEGRATION-*; design/ per subsystem
+content-source.yaml   optional, never shipped; tells meerkat at runtime —
+                      or `make sync` at build time — where KB content
+                      lives (local path / url archive / GCS or S3 object
+                      or prefix; git repo or submodule at build time), as
+                      one source or several named collections, plus the
+                      optional auth: policy, the optional observability:
+                      block, per-collection memory: stores and update:
+                      contracts
 ```
 
 ## See also
@@ -1311,43 +1326,28 @@ content-source.yaml   optional, not shipped; tells `make sync` (build) or
   — official meerkat documentation
 - [zegit.dev/documentation/meerkat-cli.html](https://zegit.dev/documentation/meerkat-cli.html)
   — CLI reference and integration guides
-- [docs/CONTAINER.md](docs/CONTAINER.md) — running the OCI image (read-only
-  root filesystem, the cache-dir mount, cosign verification)
-- [docs/OKF.md](docs/OKF.md) — serving an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
-  (Open Knowledge Format) bundle unmodified, and what meerkat does with
-  its frontmatter
-- [docs/design/content-sources.md](docs/design/content-sources.md) — how
-  `content-source.yaml` maps a content repo onto the embed dirs
-- [docs/design/multi-collection.md](docs/design/multi-collection.md) —
-  mounting several named collections at once, the routing/disambiguation
-  rules, and the GCS backend's generation-keyed caching
-- [docs/design/hot-reload.md](docs/design/hot-reload.md) — `refresh:`:
-  the metadata-probe/atomic-snapshot-swap model that lets a running
-  server pick up a new GCS generation and lets replicas converge on a
-  shared memory store, why a pinned `generation:` refuses it, and what a
-  failed refresh leaves serving
-- [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md) — the hosted
-  Streamable HTTP MCP server: OIDC, the capability model, and why an
-  unauthorized collection is made invisible rather than denied
-- [docs/design/observability.md](docs/design/observability.md) —
-  `observability:`: the span taxonomy and `meerkat.*` attribute
-  namespace, the config-vs-`OTEL_*` precedence rule and its two
-  deliberate inversions, why a span is held to a stricter disclosure
-  standard than the access log beside it, and how a collector outage is
-  kept out of the request path
-- [docs/design/memory.md](docs/design/memory.md) — `mk_save_memory`: why
-  the personal namespace is structurally unspoofable, why a personal
-  memory is private to READ as well as to write (and why that filter has
-  to live inside the search query), the scope→capability table, the
-  optimistic-locking scheme, and the staging shape
-- [docs/design/update-contract.md](docs/design/update-contract.md) — the
-  per-collection `update:` contract: why it is declared rather than
-  inferred, and how the path a caller is shown is narrowed to what that
-  caller can actually do
-- [docs/design/ingestion-pipeline.md](docs/design/ingestion-pipeline.md) —
-  how `mk ingest` populates placeholder pages from that content repo
-- [docs/design/index-filtering.md](docs/design/index-filtering.md) — an
-  assessment (not yet implemented) of index-time frontmatter filtering
-  for very large knowledge bases, with measurements
-- Your own content repo holds the KB pages and `ingestion/sources.yaml` —
-  meerkat only needs a `content-source.yaml` pointing at it
+- [docs/INSTALL.md](docs/INSTALL.md) — install, verify, troubleshoot;
+  [docs/CONTAINER.md](docs/CONTAINER.md) — running the OCI image;
+  [docs/RELEASE.md](docs/RELEASE.md) — tagging and the release gate
+- [docs/SEARCH.md](docs/SEARCH.md) — query syntax and the fallback stages;
+  [docs/SECURITY.md](docs/SECURITY.md) — threat model and scanners
+- [docs/OKF.md](docs/OKF.md) — serving an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) (Open Knowledge Format) bundle unmodified, and what meerkat does with its frontmatter
+
+Design notes, each linked from the section it explains:
+[content-sources](docs/design/content-sources.md),
+[multi-collection](docs/design/multi-collection.md),
+[hot-reload](docs/design/hot-reload.md),
+[hosted-mcp](docs/design/hosted-mcp.md),
+[observability](docs/design/observability.md),
+[memory](docs/design/memory.md),
+[update-contract](docs/design/update-contract.md),
+[ingestion-pipeline](docs/design/ingestion-pipeline.md),
+[intake](docs/design/intake.md),
+[tree](docs/design/tree.md),
+[cache](docs/design/cache.md),
+[links](docs/design/links.md),
+[object-stores](docs/design/object-stores.md),
+[index-filtering](docs/design/index-filtering.md).
+
+Your own content repo holds the KB pages and `ingestion/sources.yaml` —
+meerkat only needs to be pointed at it.
