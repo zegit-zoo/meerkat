@@ -46,11 +46,15 @@ meerkat version
 brew upgrade meerkat               # how a brew install updates
 ```
 
-The formula installs `meerkat`, the `mk` shorthand, and shell
-completions for bash/zsh/fish. It pins the sha256 of the same release
-tarballs linked below, taken from the cosign-verified checksums file —
-the tap re-verifies that signature on every bump, so `brew install`
-inherits the release's signing guarantees rather than replacing them.
+Under Homebrew 7's tap trust the full name above trusts only this
+formula, so no `brew trust` step is needed; if you `brew tap
+zegit-zoo/tap` first and install by bare name, run
+`brew trust --formula zegit-zoo/tap/meerkat` before `brew install
+meerkat`. The formula installs `meerkat`, the `mk` shorthand, and
+bash/zsh/fish completions, and pins the sha256 of the release tarballs
+linked below from the cosign-verified checksums file, re-verified on
+every tap bump, so `brew install` inherits the release's signing
+guarantees rather than replacing them.
 
 Two consequences worth knowing up front:
 

@@ -41,6 +41,12 @@ meerkat version
 `zegit-zoo/tap` is a
 [Homebrew tap](https://github.com/zegit-zoo/homebrew-tap), i.e. a
 third-party formula repository; the command above taps it implicitly.
+Under Homebrew 7's tap trust the fully qualified name above trusts only
+this one formula, so no `brew trust` step is needed; if you
+`brew tap zegit-zoo/tap` first and install by bare name, run
+`brew trust --formula zegit-zoo/tap/meerkat` before `brew install
+meerkat`.
+
 The formula installs:
 
 - `meerkat` and the `mk` shorthand, and
