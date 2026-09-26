@@ -69,6 +69,43 @@ func TestPut_ReplacesRatherThanDuplicates(t *testing.T) {
 	}
 }
 
+// A memory (or any page) indexed incrementally carries the same fields
+// as one present at startup — including the frontmatter description,
+// which indexDoc is shared for precisely so Put cannot drift from the
+// bulk build (issue #83).
+func TestPut_IndexesTheFrontmatterDescription(t *testing.T) {
+	idx := newTestIndex(t, nil)
+	id := "memory/team/fauna"
+
+	page := fixturePage(id, "Fauna", "Nothing about rodents in the body.", "memory")
+	page.Front.Description = "The capybara is the office mascot."
+	if err := idx.Put(page); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, err := idx.Query("capybara", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Page.ID != id {
+		t.Fatalf("description-only query after Put: %v", ids(got))
+	}
+	if !strings.Contains(strings.ToLower(got[0].Snippet), "capybara") {
+		t.Errorf("snippet = %q, want the description fragment", got[0].Snippet)
+	}
+
+	// Re-indexing the page replaces its description too.
+	page.Front.Description = "The aardvark is the office mascot."
+	if err := idx.Put(page); err != nil {
+		t.Fatalf("Put (update): %v", err)
+	}
+	if got, err := idx.Query("capybara", 10); err != nil || len(got) != 0 {
+		t.Errorf("superseded description is still indexed: %v err=%v", ids(got), err)
+	}
+	if got, err := idx.Query("aardvark", 10); err != nil || len(got) != 1 {
+		t.Errorf("new description: %v err=%v, want 1 hit", ids(got), err)
+	}
+}
+
 func TestPut_RefusesAPageWithNoID(t *testing.T) {
 	idx := newTestIndex(t, nil)
 	if err := idx.Put(kb.Page{Title: "No id"}); err == nil {
