@@ -1017,8 +1017,10 @@ term from 5 characters, two from 8) and then by prefix, so `datadgo
 monitor serach` still finds the Datadog page. The stage that answered is
 on every hit and on `meerkat_search_total{stage}`; queries that use
 search syntax are never rewritten. A hub collection can set
-`layout.analyzer: ngram` to index titles as edge n-grams. See
-[docs/SEARCH.md](docs/SEARCH.md).
+`layout.analyzer: ngram` to index titles as edge n-grams, and any
+collection can override the per-`type` score multipliers with
+`search.type_boosts` — a leaf that cites through pointers sets
+`{pointer: 1.0}`. See [docs/SEARCH.md](docs/SEARCH.md).
 
 ### The intake pipeline (`mk ingest --role`)
 

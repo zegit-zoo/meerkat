@@ -250,6 +250,11 @@ type Source struct {
 	// Layout maps artifacts to their location WITHIN the resolved source.
 	Layout Layout `yaml:"layout,omitempty"`
 
+	// Search tunes how this collection's pages are ranked — today, the
+	// per-`type` score multipliers. Absent keeps the defaults. See
+	// SearchSpec and docs/SEARCH.md.
+	Search *SearchSpec `yaml:"search,omitempty"`
+
 	// Description is one or two sentences of human/agent context for the
 	// collection: what is in it, who owns it, what it is for. Optional,
 	// and empty for every configuration that predates it.
@@ -486,8 +491,12 @@ func (s Source) validate(p string) error {
 		// embedded content and still save memories to a durable directory
 		// — so that one block is still validated. The same goes for
 		// description:/update:, which describe the collection rather than
-		// the bytes it resolves to.
+		// the bytes it resolves to, and search:, which ranks the embedded
+		// pages like any others.
 		if err := s.Memory.Validate(p+".memory", false); err != nil {
+			return err
+		}
+		if err := s.Search.validate(p); err != nil {
 			return err
 		}
 		if err := s.validateRefresh(p); err != nil {
@@ -551,6 +560,9 @@ func (s Source) validate(p string) error {
 	case "", search.AnalyzerStandard, search.AnalyzerNgram:
 	default:
 		return fmt.Errorf("%s.layout.analyzer must be %s or %s, got %q", p, search.AnalyzerStandard, search.AnalyzerNgram, s.Layout.Analyzer)
+	}
+	if err := s.Search.validate(p); err != nil {
+		return err
 	}
 	if err := s.Memory.Validate(p+".memory", s.ephemeral()); err != nil {
 		return err

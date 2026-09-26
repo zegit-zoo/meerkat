@@ -35,7 +35,8 @@ type Result struct {
 	Score float64
 	// Snippet is a plain-text excerpt around the first match
 	// (best-effort): the body fragment, or the frontmatter
-	// description's when the body has none — see run.
+	// description's or a pointer's hint's when the body has none — see
+	// run.
 	Snippet string
 	// Stage is the planner stage that produced this result: exact,
 	// fuzzy or prefix. See planner.go.
@@ -217,6 +218,7 @@ func indexDoc(p kb.Page) map[string]any {
 		"title":          p.Title,
 		"body":           p.Body,
 		descriptionField: p.Front.Description,
+		hintField:        p.Front.Hint,
 		"category":       p.Front.Category,
 		subcategoryField: p.Front.Subcategory,
 		statusField:      p.Front.Status,
@@ -255,6 +257,14 @@ const (
 // highlight.
 const descriptionField = "description"
 
+// hintField carries a pointer's `hint:` — the one sentence that says
+// why an agent should follow it (links.go). It is the pointer's own
+// description in all but name, so it is indexed exactly like
+// descriptionField: analysed prose, in `_all`, stored for the snippet,
+// and given its own clause (issue #88). Only pointers carry one; on
+// every other page the field is empty and matches nothing.
+const hintField = "hint"
+
 // Field boosts, multiplied with each field's BM25 score. The exact
 // stage builds one clause per field with these weights, and the fuzzy
 // and prefix stages reuse them verbatim (planner.go's termClauses) so a
@@ -266,10 +276,20 @@ const descriptionField = "description"
 // still the page the searcher asked for, so title-first page-name
 // lookup is untouched. It is one notch under id rather than over it
 // because a page ID is as name-like as a title (issue #83).
+//
+// hint sits at the BODY's weight, not the description's (issue #88). It
+// is a hand-written sentence like a description, but it describes the
+// page at the OTHER end of a pointer, and on a leaf collection that
+// page is often the one a concept page already answers for: measured
+// on the mk-mpe eval's dev split with pointers unboosted, a ×2 hint cost
+// 0.05 MRR against no hint, a ×1 hint 0.03. The dedicated clause still
+// makes a hint-only term find its pointer, and the pointer's type boost
+// multiplies the result afterwards, as it does for any other field.
 const (
 	titleBoost       = 5.0
 	idBoost          = 3.0
 	descriptionBoost = 2.0
+	hintBoost        = bodyBoost
 	bodyBoost        = 1.0
 )
 
@@ -419,6 +439,7 @@ func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result
 //	title       × 5.0
 //	id          × 3.0
 //	description × 2.0   (frontmatter one-liner; see descriptionBoost)
+//	hint        × 1.0   (a pointer's reason to follow it; see hintBoost)
 //	body        × 1.0   (baseline)
 //
 // Category boosts (configurable via WithCategoryBoosts):
@@ -444,9 +465,9 @@ func (i *Index) QueryAs(ctx context.Context, v kb.Viewer, q string, limit int) (
 }
 
 // exactQuery builds the exact stage: the BM25 query meerkat has always
-// run — title (×5), id (×3) and description (×2) match queries plus the
-// bleve query-string form over the body, plus one boosted clause per
-// configured category.
+// run — title (×5), id (×3), description (×2) and hint (×1) match
+// queries plus the bleve query-string form over the body, plus one
+// boosted clause per configured category.
 func (i *Index) exactQuery(q string) query.Query {
 	titleQ := bleve.NewMatchQuery(q)
 	titleQ.SetField("title")
@@ -460,10 +481,14 @@ func (i *Index) exactQuery(q string) query.Query {
 	descQ.SetField(descriptionField)
 	descQ.SetBoost(descriptionBoost)
 
+	hintQ := bleve.NewMatchQuery(q)
+	hintQ.SetField(hintField)
+	hintQ.SetBoost(hintBoost)
+
 	bodyQ := bleve.NewQueryStringQuery(q)
 
-	clauses := make([]query.Query, 0, 4+len(i.categoryBoosts))
-	clauses = append(clauses, titleQ, idQ, descQ, bodyQ)
+	clauses := make([]query.Query, 0, 5+len(i.categoryBoosts))
+	clauses = append(clauses, titleQ, idQ, descQ, hintQ, bodyQ)
 
 	for category, weight := range i.categoryBoosts {
 		catQ := bleve.NewTermQuery(category)
@@ -488,6 +513,7 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 	req.Highlight = bleve.NewHighlight()
 	req.Highlight.AddField("body")
 	req.Highlight.AddField(descriptionField)
+	req.Highlight.AddField(hintField)
 
 	res, err := i.bleve.SearchInContext(ctx, req)
 	if err != nil {
@@ -504,9 +530,10 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 			continue
 		}
 		// The body fragment is the snippet a reader expects; the
-		// description's is the fallback for a page matched only on its
-		// frontmatter one-liner. Both are page content, so a snippet
-		// discloses nothing the hit itself does not.
+		// description's, then the hint's, is the fallback for a page
+		// matched only on its frontmatter one-liner. All are page
+		// content, so a snippet discloses nothing the hit itself does
+		// not.
 		snippet := snippetFor(hit)
 		score := hit.Score
 		// Type boosts multiply the FINAL score rather than adding a
@@ -534,11 +561,12 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 
 // snippetSources are the highlighted fields a snippet may come from, in
 // preference order.
-var snippetSources = [2]string{"body", descriptionField}
+var snippetSources = [3]string{"body", descriptionField, hintField}
 
 // snippetFor picks the fragment shown with a hit: the body's when the
 // query matched in the body, the description's when only the
-// frontmatter one-liner matched, and otherwise the first fragment
+// frontmatter one-liner matched, the hint's when only a pointer's
+// reason-to-follow matched, and otherwise the first fragment
 // bleve offered — the same best-effort snippet a title-only or ID-only
 // match has always shown.
 //
@@ -646,6 +674,13 @@ func buildMapping(titleAnalyzer string) (*mapping.IndexMappingImpl, error) {
 	descriptionFieldMapping.Analyzer = "standard"
 	descriptionFieldMapping.Store = true
 	docMap.AddFieldMappingsAt(descriptionField, descriptionFieldMapping)
+
+	// hint is a pointer's one-sentence reason to follow it: prose, like
+	// description, and mapped the same way for the same reasons.
+	hintFieldMapping := bleve.NewTextFieldMapping()
+	hintFieldMapping.Analyzer = "standard"
+	hintFieldMapping.Store = true
+	docMap.AddFieldMappingsAt(hintField, hintFieldMapping)
 
 	// category is indexed as a single keyword token (no analysis) so
 	// values match exactly, not as stemmed/analysed tokens.

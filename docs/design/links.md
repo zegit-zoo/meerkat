@@ -99,6 +99,28 @@ content hit. Defaults (`search.DefaultTypeBoosts`): pointer ×4, skill
 ×2, example ×1.5 — starting points to be tuned from retrieval telemetry
 (issue F), not constants. An empty map disables the boost.
 
+The defaults are right for a **hub** and wrong for a **leaf**, and a
+collection says which it is in `content-source.yaml` (#88):
+
+```yaml
+    search:
+      type_boosts: {pointer: 1.0}
+```
+
+- **Hub** — a small tier of routing pages above thin content, each
+  pointer a hop to another collection or an MCP server. Keep the
+  defaults: the pointer outranking the page is the point.
+- **Leaf** — a content collection that cites its sources through
+  pointers, one per book chapter or article. There a pointer is a
+  reference, not a route, and ×4 lets a citation outrank the page that
+  answers the question. Set `pointer: 1.0` (or `type_boosts: {}` to
+  switch type boosting off entirely).
+
+Absent keeps the defaults; the map, when given, replaces them for that
+collection only. A pointer's `hint:` is indexed too, at the body's
+weight (`docs/SEARCH.md`), so the one sentence that says what is at the
+other end is searchable on either shape.
+
 ## Wire shapes
 
 Every search hit (`mk_search`, `POST /search`, `mk search --json`)
@@ -136,7 +158,8 @@ page IDs never reach a span; the disclosure rule is unchanged.
 - Following a pointer automatically (an agent hops by calling
   `mk_search` on the target collection; issue D adds the tree manifest
   that makes the hop explicit and bounded).
-- Per-collection boost configuration in `content-source.yaml`; the
-  option exists in code and can be plumbed when a deployment needs it.
+- Deriving the default from the pointer's target — boosting only a
+  pointer that hops out of its own collection. `type_boosts` makes the
+  choice explicit per collection instead (#88).
 - Markdown links inside page bodies (`[x](./orders.md)`, OKF §6.1)
   remain plain text; only frontmatter links are resolved.

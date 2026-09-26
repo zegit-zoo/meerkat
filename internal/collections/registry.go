@@ -57,6 +57,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"sort"
 	"strings"
@@ -773,12 +774,22 @@ type Hit struct {
 }
 
 // searchOptions derives the index options from the collection's
-// source layout: the title analyzer (standard | ngram).
+// source: the title analyzer (layout.analyzer: standard | ngram) and
+// the per-type score multipliers (search.type_boosts). Each collection
+// builds its own index from its own source, so one collection's boosts
+// never reach another's ranking.
 func (c *Collection) searchOptions() []search.Option {
+	var opts []search.Option
 	if a := c.Source.Layout.Analyzer; a != "" {
-		return []search.Option{search.WithTitleAnalyzer(a)}
+		opts = append(opts, search.WithTitleAnalyzer(a))
 	}
-	return nil
+	// A nil map means the key was absent: keep search.DefaultTypeBoosts.
+	// An empty, non-nil map is `type_boosts: {}` — boosting off — and
+	// must reach WithTypeBoosts as such, which maps.Clone preserves.
+	if s := c.Source.Search; s != nil && s.TypeBoosts != nil {
+		opts = append(opts, search.WithTypeBoosts(maps.Clone(s.TypeBoosts)))
+	}
+	return opts
 }
 
 // New builds a registry over cols, which must be non-empty and
