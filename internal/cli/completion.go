@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -41,6 +42,14 @@ import (
 // Errors are returned, never printed: stdout is the completion protocol
 // and a stray line on it corrupts the shell's parse. Every caller turns
 // an error into "no completions".
+//
+// The re-resolution runs under completionResolveTimeout. For a local
+// source it is a directory walk and finishes long before that; for a
+// remote one (type: url, gcs, s3) it is a real network round trip —
+// a conditional fetch or a metadata call — and an unreachable or slow
+// store would otherwise hold the user's shell for as long as the SDK's
+// own timeout, if it has one. Past the deadline the TAB simply offers
+// nothing, like any other resolution error.
 func completionContent(cmd *cobra.Command) error {
 	if cmd == nil {
 		// A subcommand driven directly, without a root command — the
@@ -57,8 +66,16 @@ func completionContent(cmd *cobra.Command) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, cancel := context.WithTimeout(ctx, completionResolveTimeout)
+	defer cancel()
 	return resolveContent(ctx, kbDir, contentSource)
 }
+
+// completionResolveTimeout bounds completionContent's re-resolution. A
+// second is well above a warm remote metadata call and still short
+// enough that a TAB against a dead endpoint feels like "no
+// completions", not a hung shell. A variable so a test can shorten it.
+var completionResolveTimeout = time.Second
 
 // completeSourceIDs lists every source.id from sources.yaml.
 // Wired by `mk ingest --source <TAB>`.

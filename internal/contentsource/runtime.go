@@ -266,7 +266,7 @@ func resolveSourceInner(ctx context.Context, src Source, cfgPath string) (Resolv
 		}
 		return ResolvedCollection{Dir: dir, Source: src, Provenance: "disk:" + dir}, nil
 	case TypeURL:
-		dir, ferr := FetchURL(src)
+		dir, ferr := FetchURL(ctx, src)
 		if ferr != nil {
 			return ResolvedCollection{}, fmt.Errorf("content-source.yaml (%s): %w", cfgPath, ferr)
 		}
