@@ -260,3 +260,26 @@ func pageIDs(pages []kb.Page) []string {
 	}
 	return out
 }
+
+// The type-boosted path (issue #87): one page in ten is a pointer, so
+// the default ×4 reorders hits, and run wraps the query in a custom
+// score so bleve ranks on the boosted score before it cuts.
+func BenchmarkQueryStagedExactBoosted(b *testing.B) {
+	pages := syntheticCorpus(500)
+	for k := range pages {
+		if k%10 == 0 {
+			pages[k].Front.Type = kb.TypePointer
+		}
+	}
+	idx, err := NewFromPages(pages)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer idx.Close()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := idx.QueryStaged(context.Background(), kb.Unfiltered(), "rate limiting retries", 10); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
