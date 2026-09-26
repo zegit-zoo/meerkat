@@ -39,7 +39,7 @@ func conformance(t *testing.T) conformanceEnv {
 	endpoint := os.Getenv("MEERKAT_TEST_S3_ENDPOINT")
 	bucket := os.Getenv("MEERKAT_TEST_S3_BUCKET")
 	if endpoint == "" && bucket == "" {
-		t.Skip("MEERKAT_TEST_S3_ENDPOINT/BUCKET not set; skipping S3 conformance (see scripts/garage-up.sh)")
+		t.Skip("MEERKAT_TEST_S3_ENDPOINT/BUCKET not set; skipping S3 conformance (see scripts/garage-up.sh and scripts/versitygw-up.sh)")
 	}
 	if bucket == "" {
 		t.Fatal("MEERKAT_TEST_S3_BUCKET is required when MEERKAT_TEST_S3_ENDPOINT is set")

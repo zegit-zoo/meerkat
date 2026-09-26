@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -43,7 +45,7 @@ func conformanceSpec(t *testing.T) (*Spec, *s3.Client) {
 	endpoint := os.Getenv("MEERKAT_TEST_S3_ENDPOINT")
 	bucket := os.Getenv("MEERKAT_TEST_S3_BUCKET")
 	if endpoint == "" && bucket == "" {
-		t.Skip("MEERKAT_TEST_S3_ENDPOINT/BUCKET not set; skipping S3 conformance (see scripts/garage-up.sh)")
+		t.Skip("MEERKAT_TEST_S3_ENDPOINT/BUCKET not set; skipping S3 conformance (see scripts/garage-up.sh and scripts/versitygw-up.sh)")
 	}
 	var b [8]byte
 	_, _ = rand.Read(b[:])
@@ -198,5 +200,85 @@ func TestS3Conformance_StoreFlow(t *testing.T) {
 	}
 	if fp3, _ := st.Fingerprint(ctx); fp3 == fp2 {
 		t.Error("a live write did not move the fingerprint")
+	}
+}
+
+// TestS3Conformance_ConcurrentUpdate is the property the "shared memory
+// store safe" row of docs/design/object-stores.md claims for a provider
+// that enforces conditional writes: when many writers update from the
+// SAME version at the same moment, exactly one wins, every other one gets
+// a *ConflictError, and the object holds the winner's bytes. StoreFlow's
+// stale write is sequential, so a provider that checked the precondition
+// and published the write non-atomically would pass it and still lose
+// updates here (#72 review). A provider that does not enforce
+// conditional writes runs single_writer and makes no concurrency claim,
+// so it is skipped.
+func TestS3Conformance_ConcurrentUpdate(t *testing.T) {
+	spec, _ := conformanceSpec(t)
+	provider := os.Getenv("MEERKAT_TEST_S3_PROVIDER")
+	enforces, known := providerEnforcesWrites[provider]
+	if !known {
+		t.Skipf("provider %q not in providerEnforcesWrites; run the matrix test first", provider)
+	}
+	if !enforces {
+		t.Skipf("%s does not enforce conditional writes: it runs single_writer, which makes no concurrency claim", provider)
+	}
+	ctx := context.Background()
+	st, err := OpenS3(ctx, spec)
+	if err != nil {
+		t.Fatalf("OpenS3: %v", err)
+	}
+	const key = "team/race.md"
+	v1, err := st.Put(ctx, key, []byte("v1"), CreateOnly())
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	const writers = 16
+	type outcome struct {
+		body    string
+		version Version
+		err     error
+	}
+	results := make([]outcome, writers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // release every writer at once
+			body := fmt.Sprintf("writer-%02d", i)
+			v, err := st.Put(ctx, key, []byte(body), UpdateFrom(v1))
+			results[i] = outcome{body: body, version: v, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	var winners []outcome
+	for _, r := range results {
+		if r.err == nil {
+			winners = append(winners, r)
+			continue
+		}
+		var conflict *ConflictError
+		if !errors.As(r.err, &conflict) {
+			t.Errorf("%s: a losing writer got %v, want *ConflictError", provider, r.err)
+		}
+	}
+	if len(winners) != 1 {
+		t.Fatalf("%s: %d of %d writers updating from the same version succeeded, want exactly 1 — concurrent conditional PUTs are not atomic per key",
+			provider, len(winners), writers)
+	}
+	body, _, err := st.api.Read(ctx, spec.Bucket, spec.Prefix+key, "")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(body) != winners[0].body {
+		t.Errorf("%s: object holds %q, but the only successful writer wrote %q", provider, body, winners[0].body)
+	}
+	if got, ok, err := st.Stat(ctx, key); err != nil || !ok || got != winners[0].version {
+		t.Errorf("%s: Stat = %q ok=%v err=%v, want the winner's version %q", provider, got, ok, err, winners[0].version)
 	}
 }
