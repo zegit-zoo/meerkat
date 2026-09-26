@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -183,23 +184,69 @@ func rewriteCommitMessage(t Task) string {
 
 // Snapshot reads every task's page before the run so FinalizeRewrites
 // can tell exactly what changed. Keyed by PagePath.
+//
+// Reads go through an os.Root over the working copy, like every read and
+// write in FinalizeRewrites (issue #91): os.Root re-resolves each path
+// component against the open directory and refuses to leave it, so
+// containment is enforced by the OS rather than by string comparison.
 func Snapshot(workdir string, tasks []Task) (map[string][]byte, error) {
+	root, err := os.OpenRoot(workdir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
 	out := map[string][]byte{}
 	for _, t := range tasks {
 		if t.Role != RoleLibrarian {
 			continue
 		}
-		full := filepath.Join(workdir, filepath.FromSlash(t.PagePath))
-		if !isPathWithinBase(workdir, full) {
+		rel := filepath.FromSlash(t.PagePath)
+		if !isPathWithinBase(workdir, filepath.Join(workdir, rel)) {
 			return nil, fmt.Errorf("%s escapes the working copy", t.PagePath)
 		}
-		b, err := os.ReadFile(full) //nolint:gosec // G304: checked against the working copy above.
+		b, err := readPage(root, rel)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", t.PagePath, err)
 		}
 		out[t.PagePath] = b
 	}
 	return out, nil
+}
+
+// errNotAPage is readPage's refusal of anything but a single regular
+// file.
+var errNotAPage = errors.New("not a single regular file")
+
+// readPage reads the page at rel under root, and only if it is a single
+// regular file. A rewrite edits one field of the page it was given, so a
+// run that left a symlink there — even one that stays inside the tree —
+// or a hard link with a second name has replaced the page rather than
+// edited it. Reading through either would compare, and report, another
+// file's content; restoring through either would overwrite that file.
+func readPage(root *os.Root, rel string) ([]byte, error) {
+	fi, err := root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: mode %s", errNotAPage, fi.Mode().Type())
+	}
+	if n := linkCount(fi); n > 1 {
+		return nil, fmt.Errorf("%w: %d hard links", errNotAPage, n)
+	}
+	return root.ReadFile(rel)
+}
+
+// restorePage puts the snapshot back at rel as a fresh regular file.
+// Whatever the run left there is unlinked first — the name, not what it
+// points at — so a planted symlink or hard link is never written
+// through.
+func restorePage(root *os.Root, rel string, orig []byte) error {
+	if err := root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return root.WriteFile(rel, orig, 0o600)
 }
 
 // Rewritten is what FinalizeRewrites decided about one task.
@@ -218,7 +265,17 @@ type Rewritten struct {
 // changed and stay within the length cap. A violation restores the
 // snapshot (the agent's commit, if any, is on the review branch and
 // is the operator's to discard) and is reported as rejected.
+//
+// Every read and write goes through an os.Root over the working copy
+// (issue #91), and the page must still be a single regular file: see
+// readPage and restorePage.
 func FinalizeRewrites(ctx context.Context, workdir string, results []Result, before map[string][]byte) ([]Rewritten, error) {
+	root, err := os.OpenRoot(workdir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
 	var out []Rewritten
 	m := telemetry.Record(ctx)
 	for _, r := range results {
@@ -233,8 +290,8 @@ func FinalizeRewrites(ctx context.Context, workdir string, results []Result, bef
 			out = append(out, rw)
 			continue
 		}
-		full := filepath.Join(workdir, filepath.FromSlash(t.PagePath))
-		if !isPathWithinBase(workdir, full) {
+		rel := filepath.FromSlash(t.PagePath)
+		if !isPathWithinBase(workdir, filepath.Join(workdir, rel)) {
 			rw.Action, rw.Detail = "failed", "page path escapes the working copy"
 			m.LibrarianRewrite(rw.Action)
 			out = append(out, rw)
@@ -247,9 +304,23 @@ func FinalizeRewrites(ctx context.Context, workdir string, results []Result, bef
 			out = append(out, rw)
 			continue
 		}
-		after, err := os.ReadFile(full) //nolint:gosec // G304: checked against the working copy above.
-		if err != nil {
+		after, err := readPage(root, rel)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
 			rw.Action, rw.Detail = "failed", "page missing after run: "+err.Error()
+			m.LibrarianRewrite(rw.Action)
+			out = append(out, rw)
+			continue
+		case err != nil:
+			// The run replaced the page with a link, or a path component
+			// now leads out of the working copy. os exports no sentinel
+			// for os.Root's containment refusal, so the underlying error
+			// is carried for the operator either way.
+			if rerr := restorePage(root, rel, orig); rerr != nil {
+				rw.Action, rw.Detail = "failed", "page path escapes the working copy: "+err.Error()+"; snapshot NOT restored: "+rerr.Error()
+			} else {
+				rw.Action, rw.Detail = "rejected", "the page was replaced ("+err.Error()+"); snapshot restored"
+			}
 			m.LibrarianRewrite(rw.Action)
 			out = append(out, rw)
 			continue
@@ -263,7 +334,7 @@ func FinalizeRewrites(ctx context.Context, workdir string, results []Result, bef
 		reason, beforeV, afterV := onlyFieldChanged(t, orig, after)
 		rw.Before, rw.After = beforeV, afterV
 		if reason != "" {
-			if err := os.WriteFile(full, orig, 0o600); err != nil { //nolint:gosec // G703: checked against the working copy above.
+			if err := restorePage(root, rel, orig); err != nil {
 				return out, err
 			}
 			rw.Action, rw.Detail = "rejected", reason+"; snapshot restored"

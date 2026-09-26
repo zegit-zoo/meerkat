@@ -157,7 +157,17 @@ Additional hardening in place:
   one. `os.Root` re-resolves every component against the open directory and
   refuses to leave it, so a link inside the working copy that points outside
   is refused by the kernel rather than trusted by a string comparison
-  (`TestFinalize_SymlinkOutOfWorkingCopyIsRefused`).
+  (`TestFinalize_SymlinkOutOfWorkingCopyIsRefused`). The librarian's
+  rewrite path (`Snapshot` and `FinalizeRewrites` in
+  `internal/ingest/rewrite.go`) does the same (#91), and goes one step
+  further, because a rewrite edits a page that already exists. A page the
+  run replaced with a symlink (even one that stays inside the tree) or
+  with a hard link to another file is rejected rather than read. The
+  snapshot is restored by unlinking whatever is at the path and writing a
+  fresh file, never by writing through a link
+  (`TestFinalizeRewrites_ReplacedPageIsRejectedNotWrittenThrough`). The
+  planning-path helpers (`writeWithin`, `mustRead`) do not use an
+  `os.Root` yet; that is tracked in #92.
 - `type: url` / `type: gcs` / `type: s3` content archive extraction (`internal/contentsource/archive.go`)
   treats every entry as hostile: symlink and hardlink entries are skipped
   outright (never created, never followed — the same escape vector
