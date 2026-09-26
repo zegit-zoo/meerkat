@@ -19,13 +19,13 @@ catches, and how to fix the things they flag.
 | `docker buildx --provenance` | SLSA provenance attestation for the container image | CI release workflow (`docker` job) | Attached to the image manifest as an OCI referrer |
 | cosign (image) | Cosign keyless (Fulcio + Rekor) signature on the pushed image manifest | CI release workflow (`docker` job) | Cosign-verifiable transparency-logged signature |
 
-CI (GitHub Actions) runs lint, test, govulncheck, and gitleaks as
+CI (GitHub Actions) runs lint, test, govulncheck, gosec, and gitleaks as
 **parallel** jobs on every push and PR; `release.yml` re-runs the full
 gate before GoReleaser, so a vulnerable `main` cannot be tagged.
 
-We don't run `semgrep-sast` (~19 min on a fresh runner); `gosec` (run
-inside golangci-lint) already covers the Go-specific weaknesses it
-would flag.
+We don't run `semgrep-sast` (~19 min on a fresh runner); `gosec` — its
+own CI job at HIGH severity, plus the low-severity pass inside
+golangci-lint — already covers the Go-specific weaknesses it would flag.
 
 ---
 
@@ -158,7 +158,7 @@ Additional hardening in place:
   refuses to leave it, so a link inside the working copy that points outside
   is refused by the kernel rather than trusted by a string comparison
   (`TestFinalize_SymlinkOutOfWorkingCopyIsRefused`).
-- `type: url` / `type: gcs` content archive extraction (`internal/contentsource/archive.go`)
+- `type: url` / `type: gcs` / `type: s3` content archive extraction (`internal/contentsource/archive.go`)
   treats every entry as hostile: symlink and hardlink entries are skipped
   outright (never created, never followed — the same escape vector
   `internal/kbdir`'s read-side adapter is hardened against, reproduced here
@@ -168,11 +168,13 @@ Additional hardening in place:
   goes through an `os.Root` rooted at the extraction directory, so
   containment holds even against a name engineered to defeat a
   string-only check; and per-file, cumulative, and entry-count caps bound
-  decompression against a zip-bomb-style archive. A `type: gcs` bundle is
-  extracted by that same code; a `type: gcs` prefix mount applies the same
-  entry-name validation and `os.Root` containment to remote object names,
-  with per-file, cumulative and object-count caps of its own
-  (`internal/contentsource/gcs.go`).
+  decompression against a zip-bomb-style archive. A `type: gcs` or
+  `type: s3` bundle is extracted by that same code; a prefix mount on
+  either applies the same entry-name validation and `os.Root` containment
+  to remote object names, with per-file, cumulative and object-count caps
+  of its own — one shared implementation for both providers
+  (`internal/contentsource/objectstore.go`), so neither backend has a
+  fetch path of its own to harden separately.
 
 ---
 
@@ -200,7 +202,7 @@ is small but worth being explicit about:
 | `mk mcp serve-http` **telemetry export** (`observability:`) | Request metadata leaving the process to a collector — frequently a shared one, frequently a third party's — and carrying more than the operator realised; a plaintext export across a cluster network; a collector credential ending up in a committed config file; an exporter outage becoming an availability incident | **Opt-in and off by default.** With no `observability:` block and no `OTEL_*` variable no SDK is constructed at all — no spans, no exporter, no goroutine, no socket — and `/metrics` and the JSON logs are byte-identical to what they were (pinned by `TestObservability_ZeroConfigurationChangesNothing`). **Data classification:** a span is exported OUT of the trust boundary, so it is held to a stricter rule than the access log beside it. Spans and the new metrics carry only counts, durations, booleans, outcomes from a closed set, the server's own matched route pattern, and a collection's configuration ORDINAL. Never: query text, page IDs, page or memory content, tags, memory keys, collection names, bucket/object/prefix names, bearer tokens, any OAuth claim, the OIDC subject/email/groups/tenant, MCP session IDs, or `r.URL.Path`. The access log deliberately still carries `sub`/`issuer`/`tenant` — it stays on the operator's stderr; identity is **not** on a default span, and correlating a trace to a principal is a separate decision that has not been made. Error TEXT is never recorded on a span either (meerkat's messages quote queries, collection names, buckets); spans get a classified outcome and the log gets the sentence. `TestObservability_NoSpanOrMetricCarriesAForbiddenValue` drives every read surface and walks every recorded span and metric label asserting each of those classes is absent. **TLS on by default:** a plaintext `http://` collector endpoint is refused at config load unless `otlp.insecure: true` is written out, and `OTEL_EXPORTER_OTLP_INSECURE` cannot revoke a posture the file stated. **No credentials in `content-source.yaml`:** there is no `headers:` field, only `headers_env:`, which names an environment variable read at startup — the same reasoning that gives `type: gcs` no key-file field, and a test asserts the schema marshals no `headers:`/`token:`/`api_key:`/`password:` key. **No inbound surface:** the collector endpoint comes from configuration/environment only; no MCP request, header or tool argument can name an endpoint or add a header. Trace context is correlation data, never authorization data, and W3C baggage is not propagated in either direction. **Never an availability dependency:** the span queue is bounded and drops rather than growing (`meerkat_otel_spans_dropped_total`), export failures are counted (`meerkat_otel_export_failures_total`) and log-rate-limited, and the shutdown flush is bounded, so a dead collector cannot fail `/readyz`, fail a search or hold a pod in Terminating. See [design/observability.md](design/observability.md). |
 | `mk http serve` API key, and the traffic it guards | Disclosure — in code/logs, or on the wire | Key comparison is constant-time (`subtle.ConstantTimeCompare`), the key is never echoed, and the server refuses to start without one. **The server has no TLS of its own** (`ListenAndServe`, never `ListenAndServeTLS`) — default bind is loopback (`127.0.0.1`). Exposed beyond one host without a TLS-terminating reverse proxy in front, the bearer token and every response body cross the network in plaintext. See `docs/INTEGRATION-OPENWEBUI.md` for the reverse-proxy pattern. |
 | `mk ingest --execute` spawns an agent CLI (`opencode` or `claude`) | Prompt injection: `Task.Prompt` is rendered from `ingestion/prompts/*.md` in the ingested content source, so a malicious prompt file in any source repo in `sources.yaml` is an arbitrary-action path, running with `cmd.Dir`/`--dir` set to a working copy that holds push credentials, at the operator's full privilege. The generated instruction itself includes a `git push` recipe. | Ingested content is treated as **trusted input** to the agent — meerkat does not sandbox or vet it. The real control is permission prompts: by default the agent CLI runs *with* its normal permission prompts, so an injected instruction still has to get past those before it acts. `--trust-sources` disables the prompts (passes `--dangerously-skip-permissions` to the agent CLI) for unattended/CI runs; it prints a stderr warning before executing. Operators who enable `--trust-sources` must trust every source repo listed in `sources.yaml` — as much as they trust code they'd merge unreviewed. |
-| Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk. **When served from a runtime content source instead** (`--kb-dir`/`MEERKAT_KB_DIR`, or a `content-source.yaml` `type: local`/`type: url`/`type: gcs` source), the three rows above apply here too: unverified for `disk:<path>`, digest-verified (with the same caveats) for `url:<url>@...`, generation-pinned for `gcs://...` — either way, outside the gosec walk and the cosign-signed release. |
+| Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk. **When served from a runtime content source instead** (`--kb-dir`/`MEERKAT_KB_DIR`, or a `content-source.yaml` `type: local`/`type: url`/`type: gcs`/`type: s3` source), the rows above apply here too: unverified for `disk:<path>`, digest-verified (with the same caveats) for `url:<url>@...`, version-pinned for `gcs://...` (generation) and `s3://...` (ETag) — either way, outside the gosec walk and the cosign-signed release. |
 
 ### Collection authorization: invisible, not denied
 
@@ -401,7 +403,10 @@ not be conflated:
   `content-source.yaml` source), `url:<url>@<digest12>` (a `type: url`
   `content-source.yaml` source — `<digest12>` is the first 12 hex
   characters of its verified `sha256`), `gcs://<bucket>/<object>@<gen>` /
-  `gcs://<bucket>/<prefix>*@<fingerprint>` (a `type: gcs` source), or
+  `gcs://<bucket>/<prefix>*@<fingerprint>` (a `type: gcs` source),
+  `s3://<bucket>/<object>@<etag>` / `s3://<bucket>/<prefix>*@<fingerprint>`
+  (a `type: s3` source — S3 has no generation counter, so the provider's
+  ETag is the immutability token), or
   `collections:<n>` when several named collections are mounted at once —
   in which case each collection's own `kb_source`-vocabulary provenance
   is reported in `mk version --json`'s `collections` array. Set once per

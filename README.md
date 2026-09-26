@@ -1243,9 +1243,9 @@ make release-snapshot  # local cross-platform build, no publish
 `.github/workflows/ci.yml` runs on every push to `main` and every pull
 request, with no job-to-job dependency: `lint` (golangci-lint, `go mod tidy`
 drift, `make docs-check`), `test` (`make cover-check`), `vuln`
-(govulncheck), `markdown` (markdownlint over every `*.md`), `gitleaks`, and
-`s3-conformance`, a matrix that replays the object-store assumptions against
-a real [Garage](https://garagehq.deuxfleurs.fr/) and
+(govulncheck), `gosec`, `markdown` (markdownlint over every `*.md`),
+`gitleaks`, and `s3-conformance`, a matrix that replays the object-store
+assumptions against a real [Garage](https://garagehq.deuxfleurs.fr/) and
 [Versity Gateway](https://github.com/versity/versitygw).
 `.github/workflows/release.yml` is separate, triggered by a `v*.*.*` tag: a
 `verify` job re-runs lint, tests, govulncheck, gosec and gitleaks on the
