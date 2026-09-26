@@ -18,7 +18,7 @@ import (
 // not: a typo in a vendor name ("datadgo") or a Swedish/English mix
 // ("drift-detektering") returned nothing, which in a mob of knowledge
 // bases means a wasted hop and a false "not found". The planner keeps
-// the exact BM25 query as the first and usual answer and falls back, in
+// the exact query as the first and usual answer and falls back, in
 // order, to
 //
 //	fuzzy   — every term of five or more characters may differ by one

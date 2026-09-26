@@ -14,16 +14,26 @@ no embedding model, and no network once the content is resolved.
 
 | | |
 |---|---|
-| Backend | [Bleve](https://blevesearch.com/) — a pure-Go BM25 search engine |
+| Backend | [Bleve](https://blevesearch.com/) — a pure-Go full-text search library; the in-memory index scores with **TF-IDF** |
 | Index | In-memory only; rebuilt at startup |
 | Cold start | ~150 ms on 730+ pages |
 | Per-query latency | ~5 ms warm |
 | Boosts | title × 5, id × 3, description × 2, hint × 1, body × 1; then a per-`type` multiplier, configurable per collection |
 | Highlights | yes — `Snippet` field with `<mark>` markers; body first, then frontmatter `description`, then a pointer's `hint` |
 
-## Why BM25 (and not embeddings)
+## Why keyword search (and not embeddings)
 
-- The KB is bounded to a few thousand pages. BM25 is plenty for
+The in-memory index is bleve's `upsidedown` type (`bleve.NewMemOnly`),
+which scores with **TF-IDF** — earlier versions of this page said BM25.
+bleve implements BM25 only for its `scorch` index type, so setting
+`ScoringModel: bm25` on this index changes nothing (measured: identical
+results on the mk-mpe retrieval eval). Switching index types is tracked
+in [#101](https://github.com/zegit-zoo/meerkat/issues/101). The
+practical difference: TF-IDF has no term-frequency saturation and its
+field-length norm strongly favours short fields, which is why the boost
+table below is nominal rather than exact.
+
+- The KB is bounded to a few thousand pages. Keyword scoring is plenty for
   page-name lookups (e.g. "Rate-Limiting", "Idempotency") and
   keyword queries.
 - An embedding model would mean shipping ONNX/PyTorch (10×–100×
@@ -123,6 +133,25 @@ of that claim in
 the same pair of strings swapped between the fields, so the only thing
 separating the two pages is which field the query matched in.
 
+The multipliers are **nominal**. Under TF-IDF a clause's score also
+carries the field-length norm, which is large for a one-line field and
+small for `_all`, the whole page's text. The query-string ("body") clause
+runs against `_all`. So a short field outweighs the same term in a long
+body by far more than its multiplier says. Two things keep that in
+check:
+
+- `description` and `hint` are **not** in `_all` (#85 review). They are
+  scored once, through their own clause, rather than a second time
+  through `_all` with twice the coordination factor. On the mk-mpe eval
+  this took dev hit@1 from 0.53 to 0.57, with holdout unchanged.
+- The trade-off is recorded, not accidental. A page that only
+  **mentions** a term in its one-line description still outranks one
+  whose 300-word body uses it five times. With the double count it won
+  by about 40×; it now wins by about 7×. The dev split did not favour a
+  lower weight: ×1 was within noise, and ×0.5 lost MRR.
+  `TestDescription_OneLineMentionVsDenseBody` pins the ordering and
+  bounds the margin.
+
 `hint` joined in [#88](https://github.com/zegit-zoo/meerkat/issues/88)
 with a clause of its own at the body's weight. On a pointer it is
 often the only sentence that names what is at the other end in the
@@ -204,7 +233,7 @@ each only when the previous one found **nothing**:
 
 | Stage | What runs | Reported as |
 |---|---|---|
-| `exact` | the BM25 query above — title ×5, id ×3, description ×2, hint ×1, body, category boosts | `meerkat.search.stage="exact"` |
+| `exact` | the query above — title ×5, id ×3, description ×2, hint ×1, body, category boosts | `meerkat.search.stage="exact"` |
 | `fuzzy` | per term: one edit allowed from 5 characters, two from 8; shorter terms stay exact | `"fuzzy"` |
 | `prefix` | per term of 3+ characters: prefix match on title/id/description/hint/body | `"prefix"` |
 
@@ -287,8 +316,9 @@ are **not** keyword facets. `description` is OKF's one-line summary
 (SPEC.md §4.1), prose rather than a value to filter on, so it gets the
 body's standard analyser — including
 on a hub tier, where titles are n-grammed but a summary is still a
-sentence — and it stays in `_all`, so a plain query-string search
-reaches it. It is stored as well as indexed, so a page matched only on
+sentence. It has its own clause in every stage and is kept out of
+`_all` (see the boost section above), and `description:foo` targets it
+directly. It is stored as well as indexed, so a page matched only on
 its summary still shows a snippet: `run` prefers the body fragment and
 falls back to the description's, chosen from the fields bleve reports
 term locations in rather than from the fragments themselves (bleve

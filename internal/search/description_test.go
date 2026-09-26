@@ -245,3 +245,46 @@ func TestDescription_RespectsVisibility(t *testing.T) {
 		})
 	}
 }
+
+// TestDescription_OneLineMentionVsDenseBody records the boost trade-off
+// the #85 review measured, so it is a decision rather than an accident.
+// Under TF-IDF a one-line field's length norm dwarfs a 300-word body's,
+// so a page that only MENTIONS a term in its description outranks a page
+// whose body is ABOUT it (five uses in 300 words). With description in
+// `_all` as well, that margin was about 40×. Kept out of `_all` it is
+// about 7×.
+//
+// The mk-mpe eval's dev split did not favour a lower weight: ×1 was
+// within noise and ×0.5 lost MRR. So the ordering stands, and the test
+// bounds the margin. If it fails because the margin grew, something put
+// the double count back. If a scoring change (BM25, #101) makes the dense
+// body win, re-derive the boost table in docs/SEARCH.md and update this
+// test to match.
+func TestDescription_OneLineMentionVsDenseBody(t *testing.T) {
+	prose := func(n, seed int) string {
+		vocab := strings.Fields("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu apple banana cherry damson elder fig grape hazel iris jasmine kale lemon mango nutmeg olive pepper quince radish sage thyme")
+		out := make([]string, n)
+		for i := range out {
+			out[i] = vocab[(i*7+seed)%len(vocab)]
+		}
+		return strings.Join(out, " ")
+	}
+	// Neither ID nor title carries the term: only the fields under test do.
+	idx := newTestIndex(t, []kb.Page{
+		describedPage("concepts/replication", "Replicated writes", prose(295, 1)+" quorum quorum quorum quorum quorum", ""),
+		describedPage("concepts/storage-notes", "Storage notes", prose(300, 3), "How the quorum is chosen for replicated writes in the store."),
+	})
+	res, err := idx.Query("quorum", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 2 {
+		t.Fatalf("res = %v, want both pages found", ids(res))
+	}
+	if res[0].Page.ID != "concepts/storage-notes" {
+		t.Fatalf("top = %s; the recorded trade-off is that a description mention outranks a dense body (see the comment)", res[0].Page.ID)
+	}
+	if ratio := res[0].Score / res[1].Score; ratio > 10 {
+		t.Errorf("description-only / dense-body score ratio = %.1f, want <= 10 (about 7 with description out of _all; about 40 with it in)", ratio)
+	}
+}

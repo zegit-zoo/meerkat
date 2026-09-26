@@ -1181,7 +1181,8 @@ Refreshing means rebuilding: `make build` re-resolves the source, and
 
 ## How search works
 
-Bleve full-text BM25 index, built in-memory at startup from whichever
+Bleve full-text keyword index (TF-IDF scoring — see
+[docs/SEARCH.md](docs/SEARCH.md)), built in-memory at startup from whichever
 content was resolved. Title gets ×5 boost, ID gets ×3, body baseline.
 Reference measurement from an internal deployment: cold-start ~150 ms on
 ~700 pages. Your own cold-start time depends on the size of the knowledge
@@ -1305,7 +1306,7 @@ internal/
   kb/         Page + Frontmatter over the resolved (or embedded) content
   collections/    named collections + search/show/list routing across them
   refresh/    opt-in runtime reconciliation: the refresh: controller
-  search/     Bleve in-memory BM25 index
+  search/     Bleve in-memory keyword index
   sources/    sources.yaml + prompts + templates
   ingest/     Plan(opts) + Run(ctx, tasks) — planner + executor
   intake/     raw intake store: deposits, candidate pages, parked items

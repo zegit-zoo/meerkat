@@ -80,9 +80,10 @@ func TestHint_FieldSyntax(t *testing.T) {
 
 // Field weights with the type multiplier switched off, so only the field
 // that matched separates the pages: a title beats a hint, and a
-// hint-only match still beats a body-only one — the hint has a clause of
-// its own on top of `_all`, where the body has only `_all`. Mirror-image
-// fixtures, as in the description tests.
+// hint-only match still beats a body-only one — the hint has a short
+// field and a clause of its own, where the body is scored only through
+// the whole-page `_all`. Mirror-image fixtures, as in the description
+// tests.
 func TestHint_WeightsAgainstTitleAndBody(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

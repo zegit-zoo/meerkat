@@ -21,7 +21,7 @@ func newSearchCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Full-text search across the loaded knowledge base",
-		Long: `Run a BM25 full-text search over every page in the loaded knowledge
+		Long: `Run a full-text keyword search over every page in the loaded knowledge
 base.
 
 Title and ID matches are boosted so page-name lookups (e.g. "onboarding",
