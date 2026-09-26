@@ -18,8 +18,8 @@ no embedding model, and no network once the content is resolved.
 | Index | In-memory only; rebuilt at startup |
 | Cold start | ~150 ms on 730+ pages |
 | Per-query latency | ~5 ms warm |
-| Boosts | title × 5, id × 3, body × 1 |
-| Highlights | yes — `Snippet` field with `<mark>` markers |
+| Boosts | title × 5, id × 3, description × 2, body × 1 |
+| Highlights | yes — `Snippet` field with `<mark>` markers; body first, frontmatter `description` when the body has no match |
 
 ## Why BM25 (and not embeddings)
 
@@ -44,9 +44,10 @@ func New() (*Index, error) {
     batch := bidx.NewBatch()
     for _, p := range pages {
         batch.Index(p.ID, map[string]any{
-            "id":    p.ID,
-            "title": p.Title,
-            "body":  p.Body,
+            "id":          p.ID,
+            "title":       p.Title,
+            "description": p.Front.Description, // OKF's one-line summary
+            "body":        p.Body,
         })
     }
     bidx.Batch(batch)
@@ -54,8 +55,8 @@ func New() (*Index, error) {
 }
 ```
 
-Three indexed fields with the standard analyser (lowercase, stop-words,
-simple stemming). Bleve's mapping wires this up:
+Four indexed text fields with the standard analyser (lowercase,
+stop-words, simple stemming). Bleve's mapping wires this up:
 
 ```go
 func buildMapping() *mapping.IndexMappingImpl {
@@ -64,10 +65,13 @@ func buildMapping() *mapping.IndexMappingImpl {
     title := bleve.NewTextFieldMapping(); title.Analyzer = "standard"
     id    := bleve.NewTextFieldMapping(); id.Analyzer    = "standard"
     body  := bleve.NewTextFieldMapping(); body.Analyzer  = "standard"
+    desc  := bleve.NewTextFieldMapping(); desc.Analyzer  = "standard"
     body.Store = true                       // needed for Highlight
-    docMap.AddFieldMappingsAt("title", title)
-    docMap.AddFieldMappingsAt("id",    id)
-    docMap.AddFieldMappingsAt("body",  body)
+    desc.Store = true                       // same — it can supply the snippet
+    docMap.AddFieldMappingsAt("title",       title)
+    docMap.AddFieldMappingsAt("id",          id)
+    docMap.AddFieldMappingsAt("description", desc)
+    docMap.AddFieldMappingsAt("body",        body)
     im.AddDocumentMapping("_default", docMap)
     return im
 }
@@ -76,21 +80,41 @@ func buildMapping() *mapping.IndexMappingImpl {
 ## Querying
 
 ```go
-// Boosted disjunction over title + id + body.
-titleQ := bleve.NewMatchQuery(q); titleQ.SetField("title"); titleQ.SetBoost(5.0)
-idQ    := bleve.NewMatchQuery(q); idQ.SetField("id");       idQ.SetBoost(3.0)
+// Boosted disjunction over title + id + description + body.
+titleQ := bleve.NewMatchQuery(q); titleQ.SetField("title");       titleQ.SetBoost(5.0)
+idQ    := bleve.NewMatchQuery(q); idQ.SetField("id");             idQ.SetBoost(3.0)
+descQ  := bleve.NewMatchQuery(q); descQ.SetField("description");  descQ.SetBoost(2.0)
 bodyQ  := bleve.NewQueryStringQuery(q)              // baseline 1.0
 
-combined := bleve.NewDisjunctionQuery(titleQ, idQ, bodyQ)
+combined := bleve.NewDisjunctionQuery(titleQ, idQ, descQ, bodyQ)
 req := bleve.NewSearchRequestOptions(combined, limit, 0, false)
 req.Highlight = bleve.NewHighlight()
 req.Highlight.AddField("body")
+req.Highlight.AddField("description")
 ```
 
-The boost ratio (5 / 3 / 1) was tuned empirically against mk's
-~200-page corpus and carried over here. Page-name queries now
-reliably surface the actual page (not an incidental mention) as
-the top hit; see `internal/search/index_test.go::TestQuery_RankByTitle`.
+The title/id/body ratio (5 / 3 / 1) was tuned empirically against mk's
+~200-page corpus and carried over here; `description` was slotted into
+it afterwards, at 2. Page-name queries reliably surface the actual page
+(not an incidental mention) as the top hit; see
+`internal/search/index_test.go::TestQuery_RankByTitle`.
+
+| Field | Boost | Why |
+|---|---|---|
+| `title` | × 5 | the page's name: a title match is almost always the page asked for |
+| `id` | × 3 | as name-like as a title, and what a cross-reference cites |
+| `description` | × 2 | OKF's hand-written one-line summary: deliberate wording, denser than prose, but not a name |
+| `body` | × 1 | baseline — the prose itself |
+
+`description` was added in [#83](https://github.com/zegit-zoo/meerkat/issues/83).
+It sits **below** `title` and `id`, so title-first page-name lookup is
+exactly what it was; and **above** `body`, because a term someone put in
+a one-line summary is a stronger signal than the same term mentioned in
+passing halfway down a page. Two mirror-image fixtures pin both halves
+of that claim in
+`internal/search/description_test.go::TestDescription_BoostSitsBetweenTitleAndBody`:
+the same pair of strings swapped between the fields, so the only thing
+separating the two pages is which field the query matched in.
 
 ## Search syntax
 
@@ -103,11 +127,14 @@ some power without needing docs:
 | `"circuit breaker"` | exact phrase |
 | `+retry -cache` | must contain retry, must not contain cache |
 | `title:Foo` | match against the title field only |
+| `description:Foo` | match against the frontmatter one-liner only |
 | `body:foo*` | wildcard suffix in body |
 | `cache OR queue` | either term |
 
-Field targeting against `id` and `title` works alongside the boost,
-so `title:retry` returns only pages whose title contains "retry".
+Field targeting against `id`, `title` and `description` works alongside
+the boost, so `title:retry` returns only pages whose title contains
+"retry", and `description:retry` only those whose frontmatter summary
+does.
 
 ## The staged planner: exact, then fuzzy, then prefix
 
@@ -116,9 +143,16 @@ each only when the previous one found **nothing**:
 
 | Stage | What runs | Reported as |
 |---|---|---|
-| `exact` | the BM25 query above — title ×5, id ×3, body, category boosts | `meerkat.search.stage="exact"` |
+| `exact` | the BM25 query above — title ×5, id ×3, description ×2, body, category boosts | `meerkat.search.stage="exact"` |
 | `fuzzy` | per term: one edit allowed from 5 characters, two from 8; shorter terms stay exact | `"fuzzy"` |
-| `prefix` | per term of 3+ characters: prefix match on title/id/body | `"prefix"` |
+| `prefix` | per term of 3+ characters: prefix match on title/id/description/body | `"prefix"` |
+
+All three stages search the same four fields with the same relative
+boosts (`termClauses` in `planner.go`), so a typo or a half-typed word
+reaches a frontmatter description exactly as it reaches a title or a
+body — `capybra` and `capy` both find a page whose only "capybara" is in
+its `description`
+(`internal/search/description_test.go::TestDescription_FoundAtEveryStage`).
 
 So `datadgo monitor serach` finds the Datadog page at the fuzzy stage,
 `pager` finds PagerDuty at the prefix stage, and a query that hits
@@ -159,6 +193,22 @@ above (`BenchmarkMatch`). The `mk_list`/`POST /list`/`mk list`
 surfaces still filter through `kb.Filter` today; switching them to
 `Match` is a small follow-up once the index is guaranteed built before
 `list` is served.
+
+`description` is the one frontmatter field that is **not** a keyword
+facet: it is OKF's one-line summary (SPEC.md §4.1), prose rather than a
+value to filter on, so it gets the body's standard analyser — including
+on a hub tier, where titles are n-grammed but a summary is still a
+sentence — and it stays in `_all`, so a plain query-string search
+reaches it. It is stored as well as indexed, so a page matched only on
+its summary still shows a snippet: `run` prefers the body fragment and
+falls back to the description's, chosen from the fields bleve reports
+term locations in rather than from the fragments themselves (bleve
+returns a fragment for every highlighted field, matched or not, so the
+head of a long body would otherwise mask the real match).
+Incrementally indexed pages carry the field too — `Index.Put` and the
+bulk build share one `indexDoc` — so a memory saved mid-session is
+searchable by its description immediately
+(`internal/search/put_test.go::TestPut_IndexesTheFrontmatterDescription`).
 
 ## Title analyzer for a hub tier (`layout.analyzer: ngram`)
 

@@ -23,6 +23,7 @@ import (
 	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
 	"github.com/blevesearch/bleve/v2/analysis/tokenizer/unicode"
 	"github.com/blevesearch/bleve/v2/mapping"
+	"github.com/blevesearch/bleve/v2/search"
 	"github.com/blevesearch/bleve/v2/search/query"
 
 	"github.com/zegit-zoo/meerkat/internal/kb"
@@ -30,9 +31,12 @@ import (
 
 // Result is a single search hit with the matching page and a score.
 type Result struct {
-	Page    kb.Page
-	Score   float64
-	Snippet string // plain-text excerpt around the first match (best-effort)
+	Page  kb.Page
+	Score float64
+	// Snippet is a plain-text excerpt around the first match
+	// (best-effort): the body fragment, or the frontmatter
+	// description's when the body has none — see run.
+	Snippet string
 	// Stage is the planner stage that produced this result: exact,
 	// fuzzy or prefix. See planner.go.
 	Stage Stage
@@ -212,6 +216,7 @@ func indexDoc(p kb.Page) map[string]any {
 		"id":             p.ID,
 		"title":          p.Title,
 		"body":           p.Body,
+		descriptionField: p.Front.Description,
 		"category":       p.Front.Category,
 		subcategoryField: p.Front.Subcategory,
 		statusField:      p.Front.Status,
@@ -238,6 +243,34 @@ const (
 	statusField      = "status"
 	typeField        = "type"
 	tagsField        = "tags"
+)
+
+// descriptionField carries OKF's one-line `description` (SPEC.md §4.1),
+// promoted into kb.Frontmatter.Description. Unlike the facets above it
+// is ANALYSED PROSE, not a keyword: a curated one-line summary is
+// written in the words a searcher types, so it is searchable text with
+// the body's analyzer, it participates in `_all` (so `description:foo`
+// and a plain query-string search both reach it), and it is stored so
+// it can supply the result snippet when the body has nothing to
+// highlight.
+const descriptionField = "description"
+
+// Field boosts, multiplied with each field's BM25 score. The exact
+// stage builds one clause per field with these weights, and the fuzzy
+// and prefix stages reuse them verbatim (planner.go's termClauses) so a
+// fallback ranks the way the exact stage would have.
+//
+// description sits BELOW title and id and ABOVE body: a term in a
+// hand-written one-line summary is deliberate — a stronger signal than
+// an incidental body mention — but the page whose NAME is the query is
+// still the page the searcher asked for, so title-first page-name
+// lookup is untouched. It is one notch under id rather than over it
+// because a page ID is as name-like as a title (issue #83).
+const (
+	titleBoost       = 5.0
+	idBoost          = 3.0
+	descriptionBoost = 2.0
+	bodyBoost        = 1.0
 )
 
 const (
@@ -383,9 +416,10 @@ func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result
 //
 // Field boosts (multiplied with BM25 score):
 //
-//	title  × 5.0
-//	id     × 3.0
-//	body   × 1.0   (baseline)
+//	title       × 5.0
+//	id          × 3.0
+//	description × 2.0   (frontmatter one-liner; see descriptionBoost)
+//	body        × 1.0   (baseline)
 //
 // Category boosts (configurable via WithCategoryBoosts):
 //
@@ -410,21 +444,26 @@ func (i *Index) QueryAs(ctx context.Context, v kb.Viewer, q string, limit int) (
 }
 
 // exactQuery builds the exact stage: the BM25 query meerkat has always
-// run — title (×5) and id (×3) match queries plus the bleve query-string
-// form over the body, plus one boosted clause per configured category.
+// run — title (×5), id (×3) and description (×2) match queries plus the
+// bleve query-string form over the body, plus one boosted clause per
+// configured category.
 func (i *Index) exactQuery(q string) query.Query {
 	titleQ := bleve.NewMatchQuery(q)
 	titleQ.SetField("title")
-	titleQ.SetBoost(5.0)
+	titleQ.SetBoost(titleBoost)
 
 	idQ := bleve.NewMatchQuery(q)
 	idQ.SetField("id")
-	idQ.SetBoost(3.0)
+	idQ.SetBoost(idBoost)
+
+	descQ := bleve.NewMatchQuery(q)
+	descQ.SetField(descriptionField)
+	descQ.SetBoost(descriptionBoost)
 
 	bodyQ := bleve.NewQueryStringQuery(q)
 
-	clauses := make([]query.Query, 0, 3+len(i.categoryBoosts))
-	clauses = append(clauses, titleQ, idQ, bodyQ)
+	clauses := make([]query.Query, 0, 4+len(i.categoryBoosts))
+	clauses = append(clauses, titleQ, idQ, descQ, bodyQ)
 
 	for category, weight := range i.categoryBoosts {
 		catQ := bleve.NewTermQuery(category)
@@ -448,6 +487,7 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 	req := bleve.NewSearchRequestOptions(combined, limit, 0, false)
 	req.Highlight = bleve.NewHighlight()
 	req.Highlight.AddField("body")
+	req.Highlight.AddField(descriptionField)
 
 	res, err := i.bleve.SearchInContext(ctx, req)
 	if err != nil {
@@ -463,10 +503,11 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 		if !v.CanSee(page) {
 			continue
 		}
-		snippet := ""
-		if frags, ok := hit.Fragments["body"]; ok && len(frags) > 0 {
-			snippet = frags[0]
-		}
+		// The body fragment is the snippet a reader expects; the
+		// description's is the fallback for a page matched only on its
+		// frontmatter one-liner. Both are page content, so a snippet
+		// discloses nothing the hit itself does not.
+		snippet := snippetFor(hit)
 		score := hit.Score
 		// Type boosts multiply the FINAL score rather than adding a
 		// clause the way category boosts do: an additive clause cannot
@@ -489,6 +530,39 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 	// rely on the order.
 	sort.SliceStable(out, func(a, b int) bool { return out[a].Score > out[b].Score })
 	return out, nil
+}
+
+// snippetSources are the highlighted fields a snippet may come from, in
+// preference order.
+var snippetSources = [2]string{"body", descriptionField}
+
+// snippetFor picks the fragment shown with a hit: the body's when the
+// query matched in the body, the description's when only the
+// frontmatter one-liner matched, and otherwise the first fragment
+// bleve offered — the same best-effort snippet a title-only or ID-only
+// match has always shown.
+//
+// Which field matched is read from hit.Locations (the fields bleve found
+// terms in) rather than inferred from the fragments, because bleve
+// returns a fragment for every highlighted field whether that field
+// matched or not: the head of a long body would otherwise mask a
+// description-only match with text that has nothing to do with the
+// query.
+func snippetFor(hit *search.DocumentMatch) string {
+	for _, f := range snippetSources {
+		if len(hit.Locations[f]) == 0 {
+			continue
+		}
+		if frags := hit.Fragments[f]; len(frags) > 0 {
+			return frags[0]
+		}
+	}
+	for _, f := range snippetSources {
+		if frags := hit.Fragments[f]; len(frags) > 0 {
+			return frags[0]
+		}
+	}
+	return ""
 }
 
 // Close releases resources held by the index. Cheap for in-memory
@@ -528,7 +602,8 @@ func (i *Index) Close() error {
 }
 
 // buildMapping configures Bleve's analysis pipeline. Title gets a
-// higher boost than body so page-name matches outrank casual mentions.
+// higher boost than body so page-name matches outrank casual mentions,
+// and the frontmatter description sits between the two.
 func buildMapping(titleAnalyzer string) (*mapping.IndexMappingImpl, error) {
 	im := bleve.NewIndexMapping()
 
@@ -560,6 +635,17 @@ func buildMapping(titleAnalyzer string) (*mapping.IndexMappingImpl, error) {
 	bodyField.Analyzer = "standard"
 	bodyField.Store = true // needed for Highlight
 	docMap.AddFieldMappingsAt("body", bodyField)
+
+	// description is prose, so it gets the body's analyzer rather than
+	// the keyword one the facets above use — and the standard analyzer
+	// even when titles are n-grammed, since a one-line summary is a
+	// sentence, not a name to be matched by its first letters. Stored
+	// for the same reason the body is: Highlight needs the field value
+	// to build a fragment from (see run).
+	descriptionFieldMapping := bleve.NewTextFieldMapping()
+	descriptionFieldMapping.Analyzer = "standard"
+	descriptionFieldMapping.Store = true
+	docMap.AddFieldMappingsAt(descriptionField, descriptionFieldMapping)
 
 	// category is indexed as a single keyword token (no analysis) so
 	// values match exactly, not as stemmed/analysed tokens.

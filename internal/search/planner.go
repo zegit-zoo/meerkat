@@ -133,9 +133,9 @@ func hasOperatorPrefix(q string) bool {
 }
 
 // fuzzyQuery builds the fuzzy stage: per term, a disjunction over
-// title/id/body with the same boosts the exact stage uses; terms too
-// short to fuzz match exactly. Nil when no term can be fuzzed — the
-// stage would then be the exact stage again.
+// title/id/description/body with the same boosts the exact stage uses;
+// terms too short to fuzz match exactly. Nil when no term can be fuzzed
+// — the stage would then be the exact stage again.
 func (i *Index) fuzzyQuery(terms []string) query.Query {
 	fuzzable := false
 	perTerm := make([]query.Query, 0, len(terms))
@@ -171,7 +171,7 @@ func (i *Index) fuzzyQuery(terms []string) query.Query {
 }
 
 // prefixQuery builds the prefix stage: per term of prefixMinLen or
-// more characters, a prefix match over title/id/body.
+// more characters, a prefix match over title/id/description/body.
 func (i *Index) prefixQuery(terms []string) query.Query {
 	perTerm := make([]query.Query, 0, len(terms))
 	for _, t := range terms {
@@ -191,14 +191,18 @@ func (i *Index) prefixQuery(terms []string) query.Query {
 	return bleve.NewDisjunctionQuery(perTerm...)
 }
 
-// termClauses applies build to the three content fields with the exact
-// stage's relative boosts and returns their disjunction.
+// termClauses applies build to the four content fields with the exact
+// stage's relative boosts and returns their disjunction. Every field the
+// exact stage searches is listed here, with the same weight, so a typo
+// or a half-typed word reaches the frontmatter description exactly as it
+// reaches a title or a body.
 func (i *Index) termClauses(term string, build func(field string, boost float64) query.Query) query.Query {
 	_ = term
 	return bleve.NewDisjunctionQuery(
-		build("title", 5.0),
-		build("id", 3.0),
-		build("body", 1.0),
+		build("title", titleBoost),
+		build("id", idBoost),
+		build(descriptionField, descriptionBoost),
+		build("body", bodyBoost),
 	)
 }
 
