@@ -220,6 +220,16 @@ content:
     #                                # refused for a corpus over 1 MiB.
     #                                # See docs/SEARCH.md.
 
+  # Search: how THIS collection's pages are ranked. OPTIONAL; absent keeps
+  # the defaults. type_boosts multiplies a hit's score by a weight for its
+  # frontmatter `type`; the defaults (pointer 4, skill 2, example 1.5)
+  # assume a hub of routing pages. A leaf collection that cites sources
+  # through pointers sets pointer: 1.0 so a citation cannot outrank the page
+  # that answers the question. {} switches type boosting off. Weights must
+  # be > 0. See docs/SEARCH.md and docs/design/links.md.
+  # search:
+  #   type_boosts: {pointer: 1.0}
+
   # --- memory: a WRITABLE store for this collection (runtime, MCP only) ------
   #
   # Enables the mk_save_memory MCP tool for this collection: agents save
