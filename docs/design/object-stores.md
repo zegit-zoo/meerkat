@@ -82,7 +82,7 @@ as the provider that enforces conditional writes.
 | `GetObject` + `If-Match` refused with 412 | yes | **yes** (observed) | **yes** (observed) | yes (`ifGenerationMatch`) |
 | `PutObject` + `If-None-Match: *` refused | yes | **no — silently accepted** (observed) | **yes** (observed) | yes |
 | `PutObject` + `If-Match` refused | yes | **no — silently accepted** (observed) | **yes** (observed) | yes |
-| shared memory store safe | yes | **no** — `single_writer: true` required | **yes** (observed) | yes |
+| shared memory store safe | yes | **no** — `single_writer: true` required | **yes** (observed: 16 concurrent writers from one version, exactly one wins) | yes |
 | listing pagination (>1000 keys) | yes | yes (observed, 1005 keys) | yes (observed, 1005 keys) | iterator |
 | bucket lifecycle rules | yes | **no** | not verified | yes |
 | SSE-S3 (`sse: AES256`) | yes | ignored (encrypts at rest by its own config) | not verified | n/a |
