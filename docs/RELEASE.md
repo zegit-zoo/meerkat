@@ -95,7 +95,7 @@ To publish the bump immediately rather than waiting for the cron:
 gh workflow run bump.yml --repo zegit-zoo/homebrew-tap -f tag=vX.Y.Z
 ```
 
-Users on a brew install upgrade with `brew upgrade meerkat`; `mk
+Users on a brew install upgrade with `brew update && brew upgrade meerkat`; `mk
 update` refuses there (see
 [docs/INSTALL.md](INSTALL.md#updating-a-homebrew-install)), so the tap
 being stale is the only thing standing between a release and its

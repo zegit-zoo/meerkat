@@ -43,10 +43,10 @@ limit, but it's optional.
 brew install zegit-zoo/tap/meerkat
 meerkat version
 
-brew upgrade meerkat               # how a brew install updates
+brew update && brew upgrade meerkat   # how a brew install updates
 ```
 
-Under Homebrew 7's tap trust the full name above trusts only this
+Under Homebrew's tap trust (6.0 and later) the full name above trusts only this
 formula, so no `brew trust` step is needed; if you `brew tap
 zegit-zoo/tap` first and install by bare name, run
 `brew trust --formula zegit-zoo/tap/meerkat` before `brew install
@@ -61,7 +61,7 @@ Two consequences worth knowing up front:
 - **`mk update` is disabled for Homebrew installs.** The binary lives
   in the Cellar and belongs to `brew`; an in-place swap would be
   undone by the next `brew upgrade`. `mk update` detects this and
-  refuses with a pointer to `brew upgrade meerkat`. `mk update
+  refuses with a pointer to `brew update && brew upgrade meerkat`. `mk update
   --check` still works — it only reads.
 - **The formula declares `conflicts_with "mk"`**, the unrelated Plan 9
   `mk` build tool in homebrew/core. `brew` refuses to install both

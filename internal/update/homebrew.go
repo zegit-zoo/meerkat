@@ -24,11 +24,18 @@ import (
 // meerkat-bootstrap return it, and each already prefixes its own name
 // when printing.
 var ErrHomebrewManaged = errors.New(
-	"this install is managed by Homebrew — replacing the binary in place would be undone by the next `brew upgrade`; run `brew upgrade meerkat` instead")
+	"this install is managed by Homebrew — replacing the binary in place would be undone by the next `brew upgrade`; run `brew update && brew upgrade meerkat` instead")
 
 // HomebrewUpgradeCommand is the update path for a Homebrew install,
 // used wherever a message would otherwise say `mk update`.
-const HomebrewUpgradeCommand = "brew upgrade meerkat"
+//
+// It refreshes the tap first. The update nag reads the latest GitHub
+// release, but brew only re-reads a tap on its own auto-update schedule
+// (HOMEBREW_AUTO_UPDATE_SECS, a day by default), so a bare
+// `brew upgrade meerkat` right after a release often answers "already up
+// to date" (#70 review). The tap itself also trails a release by the
+// hours its bump job takes.
+const HomebrewUpgradeCommand = "brew update && brew upgrade meerkat"
 
 // IsHomebrewInstall reports whether exe lives inside a Homebrew
 // Cellar, i.e. whether the binary is owned by a `brew`-installed

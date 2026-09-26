@@ -35,7 +35,7 @@ type notifyCache struct {
 //
 //	mk: a newer release is available — v0.4.1 (you have v0.4.0). Run `mk update`.
 //
-// For a Homebrew-managed binary the hint is `brew upgrade meerkat`
+// For a Homebrew-managed binary the hint is HomebrewUpgradeCommand
 // instead — `mk update` refuses to touch a Cellar install.
 //
 // Errors and missing-cache cases are silent. This is a courtesy,

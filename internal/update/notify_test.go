@@ -192,7 +192,7 @@ func mustWriteCache(t *testing.T, root string, c notifyCache) {
 }
 
 // TestNagHint_HomebrewSwitch: a Homebrew-managed binary must be told
-// to run `brew upgrade meerkat`, never `mk update` — `mk update`
+// to run `brew update && brew upgrade meerkat`, never `mk update` — `mk update`
 // refuses on a Cellar install (see ErrHomebrewManaged), so the old
 // hint would have sent the user into a dead end.
 func TestNagHint_HomebrewSwitch(t *testing.T) {
@@ -202,7 +202,7 @@ func TestNagHint_HomebrewSwitch(t *testing.T) {
 		want     string
 	}{
 		{name: "self-managed install", homebrew: false, want: "`mk update`"},
-		{name: "homebrew install", homebrew: true, want: "`brew upgrade meerkat`"},
+		{name: "homebrew install", homebrew: true, want: "`brew update && brew upgrade meerkat`"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -231,7 +231,7 @@ func TestEmitNag_Wording(t *testing.T) {
 		{
 			name:      "homebrew install mentions brew upgrade",
 			homebrew:  true,
-			wantHint:  "Run `brew upgrade meerkat`.",
+			wantHint:  "Run `brew update && brew upgrade meerkat`.",
 			wantNoHit: "mk update",
 		},
 	}
