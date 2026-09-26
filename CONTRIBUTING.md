@@ -45,22 +45,34 @@ pre-commit install                         # gates `git commit`
 pre-commit install --hook-type pre-push    # gates `git push`
 ```
 
+That is the whole setup. You do **not** install `golangci-lint` or the
+scanners by hand, and you do **not** set `GOTOOLCHAIN`: every gate runs
+through the `Makefile`, which pins each tool, installs it on first use
+into `.tools/<name>@<version>/`, invokes it from there by absolute path
+(`$PATH` is never consulted), and exports `go.mod`'s `toolchain` line so
+the gates typecheck against the pinned Go rather than whatever your
+package manager last shipped. `make clean` deliberately leaves `.tools/`
+alone; `make clean-tools` removes it.
+
 What each hook stage runs:
 
 - **commit-time**: hygiene (end-of-file newline, trailing whitespace,
   YAML syntax, merge markers, files over 2 MiB); `gitleaks` (secrets
   scan, per `.gitleaks.toml`); `markdownlint` (per `.markdownlint.yaml`,
   with `--fix`; content fixtures are excluded in `.markdownlintignore`);
-  `golangci-lint` (per `.golangci.yml`: errcheck, govet, staticcheck,
+  `make lint` — the pinned `golangci-lint`, and only when the commit
+  touches Go files (per `.golangci.yml`: errcheck, govet, staticcheck,
   unused, gosec, misspell, unconvert, unparam, prealloc, whitespace,
-  bodyclose, plus gofmt/goimports); a config-verify check that runs
-  when `.golangci.yml` itself changes.
+  bodyclose, plus gofmt/goimports); and `make lint-config`, which
+  validates `.golangci.yml` against that same binary's schema, and runs
+  only when `.golangci.yml` itself changes.
 - **push-time**: `make docs-check` (generated docs in sync), `make test`
   (full suite, race detector), `make vuln` (govulncheck).
 
 Note: `gosec` runs both inside `golangci-lint` (low-severity,
 low-confidence — commit-time) and as its own high-severity-only target,
-`make gosec`, used in the release gate (`make pre-release`).
+`make gosec`, which is a CI job of its own and part of the release gate
+(`make pre-release`).
 
 Do not bypass these with `git commit --no-verify`, `git push --no-verify`,
 or `SKIP=<hook>`. If a hook is wrong, fix the hook, don't bypass it — a
@@ -78,20 +90,28 @@ locally before you push:
 | Lint → docs check | `make docs-check` | `docs/CLI.md` is **generated** from the cobra command tree; if it's stale, CI fails |
 | Test | `make cover-check` | full test suite with `-race` (needs `CGO_ENABLED=1`), then fails if total coverage drops below the floor in `Makefile` (`COVERAGE_MIN`, currently `48`) |
 | Vulnerability scan | `make vuln` | govulncheck against the actual import graph |
+| gosec | `make gosec` | gosec's own high-severity pass over our code (HIGH severity + medium confidence fails); `release.yml`'s `verify` job runs this same target as a release gate |
 | gitleaks | `make gitleaks` | scans history + working tree for committed secrets, per `.gitleaks.toml` |
 | Markdown lint | `npx markdownlint-cli@0.45.0 --config .markdownlint.yaml '**/*.md'` (or the pre-commit hook) | every `*.md` outside `.markdownlintignore` passes `markdownlint` |
+| Object store conformance (garage) | `eval "$(scripts/garage-up.sh)"`, then `go test -race -count=1 -run S3Conformance ./internal/contentsource/ ./internal/memory/` (the script exports `MEERKAT_TEST_S3_*`; `scripts/garage-up.sh down` stops it) | replays the object-store assumptions the unit-test fakes encode (ETags, `If-Match`, conditional writes, pagination) against a real [Garage](https://garagehq.deuxfleurs.fr/) |
+| Object store conformance (versitygw) | `eval "$(scripts/versitygw-up.sh)"`, then the same test command | the same conformance suite against a real [Versity Gateway](https://github.com/versity/versitygw); the two providers are one `fail-fast: false` matrix, so a drift in one still reports the other. Skipped when `MEERKAT_TEST_S3_ENDPOINT` is unset, so a plain `make test` is unaffected |
 
 A convenience target runs the fast subset in one shot:
 
 ```bash
-make pre-push   # lint + test + docs-check — same gate the pre-push hook runs
+make pre-push   # lint + test + docs-check — the fast local gate
 ```
 
+It is not identical to the pre-push hook stage, which runs `docs-check`,
+the race test suite and `govulncheck` (lint is a commit-stage hook, so
+`git push` doesn't repeat it).
+
 Security scans (`vuln`, `gosec`, `gitleaks`) run in CI as separate jobs
-but aren't part of `pre-push` since they're slower; run them together
-with `make pre-release` before tagging a release, or individually with
-`make vuln` / `make gosec` / `make gitleaks`. See `docs/SECURITY.md` for
-what each scanner catches and how to fix findings.
+and, apart from `vuln` on push, aren't part of the local gates since
+they're slower; run them together with `make pre-release` before tagging
+a release, or individually with `make vuln` / `make gosec` /
+`make gitleaks`. See `docs/SECURITY.md` for what each scanner catches
+and how to fix findings.
 
 ### If `docs/CLI.md` is out of sync
 
@@ -166,8 +186,8 @@ not a landing spot for outside work.
    squash-worthy commit history helps but isn't required; the PR
    title/commits feed the changelog.
 
-CI must pass (lint, test+coverage, vuln, gitleaks, markdown lint)
-before a PR is merged.
+CI must pass (lint, test+coverage, vuln, gosec, gitleaks, markdown lint,
+object-store conformance) before a PR is merged.
 
 ## Branch and tag protection
 

@@ -64,8 +64,12 @@ Labels every repo carries: `in-progress`, `needs-review`, `blocked` (plus GitHub
 
 - `main` requires **signed commits** (repository ruleset, no bypass); a squash-merge does not
   sign for you. Set up SSH or GPG signing before the first push.
-- The host Go may be newer than `go.mod`; pin with `GOTOOLCHAIN=go<version>` from `go.mod`
-  before running the gates.
+- The host Go may be newer than `go.mod`'s `toolchain` pin, and a `toolchain` line only ratchets
+  *up* — so a newer host Go is used as-is. `make` targets and the pre-commit hooks handle that for
+  you: the Makefile sets `GOTOOLCHAIN` from `go.mod` and exports it, so no prefix is needed for
+  `make <gate>`, `pre-commit run`, `git commit` or `git push`. A bare `go build`/`go test`/`go run`
+  outside make still needs one:
+  `GOTOOLCHAIN=$(awk '/^toolchain /{print $2}' go.mod) go test ./...` (works in zsh and bash).
 - The GitHub gitleaks Action needs a paid org license; CI runs the gitleaks CLI instead.
 - `golangci-lint` runs collide when two worktrees lint at once; serialize them.
 - A credential-helper test prompts when git can reach a terminal; run tests with
@@ -91,8 +95,12 @@ SLIs, self-improving intake) is designed and tracked in the private repo
   because GitHub has no private issues on public repos. Copy what graduates by hand; never move
   private content here.
 - **Gates.** `make lint`, `make cover-check`, `make vuln`, `make gosec`, `make gitleaks`,
-  `make docs-check`, and `markdownlint` all run in CI; the pre-commit hooks run the same set at
-  commit and push time. Run them before opening a PR.
+  `make docs-check`, and `markdownlint` all run in CI. The pre-commit hooks run a subset, and they
+  are **split across two stages**, not the same set twice: commit time is hygiene, `gitleaks`,
+  `markdownlint`, `make lint` (Go files only) and `make lint-config` (when `.golangci.yml` changes);
+  push time is `make docs-check`, the race test suite and `make vuln`. `gosec` and the coverage
+  floor run in CI only — `make pre-release` covers them locally. CONTRIBUTING.md's "What CI runs"
+  and hook-stage lists are the authoritative copy; run the gates before opening a PR.
 - **Shared S3 state is single-writer-per-key.** Garage ignores `If-None-Match: *` and `If-Match`
   on PUT; anything that needs multi-writer safety on one key must run on AWS, Versity Gateway
   or GCS, and
