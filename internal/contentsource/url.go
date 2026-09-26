@@ -1,6 +1,7 @@
 package contentsource
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -102,7 +103,12 @@ var urlHTTPClient = &http.Client{
 // (ResolveRuntime's LoadFile call does this); FetchURL re-checks the
 // scheme and digest shape itself anyway as defense in depth against
 // being called directly with an unvalidated Source.
-func FetchURL(src Source) (dir string, err error) {
+//
+// ctx bounds the download: a cancelled or expired context abandons the
+// request (shell completion resolves content under a short deadline so
+// an unresponsive server cannot hold the user's shell — see
+// internal/cli/completion.go). A cache hit makes no request at all.
+func FetchURL(ctx context.Context, src Source) (dir string, err error) {
 	if src.Type != TypeURL {
 		return "", fmt.Errorf("FetchURL: type %q is not %q", src.Type, TypeURL)
 	}
@@ -123,7 +129,7 @@ func FetchURL(src Source) (dir string, err error) {
 		return cacheDir, nil // immutable by digest: restarts are free.
 	}
 
-	tmpFile, gotDigest, err := downloadToTemp(src.URL)
+	tmpFile, gotDigest, err := downloadToTemp(ctx, src.URL)
 	if err != nil {
 		return "", fmt.Errorf("content.url %s: %w", src.URL, err)
 	}
@@ -153,8 +159,8 @@ func FetchURL(src Source) (dir string, err error) {
 // sha256 of exactly the bytes written. The caller is responsible for
 // removing the file on every path (success or failure) once it's done
 // with it.
-func downloadToTemp(rawURL string) (path string, sha256hex string, err error) {
-	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+func downloadToTemp(ctx context.Context, rawURL string) (path string, sha256hex string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", "", err
 	}

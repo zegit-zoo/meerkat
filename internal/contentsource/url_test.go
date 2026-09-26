@@ -1,6 +1,7 @@
 package contentsource
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -76,7 +77,7 @@ func TestFetchURL_EndToEnd_HappyPath(t *testing.T) {
 	srv, hits := serveOnce(t, body)
 	useTestServerClient(t, srv)
 
-	dir, err := FetchURL(Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: digest})
+	dir, err := FetchURL(context.Background(), Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: digest})
 	if err != nil {
 		t.Fatalf("FetchURL: %v", err)
 	}
@@ -116,7 +117,7 @@ func TestFetchURL_CacheHit_NoSecondDownload(t *testing.T) {
 	useTestServerClient(t, srv)
 
 	src := Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: digest}
-	dir1, err := FetchURL(src)
+	dir1, err := FetchURL(context.Background(), src)
 	if err != nil {
 		t.Fatalf("first FetchURL: %v", err)
 	}
@@ -125,7 +126,7 @@ func TestFetchURL_CacheHit_NoSecondDownload(t *testing.T) {
 		t.Fatalf("after first fetch, hits = %d, want 1", *hits)
 	}
 
-	dir2, err := FetchURL(src)
+	dir2, err := FetchURL(context.Background(), src)
 	if err != nil {
 		t.Fatalf("second FetchURL: %v", err)
 	}
@@ -154,7 +155,7 @@ func TestFetchURL_ShaMismatchRejected_NoCacheEntry(t *testing.T) {
 	}
 	t.Logf("content-source.yaml declares sha256=%s; server actually serves an archive whose real sha256=%s", wrongDigest, realDigest)
 
-	_, err := FetchURL(Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: wrongDigest})
+	_, err := FetchURL(context.Background(), Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: wrongDigest})
 	if err == nil {
 		t.Fatal("expected an error for a sha256 mismatch")
 	}
@@ -182,7 +183,7 @@ func TestFetchURL_ServerErrorStatusRejected(t *testing.T) {
 	t.Cleanup(srv.Close)
 	useTestServerClient(t, srv)
 
-	_, err := FetchURL(Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: strings.Repeat("a", 64)})
+	_, err := FetchURL(context.Background(), Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: strings.Repeat("a", 64)})
 	if err == nil {
 		t.Fatal("expected an error for a 500 response")
 	}
@@ -199,7 +200,7 @@ func TestFetchURL_RedirectToHTTPRejected(t *testing.T) {
 	t.Cleanup(srv.Close)
 	useTestServerClient(t, srv)
 
-	_, err := FetchURL(Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: strings.Repeat("a", 64)})
+	_, err := FetchURL(context.Background(), Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: strings.Repeat("a", 64)})
 	if err == nil {
 		t.Fatal("expected an error for a redirect to a non-https URL")
 	}
@@ -212,7 +213,7 @@ func TestFetchURL_RedirectToHTTPRejected(t *testing.T) {
 // ResolveRuntime/LoadFile's own type switch) with a non-url Source must
 // be rejected rather than doing anything.
 func TestFetchURL_TypeMismatchGuard(t *testing.T) {
-	_, err := FetchURL(Source{Type: TypeLocal, Path: "kb"})
+	_, err := FetchURL(context.Background(), Source{Type: TypeLocal, Path: "kb"})
 	if err == nil {
 		t.Fatal("expected an error for a non-url Source")
 	}
@@ -230,7 +231,7 @@ func TestFetchURL_ValidationDefenseInDepth(t *testing.T) {
 	}
 	for name, src := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := FetchURL(src); err == nil {
+			if _, err := FetchURL(context.Background(), src); err == nil {
 				t.Errorf("expected an error for %s", name)
 			}
 		})
@@ -251,7 +252,7 @@ func TestFetchURL_DownloadCapEnforced(t *testing.T) {
 	srv, _ := serveOnce(t, body)
 	useTestServerClient(t, srv)
 
-	_, err := FetchURL(Source{Type: TypeURL, URL: srv.URL + "/big.tar.gz", SHA256: digest})
+	_, err := FetchURL(context.Background(), Source{Type: TypeURL, URL: srv.URL + "/big.tar.gz", SHA256: digest})
 	if err == nil {
 		t.Fatal("expected an error for a response exceeding the download cap")
 	}
@@ -283,7 +284,7 @@ func TestFetchURL_IncompleteCacheDirIsNotTrusted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dir, err := FetchURL(Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: digest})
+	dir, err := FetchURL(context.Background(), Source{Type: TypeURL, URL: srv.URL + "/kb.tar.gz", SHA256: digest})
 	if err != nil {
 		t.Fatalf("FetchURL: %v", err)
 	}
