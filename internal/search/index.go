@@ -503,11 +503,29 @@ func (i *Index) exactQuery(q string) query.Query {
 	return bleve.NewDisjunctionQuery(clauses...)
 }
 
-// run executes one stage's query under the viewer's visibility clause
-// and assembles results with snippets.
+// run executes one stage's query for viewer v and returns its top
+// limit results by FINAL score: the field-boosted relevance score
+// multiplied by the page's type boost (typeBoost).
+//
+// The multiplier is applied INSIDE the query, as a bleve custom score
+// over every candidate, so bleve ranks and cuts on the final score
+// itself. Applying it to bleve's raw top-limit afterwards — as run did
+// until issue #87 — cut BEFORE boosting: a pointer whose raw score fell
+// just outside the raw top-limit was dropped even when its boosted
+// score would win, and `--limit 1` and `--limit 10` could disagree about
+// the top hit. Ranked natively, the results are prefix-stable: the first
+// n results of any larger limit are the results of limit n, because
+// bleve breaks ties the same way whatever the size of the request.
+//
+// When every configured weight is 1, or there are none, the query is
+// not wrapped at all. Wrapped, it costs about the same: the callback is
+// one map lookup per candidate (BenchmarkQueryStagedExactBoosted).
 func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limit int) ([]Result, error) {
 	if vis := visibilityClause(v); vis != nil {
 		combined = bleve.NewConjunctionQuery(vis, combined)
+	}
+	if i.boostsReorder() {
+		combined = query.NewCustomScoreQueryWithScorer(combined, i.boostedScore, nil, nil)
 	}
 	req := bleve.NewSearchRequestOptions(combined, limit, 0, false)
 	req.Highlight = bleve.NewHighlight()
@@ -534,29 +552,56 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 		// matched only on its frontmatter one-liner. All are page
 		// content, so a snippet discloses nothing the hit itself does
 		// not.
-		snippet := snippetFor(hit)
-		score := hit.Score
-		// Type boosts multiply the FINAL score rather than adding a
-		// clause the way category boosts do: an additive clause cannot
-		// reliably lift a two-line pointer page above a content page
-		// whose title matches every term, and "the hub's routing pages
-		// outrank its own content" is the property the mob design
-		// needs. A multiplier makes the rule legible: a typed page wins
-		// whenever its own match is within 1/boost of the best content
-		// hit.
-		if weight, ok := i.typeBoosts[page.Front.Type]; ok && weight > 0 {
-			score *= weight
-		}
 		out = append(out, Result{
 			Page:    page,
-			Score:   score,
-			Snippet: snippet,
+			Score:   hit.Score, // already multiplied by boostedScore
+			Snippet: snippetFor(hit),
 		})
 	}
-	// Bleve already sorts by score, but be explicit so callers can
-	// rely on the order.
+	// Bleve already sorts by the final score, but be explicit so callers
+	// can rely on the order. Stable, so bleve's tie order survives.
 	sort.SliceStable(out, func(a, b int) bool { return out[a].Score > out[b].Score })
 	return out, nil
+}
+
+// boostedScore is the custom score run hands bleve: a candidate's
+// relevance score times its page's type boost. bleve resolves the hit's
+// external ID before calling it. A hit with no page (index/page map
+// drift) keeps its score; run drops it anyway.
+func (i *Index) boostedScore(_ context.Context, d *search.DocumentMatch) (float64, error) {
+	page, ok := i.page(d.ID)
+	if !ok {
+		return d.Score, nil
+	}
+	return d.Score * i.typeBoost(page), nil
+}
+
+// typeBoost is the multiplier p's final score gets. Type boosts
+// multiply the FINAL score rather than adding a clause the way category
+// boosts do: an additive clause cannot reliably lift a two-line pointer
+// page above a content page whose title matches every term, and "the
+// hub's routing pages outrank its own content" is the property the mob
+// design needs. A multiplier makes the rule legible: a typed page wins
+// whenever its own match is within 1/boost of the best content hit —
+// across every hit the query matched, not only the ones that happened
+// to fit under the limit (see run).
+func (i *Index) typeBoost(p kb.Page) float64 {
+	if weight, ok := i.typeBoosts[p.Front.Type]; ok && weight > 0 {
+		return weight
+	}
+	return 1
+}
+
+// boostsReorder reports whether any configured type weight can change
+// a score: an empty map, or one whose every weight is 1 (or ignored as
+// non-positive, see typeBoost), leaves every score as bleve computed it.
+func (i *Index) boostsReorder() bool {
+	for _, weight := range i.typeBoosts {
+		if weight > 0 && weight != 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // snippetSources are the highlighted fields a snippet may come from, in

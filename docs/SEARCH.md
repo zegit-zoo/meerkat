@@ -242,6 +242,33 @@ A fallback pass costs about as much as the exact pass it follows,
 well inside the 5 ms p95 budget; a miss is cheaper than a hit because
 there are no snippets to build.
 
+### Type boosts are applied before the cut
+
+Every stage ends in the same step (`run` in `index.go`): score, apply
+the per-`type` multiplier (`search.DefaultTypeBoosts`, pointer ×4 —
+see [docs/design/links.md](design/links.md#ranking)), and only then cut
+to the limit. Before [#87](https://github.com/zegit-zoo/meerkat/issues/87)
+the cut came first: bleve returned the raw top-`limit`, so a pointer
+whose raw score sat just outside it was dropped even when its boosted
+score would have won, and `--limit 1` and `--limit 10` could disagree
+about the top hit. Results are now **prefix-stable**: the first `n`
+results of any larger limit are the results of limit `n`, at every
+stage and for every viewer
+(`internal/search/boostcut_test.go::TestTypeBoosts_ResultsArePrefixStable`).
+
+The multiplier runs inside the query: `run` wraps the stage query in a
+bleve custom score (`query.NewCustomScoreQueryWithScorer`) whose
+callback multiplies each candidate's score by its page's weight, so
+bleve's own collector ranks and cuts on the final score, and breaks
+ties the same way whatever the limit. Highlighting still covers only the
+hits returned. A collection whose weights are all 1 — or that has none,
+`type_boosts: {}` — runs the query unwrapped.
+
+| Case | Time per query |
+|---|---|
+| exact hit, no typed pages (as above) | 0.60 ms |
+| exact hit, one page in ten a pointer (`BenchmarkQueryStagedExactBoosted`) | 0.61 ms, from 0.59 ms before #87 |
+
 ## Frontmatter as fields
 
 `type`, `status`, `subcategory` and `tags` are indexed as **keyword
