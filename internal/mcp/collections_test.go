@@ -133,8 +133,9 @@ func TestTools_CollectionWithoutADescriptionStaysNameOnly(t *testing.T) {
 			t.Errorf("an undescribed collection got a dangling em dash:\n%s", text)
 		}
 	}
-	// And a registry in which nobody configured a description is
-	// byte-identical to the pre-#84 rendering.
+	// And a registry in which nobody configured a description renders
+	// just the names — "; "-separated since #84, where they were
+	// ", "-separated before it.
 	if got, want := collectionList(multiRegistry(t)), "runbooks; architecture"; got != want {
 		t.Errorf("collectionList without descriptions = %q, want %q", got, want)
 	}

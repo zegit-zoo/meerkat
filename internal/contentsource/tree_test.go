@@ -170,3 +170,48 @@ func TestResolveRuntimeCollections_Tree(t *testing.T) {
 		t.Errorf("cols = %d, root tree=%+v", len(cols), cols[0].Tree)
 	}
 }
+
+// TestResolveRuntimeCollections_TreeManifestDescriptionIsBounded is the
+// #96 reproduction (#86 review, finding 1): a child's manifest.yaml
+// carried a description far over the 500-character bound that
+// content-source.yaml's own description gets, and nothing checked it —
+// the walk copies it into the collection's source after that source was
+// validated. It is now refused at load, with the manifest named.
+func TestResolveRuntimeCollections_TreeManifestDescriptionIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		length  int
+		wantErr bool
+	}{
+		{"exactly the bound loads", maxDescriptionLen, false},
+		{"one over the bound is refused", maxDescriptionLen + 1, true},
+		{"the review's 4950-character payload is refused", 4950, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			desc := strings.Repeat("x", tc.length)
+			leaf := kbDir(t, base, "leaf", "kind: KnowledgeBase\nname: leaf\nparent: root\ndescription: "+desc+"\n")
+			root := kbDir(t, base, "root", "kind: KnowledgeBase\nname: root\ntier: 0\nchildren:\n"+child("leaf", leaf, "eager"))
+			cfgPath := filepath.Join(base, ConfigFile)
+			if err := os.WriteFile(cfgPath, []byte("tree:\n  type: local\n  path: "+root+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cols, err := ResolveRuntimeCollections(context.Background(), cfgPath)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("ResolveRuntimeCollections: %v", err)
+				}
+				if got := cols[1].Source.Description; len(got) != tc.length {
+					t.Fatalf("leaf description has %d characters, want %d", len(got), tc.length)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a %d-character manifest description loaded; want it refused", tc.length)
+			}
+			if !strings.Contains(err.Error(), ManifestFile) || !strings.Contains(err.Error(), "description is") {
+				t.Errorf("err = %v; want it to name %s and the description bound", err, ManifestFile)
+			}
+		})
+	}
+}

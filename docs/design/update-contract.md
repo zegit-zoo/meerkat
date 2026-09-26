@@ -328,6 +328,18 @@ contribution repo and the instructions stay here, where the rendering is
 per-caller, several fields long, and only matters to an agent that already
 has something to contribute.
 
+That makes a description part of the **tool definitions** an agent
+receives, which a model reads as more authoritative than a tool result.
+Whoever can edit it can steer agents. That includes the maintainer of a
+tree child's `manifest.yaml`, not only the operator who writes
+`content-source.yaml`. So the text is defended on both sides (#96):
+
+- **At load.** Both sources are bounded to 500 characters: `content-source.yaml` in `Source.validateContract`, and `manifest.yaml` in `Manifest.Validate`.
+- **At render.** `collectionBlurb`, the one path into tool definitions, drops control and format characters (ANSI escapes, bidi overrides and isolates, zero-width characters, tag characters), which are how text is hidden from a human reviewer while a model still reads it. It also caps what it renders.
+
+Neither step can make hostile prose harmless. Review a description like any
+other agent-facing instruction.
+
 The same rendering is the natural body of a future `mk_contribute`-style
 tool ("how do I add this?"), and of `mk list --collections`, where the
 nil-grants path renders the declared contract for a single-user CLI.
