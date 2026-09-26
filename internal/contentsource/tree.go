@@ -283,6 +283,16 @@ func (m Manifest) Validate() error {
 	if m.SizeHintBytes < 0 {
 		return fmt.Errorf("%s: size_hint_bytes must be >= 0", ManifestFile)
 	}
+	// The same bound content-source.yaml's description gets in
+	// validateContract (#96). A manifest's description becomes the
+	// collection's description (see the walk), and that is rendered into
+	// every MCP tool definition (#84) — and a manifest is written by
+	// whoever maintains the knowledge base, not by the operator who
+	// wrote content-source.yaml, so it gets no looser a bound.
+	if len(m.Description) > maxDescriptionLen {
+		return fmt.Errorf("%s: description is %d characters, max %d — it is rendered into an agent's context every time collections are listed; "+
+			"put long-form guidance in the knowledge base itself instead", ManifestFile, len(m.Description), maxDescriptionLen)
+	}
 	if m.Limits != nil {
 		if m.Limits.MaxHops < 0 || m.Limits.MaxSteps < 0 || m.Limits.MaxAttempts < 0 {
 			return fmt.Errorf("%s: limits must be >= 0 (0 means the default)", ManifestFile)

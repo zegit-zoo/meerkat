@@ -52,6 +52,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -339,10 +340,13 @@ func toolFilter(reg *collections.Registry) mcpserver.ToolFilterFunc {
 // collection this caller may not read was gone before this function saw
 // it — the same invisibility guarantee the handlers get from visible().
 //
-// No truncation happens here: `description:` is bounded to
-// maxDescriptionLen (500) at config load — internal/contentsource/
-// update.go's const, enforced in Source.validateContract — precisely
-// because it is rendered into an agent's context.
+// Every description passes through collectionBlurb, the one choke point
+// into tool definitions, which strips control and format characters and
+// caps the length. The configured text is bounded at load as well — 500
+// characters, in Source.validateContract for content-source.yaml and in
+// Manifest.Validate for a tree's manifest.yaml (#96) — but a tool
+// definition is authoritative text to a model, so the renderer does not
+// rely on every loader getting that right.
 func collectionList(reg *collections.Registry) string {
 	parts := make([]string, 0, reg.Len())
 	for _, c := range reg.All() {
@@ -357,6 +361,12 @@ func collectionList(reg *collections.Registry) string {
 	return strings.Join(parts, "; ")
 }
 
+// maxBlurbRunes caps a rendered description. It matches the 500-character
+// load-time bound (contentsource's maxDescriptionLen counts bytes, so a
+// valid description never reaches this cap); it exists for the text that
+// did not come through that check.
+const maxBlurbRunes = 500
+
 // collectionBlurb normalises a configured description for prose. A
 // content-source.yaml description is very often a YAML block scalar, so
 // it arrives with newlines and indentation that would break a tool
@@ -364,8 +374,30 @@ func collectionList(reg *collections.Registry) string {
 // collide with the "; " separator and the full stop the sentence around
 // it ends with. Both are presentation, so both are fixed here rather
 // than by asking operators to write their YAML to suit our prose.
+//
+// It is also the one choke point into tool definitions, so it is where
+// they are defended (#96). Control characters other than whitespace
+// (ESC and the rest of C0/C1) and format characters (bidi overrides and
+// isolates, zero-width characters, the BOM, tag characters) are dropped:
+// JSON escapes them, but a client that renders tool descriptions will
+// interpret them, and they are how text is hidden from a human reviewer
+// while a model still reads it. The result is then capped at
+// maxBlurbRunes.
 func collectionBlurb(desc string) string {
-	return strings.TrimRight(oneLine(desc), " .;,")
+	visible := strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return r // oneLine folds every kind of whitespace to one space
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, desc)
+	blurb := strings.TrimRight(oneLine(visible), " .;,")
+	if runes := []rune(blurb); len(runes) > maxBlurbRunes {
+		blurb = strings.TrimRight(string(runes[:maxBlurbRunes-1]), " .;,") + "…"
+	}
+	return blurb
 }
 
 // collectionArg builds the shared, optional "collection" argument. Its
