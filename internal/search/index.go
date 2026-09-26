@@ -1,7 +1,7 @@
 // Package search builds an in-memory Bleve full-text index over the
 // embedded knowledge base pages and exposes a small Query API.
 //
-// We deliberately use BM25 keyword search (no embeddings) because:
+// We deliberately use keyword search (no embeddings) because:
 //   - The KB is small (~200 pages), so keyword matches are usually exact
 //   - No external embedding model means the binary stays self-contained
 //   - Cold-start is sub-second on every supported platform
@@ -139,7 +139,7 @@ func WithCategoryBoosts(boosts map[string]float64) Option {
 // index. Typical cold start: 50-100ms for ~200 pages.
 //
 // Functional options (e.g. WithCategoryBoosts) can be passed to customize
-// ranking behavior. Callers that pass no options get a plain BM25 index
+// ranking behavior. Callers that pass no options get a plain keyword index
 // with title/id/body field boosts and no category-based boosting.
 func New(opts ...Option) (*Index, error) {
 	pages, err := kb.List()
@@ -251,21 +251,22 @@ const (
 // promoted into kb.Frontmatter.Description. Unlike the facets above it
 // is ANALYSED PROSE, not a keyword: a curated one-line summary is
 // written in the words a searcher types, so it is searchable text with
-// the body's analyzer, it participates in `_all` (so `description:foo`
-// and a plain query-string search both reach it), and it is stored so
-// it can supply the result snippet when the body has nothing to
-// highlight.
+// the body's analyzer and its own clause in every stage (`description:foo`
+// reaches it too). It is kept out of `_all`, so it is not also counted a
+// second time through the query-string clause (see buildMapping), and it
+// is stored so it can supply the result snippet when the body has nothing
+// to highlight.
 const descriptionField = "description"
 
 // hintField carries a pointer's `hint:` — the one sentence that says
 // why an agent should follow it (links.go). It is the pointer's own
 // description in all but name, so it is indexed exactly like
-// descriptionField: analysed prose, in `_all`, stored for the snippet,
-// and given its own clause (issue #88). Only pointers carry one; on
+// descriptionField: analysed prose with its own clause, out of `_all`,
+// stored for the snippet (issue #88). Only pointers carry one; on
 // every other page the field is empty and matches nothing.
 const hintField = "hint"
 
-// Field boosts, multiplied with each field's BM25 score. The exact
+// Field boosts, multiplied with each field's relevance score. The exact
 // stage builds one clause per field with these weights, and the fuzzy
 // and prefix stages reuse them verbatim (planner.go's termClauses) so a
 // fallback ranks the way the exact stage would have.
@@ -334,7 +335,7 @@ func ownerTokenFor(owner string) string {
 // The clause is boosted to zero so it contributes nothing to the score:
 // a conjunction's score is the sum of its children's, and a zero query
 // boost makes both the term's weight and its score zero, leaving the
-// content clauses' BM25 scores exactly as they were. Visibility decides
+// content clauses' scores exactly as they were. Visibility decides
 // what is eligible; it does not decide what ranks.
 //
 // An unfiltered viewer gets no clause at all, so the query executed for
@@ -431,10 +432,10 @@ func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result
 // clamped via clampLimit: non-positive becomes DefaultLimit, and
 // anything above MaxLimit is capped there.
 //
-// Bleve handles tokenisation, stemming, and BM25 ranking. Empty queries
+// Bleve handles tokenisation, stemming, and ranking. Empty queries
 // return no results without erroring.
 //
-// Field boosts (multiplied with BM25 score):
+// Field boosts (multiplied with each clause's relevance score):
 //
 //	title       × 5.0
 //	id          × 3.0
@@ -464,7 +465,7 @@ func (i *Index) QueryAs(ctx context.Context, v kb.Viewer, q string, limit int) (
 	return out, err
 }
 
-// exactQuery builds the exact stage: the BM25 query meerkat has always
+// exactQuery builds the exact stage: the query meerkat has always
 // run — title (×5), id (×3), description (×2) and hint (×1) match
 // queries plus the bleve query-string form over the body, plus one
 // boosted clause per configured category.
@@ -718,6 +719,13 @@ func buildMapping(titleAnalyzer string) (*mapping.IndexMappingImpl, error) {
 	descriptionFieldMapping := bleve.NewTextFieldMapping()
 	descriptionFieldMapping.Analyzer = "standard"
 	descriptionFieldMapping.Store = true
+	// Kept OUT of `_all` (#85 review). The exact stage already gives the
+	// field its own clause (descQ), so in `_all` as well a description
+	// term scored twice — once there, once through the query-string
+	// clause — with twice the coord of a body-only hit. That made the
+	// nominal ×2 far stronger than it reads. `description:foo` still
+	// works: a field-targeted query reads the field's own terms.
+	descriptionFieldMapping.IncludeInAll = false
 	docMap.AddFieldMappingsAt(descriptionField, descriptionFieldMapping)
 
 	// hint is a pointer's one-sentence reason to follow it: prose, like
@@ -725,6 +733,7 @@ func buildMapping(titleAnalyzer string) (*mapping.IndexMappingImpl, error) {
 	hintFieldMapping := bleve.NewTextFieldMapping()
 	hintFieldMapping.Analyzer = "standard"
 	hintFieldMapping.Store = true
+	hintFieldMapping.IncludeInAll = false // as description, for the same reason
 	docMap.AddFieldMappingsAt(hintField, hintFieldMapping)
 
 	// category is indexed as a single keyword token (no analysis) so

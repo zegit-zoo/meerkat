@@ -692,7 +692,7 @@ meerkat mcp serve-http [flags]
 Full-text search across the loaded knowledge base
 
 ```text
-Run a BM25 full-text search over every page in the loaded knowledge
+Run a full-text keyword search over every page in the loaded knowledge
 base.
 
 Title and ID matches are boosted so page-name lookups (e.g. "onboarding",
