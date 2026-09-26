@@ -46,7 +46,7 @@ meerkat version
 brew update && brew upgrade meerkat   # how a brew install updates
 ```
 
-Under Homebrew 7's tap trust the full name above trusts only this
+Under Homebrew's tap trust (6.0 and later) the full name above trusts only this
 formula, so no `brew trust` step is needed; if you `brew tap
 zegit-zoo/tap` first and install by bare name, run
 `brew trust --formula zegit-zoo/tap/meerkat` before `brew install
