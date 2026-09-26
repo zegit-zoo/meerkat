@@ -157,14 +157,47 @@ lint-config: ## Validate .golangci.yml against the pinned golangci-lint's schema
 	$(call tool-install,golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 	$(GOLANGCI_LINT) config verify
 
+# toolchain-check keeps the Dockerfile's Go pin honest. go.mod's
+# `toolchain` line is the single source of truth for every Go gate, but
+# the release image builds from its own `ARG GO_VERSION` (plus a
+# golang base-image digest) that nothing else reads, and Dependabot has
+# no docker ecosystem here, so a toolchain bump would silently leave
+# the image on the old Go (#80 review). Bump both, and the digest, in
+# one change.
+.PHONY: toolchain-check
+toolchain-check: ## Fail if the Dockerfile's GO_VERSION disagrees with go.mod's toolchain
+	@want=$$(awk '/^toolchain /{sub(/^go/,"",$$2); print $$2}' go.mod); \
+	got=$$(awk -F= '/^ARG GO_VERSION=/{print $$2}' Dockerfile); \
+	if [ -z "$$want" ] || [ "$$want" != "$$got" ]; then \
+		echo "FAIL: Dockerfile ARG GO_VERSION=$$got but go.mod toolchain is go$$want — bump both, and the golang base-image digest"; exit 1; \
+	fi; \
+	echo "OK: Dockerfile GO_VERSION matches go.mod toolchain ($$want)"
+
+# hygiene re-runs the commit-stage hygiene hooks over the whole tree.
+# They have no CI job of their own (golangci-lint, gitleaks and
+# markdownlint do), so a commit made without hooks — --no-verify, the
+# web UI, a clone that never ran `pre-commit install` — would skip them
+# entirely (#80 review). Hooks are named, not SKIPped, so this target can
+# never quietly drop a security hook. PRE_COMMIT lets CI run a pinned
+# pre-commit through pipx.
+HYGIENE_HOOKS := end-of-file-fixer trailing-whitespace check-yaml check-merge-conflict check-added-large-files
+PRE_COMMIT ?= pre-commit
+.PHONY: hygiene
+hygiene: ## Run the commit-stage hygiene hooks over the whole tree (CI backstop)
+	@for h in $(HYGIENE_HOOKS); do $(PRE_COMMIT) run $$h --all-files --show-diff-on-failure || exit 1; done
+
 .PHONY: pre-push
 pre-push: lint test docs-check ## CI parity (lint + test + docs-check) — fast gate before git push
 	@echo ""
 	@echo "✓ pre-push gate green — safe to push"
 	@echo "  (security stage runs only in CI; run 'make pre-release' or 'make security' to trigger locally)"
 
+# pre-release is every CI gate that runs without external services. It
+# runs the suite through cover-check rather than test, so the coverage
+# floor — a CI-only gate otherwise — is covered locally too (#81 review),
+# without running the race suite twice.
 .PHONY: pre-release
-pre-release: pre-push security ## Full CI parity (lint + test + docs-check + vuln + gosec + gitleaks). Slower; run before git tag.
+pre-release: lint cover-check docs-check lint-config toolchain-check hygiene security ## Full CI parity (lint + coverage floor + docs-check + lint-config + toolchain + hygiene + vuln + gosec + gitleaks). Slower; run before git tag.
 	@echo ""
 	@echo "✓ pre-release gate green — safe to tag + push"
 

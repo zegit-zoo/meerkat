@@ -72,8 +72,11 @@ Labels every repo carries: `in-progress`, `needs-review`, `blocked` (plus GitHub
   `GOTOOLCHAIN=$(awk '/^toolchain /{print $2}' go.mod) go test ./...` (works in zsh and bash).
 - The GitHub gitleaks Action needs a paid org license; CI runs the gitleaks CLI instead.
 - `golangci-lint` runs collide when two worktrees lint at once; serialize them.
-- A credential-helper test prompts when git can reach a terminal; run tests with
-  `GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false`.
+- The credential-helper tests ask git for a credential nobody supplies. `internal/contentsource`'s
+  `TestMain` turns git's prompting off for the whole package (`GIT_TERMINAL_PROMPT=0`, an empty
+  `GIT_ASKPASS`, and `SSH_ASKPASS` unset). Without that, a desktop session's `SSH_ASKPASS` opened a
+  password dialog during `make test` and the pre-push hook. No environment is needed from you;
+  `TestGitCannotReachAnAskpassProgram` guards it.
 - The S3 conformance job needs Garage and Versity Gateway; locally use `scripts/garage-up.sh`
   and `scripts/versitygw-up.sh` and set `MEERKAT_TEST_S3_ENDPOINT`. MinIO left the matrix on
   2026-09-25 when its public container images were withdrawn.
@@ -98,8 +101,11 @@ SLIs, self-improving intake) is designed and tracked in the private repo
   `make docs-check`, and `markdownlint` all run in CI. The pre-commit hooks run a subset, and they
   are **split across two stages**, not the same set twice: commit time is hygiene, `gitleaks`,
   `markdownlint`, `make lint` (Go files only) and `make lint-config` (when `.golangci.yml` changes);
-  push time is `make docs-check`, the race test suite and `make vuln`. `gosec` and the coverage
-  floor run in CI only — `make pre-release` covers them locally. CONTRIBUTING.md's "What CI runs"
+  push time is `make docs-check`, the race test suite and `make vuln`. CI backs the commit-only
+  hooks up with a Hygiene job and `make lint-config`, and checks the Dockerfile's Go pin against
+  `go.mod` (`make toolchain-check`). `gosec` and the coverage floor run in CI only as jobs, and
+  `make pre-release` runs them locally together with every other CI gate that needs no external
+  service. CONTRIBUTING.md's "What CI runs"
   and hook-stage lists are the authoritative copy; run the gates before opening a PR.
 - **Shared S3 state is single-writer-per-key.** Garage ignores `If-None-Match: *` and `If-Match`
   on PUT; anything that needs multi-writer safety on one key must run on AWS, Versity Gateway
