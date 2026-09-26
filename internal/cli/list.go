@@ -25,7 +25,7 @@ func newListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List wiki pages, optionally filtered",
-		Long: `List pages embedded in this meerkat binary.
+		Long: `List the pages in the loaded knowledge base.
 
 Filters compose (AND):
   --prefix    page ID prefix, e.g. "systems/backend/"

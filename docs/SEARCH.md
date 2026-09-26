@@ -1,10 +1,14 @@
 # How `mk search` works
 
-Meerkat's search is a keyword index over the configured markdown wiki —
-embedded at build time by default, or a directory resolved at runtime
-(`--kb-dir`/`MEERKAT_KB_DIR`, or a `content-source.yaml`; see the README).
-It runs entirely in-process — no external service, no network, no
-embedding model.
+Meerkat's search is a keyword index over whatever markdown wiki the binary
+resolved at startup — by default something loaded at runtime: a directory on
+disk, a verified HTTPS archive, a GCS or S3 object, or several of those
+mounted as named collections (`--kb-dir`/`MEERKAT_KB_DIR`, or a
+`content-source.yaml`; see the README's
+[Loading content](../README.md#loading-content)). Content embedded in the
+binary is indexed the same way, but only a build from source has any. The
+index itself is built and queried entirely in-process — no external service,
+no embedding model, and no network once the content is resolved.
 
 ## TL;DR
 

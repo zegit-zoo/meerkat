@@ -66,13 +66,14 @@ func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "meerkat",
 		Short: "Meerkat — the vigilant guard and informer (knowledge-base CLI)",
-		Long: `Meerkat embeds a knowledge-base wiki and exposes it via
-CLI subcommands, an MCP server (for agent harnesses / OpenCode), and an
-HTTP/OpenAPI server (for OpenWebUI).
+		Long: `Meerkat serves a knowledge-base wiki over CLI subcommands, an MCP
+server (for agent harnesses / OpenCode), and an HTTP/OpenAPI server
+(for OpenWebUI).
 
-All wiki content is bundled into the binary at build time and served
-from there by default. No network access is required for search,
-show, or list. What gets served instead is resolved in priority order:
+The binary carries no content of its own: it loads a knowledge base at
+startup, and search, show and list are then answered locally, with no
+service to call. Four mechanisms can say where that knowledge base
+lives, consulted highest priority first:
 
   1. --kb-dir (or MEERKAT_KB_DIR) — an explicit content-repo directory
      (the layout content-source.yaml describes and 'mk ingest' writes
@@ -81,16 +82,23 @@ show, or list. What gets served instead is resolved in priority order:
      a content-source.yaml.
   3. <user config dir>/meerkat/content-source.yaml
   4. ./content-source.yaml in the working directory
-  5. the embedded build (the fallback when none of the above apply)
+  5. the binary's own embedded content — the fallback when none of the
+     above apply. Every published artefact (Homebrew formula, release
+     tarballs, ghcr.io image) is built with no content source, so this
+     step serves an EMPTY knowledge base unless you built the binary
+     yourself with content baked in ('make sync').
 
-content-source.yaml's "content.type" may be none, local, url or gcs at
-runtime (git/submodule are build-time only — 'make sync' — since they
+'mk version' reports which one won, as kb_source.
+
+content-source.yaml's "content.type" may be none, local, url, gcs or s3
+at runtime (git/submodule are build-time only — 'make sync' — since they
 need git and a working tree; using one here fails with an error rather
-than silently serving nothing). type: url fetches an HTTPS .tar.gz,
-verifies it against a required sha256, and caches the extracted result
-locally, keyed by that digest. type: gcs loads a Google Cloud Storage
-.tar.gz object or bucket prefix, authenticating via Application Default
-Credentials and caching by object generation — see
+than silently serving nothing). type: local serves a directory on disk,
+no credentials. type: url fetches an HTTPS .tar.gz, verifies it against
+a required sha256, and caches the extracted result locally, keyed by
+that digest. type: gcs and type: s3 load a .tar.gz object or a bucket
+prefix from Google Cloud Storage or an S3-compatible store, via the
+provider's default credential chain, cached by object version — see
 content-source.example.yaml.
 
 A content-source.yaml may instead declare a "collections:" list of
@@ -106,18 +114,18 @@ Page IDs are slash-paths from the wiki root without ".md" — e.g.
 prefixed with "<collection>:" when several collections are mounted.
 
 Short alias: 'mk' (installed as a symlink alongside meerkat).`,
-		Example: `  # Knowledge base (offline)
+		Example: `  # Point meerkat at a knowledge base — nothing is served until you do
+  meerkat --kb-dir ./meerkat-kb search "some term"
+  MEERKAT_KB_DIR=./meerkat-kb meerkat list
+
+  # ... or resolve it from a content-source.yaml (type: none|local|url|gcs|s3)
+  meerkat --content-source ./content-source.yaml list
+
+  # Knowledge base (answered locally, no service to call)
   meerkat search "some term"
   meerkat show concepts/Some-Concept
   meerkat list --prefix systems/backend/
   meerkat list --category policies --status placeholder
-
-  # Serve content from disk instead of the embedded build
-  meerkat --kb-dir ./meerkat-kb search "some term"
-  MEERKAT_KB_DIR=./meerkat-kb meerkat list
-
-  # Serve content resolved from a content-source.yaml (type: none|local|url|gcs)
-  meerkat --content-source ./content-source.yaml list
 
   # Multiple named collections mounted at once
   meerkat list --collections
@@ -230,21 +238,22 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 	}
 
 	root.PersistentFlags().StringVar(&kbDirFlag, "kb-dir", "",
-		"Serve KB content from this directory (content-repo layout: wiki/, ingestion/sources.yaml, "+
-			"ingestion/prompts/, templates/) instead of the embedded build. Overrides MEERKAT_KB_DIR. "+
-			"The directory must exist; a missing wiki/ingestion/templates subdirectory inside it "+
-			"degrades to empty rather than erroring. Wins over --content-source / content-source.yaml "+
-			"discovery below.")
+		"Serve KB content from this directory at runtime (content-repo layout: wiki/, "+
+			"ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' "+
+			"writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing "+
+			"wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. "+
+			"Wins over --content-source / content-source.yaml discovery below.")
 	root.PersistentFlags().StringVar(&contentSourceFlag, "content-source", "",
 		"Path to a content-source.yaml describing where to serve KB content from "+
-			"(content.type: none|local|url|gcs, or a collections: list of named sources — "+
+			"(content.type: none|local|url|gcs|s3, or a collections: list of named sources — "+
 			"git/submodule are build-time-only, 'make sync'). "+
 			"Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this "+
 			"nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, "+
-			"then ./content-source.yaml, then the embedded build.")
+			"then ./content-source.yaml, then the binary's embedded content (empty in every "+
+			"published release).")
 
 	root.AddGroup(
-		&cobra.Group{ID: groupKB, Title: "Knowledge base (always available, offline):"},
+		&cobra.Group{ID: groupKB, Title: "Knowledge base (answered locally, no service to call):"},
 		&cobra.Group{ID: groupServer, Title: "Servers:"},
 		&cobra.Group{ID: groupOps, Title: "Operations:"},
 	)

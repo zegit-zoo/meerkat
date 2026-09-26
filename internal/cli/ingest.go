@@ -56,9 +56,10 @@ func newSourcesCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "sources",
-		Short: "List the embedded ingestion source registry",
-		Long:  `Print every source from the embedded sources.yaml.`,
-		Args:  cobra.NoArgs,
+		Short: "List the ingestion source registry",
+		Long: `Print every source from the loaded knowledge base's
+ingestion/sources.yaml.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			all, err := sources.All()
 			if err != nil {

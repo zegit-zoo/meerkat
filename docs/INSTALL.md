@@ -20,6 +20,8 @@ Jump to:
 - [Homebrew `mk` collision](#homebrew-mk-collision)
 - [Atomic installs (macOS code signatures)](#atomic-installs-macos-code-signatures)
 - [Install on Windows](#install-on-windows)
+- [Point it at content](#point-it-at-content) (the binary ships without a
+  knowledge base)
 - [Verify the download](#verify-the-download)
 - [From source](#from-source)
 - [Updating](#updating)
@@ -353,6 +355,39 @@ If for any reason the update aborts after the rename but before the
 relaunch (very rare; usually only if your terminal kills the process
 mid-flight), you can recover by manually renaming
 `meerkat.exe.old` back to `meerkat.exe` in the install directory.
+
+## Point it at content
+
+A release binary ships **without a knowledge base**. `mk search`, `mk show`
+and `mk list` work the moment it is installed, but they have nothing to
+answer from until you point meerkat at some content — until then `mk version`
+reports `kb_source: embedded` over an empty index. Two ways in:
+
+```bash
+# 1. A directory on disk, per invocation — no config file, no credentials.
+mk --kb-dir ./your-kb list
+
+# 2. The same thing, remembered: a config file meerkat discovers by itself.
+CFG=~/.config/meerkat                                      # Linux
+[ "$(uname)" = Darwin ] && CFG="$HOME/Library/Application Support/meerkat"
+mkdir -p "$CFG"
+printf 'content:\n  type: local\n  path: /path/to/your-kb\n' \
+  > "$CFG/content-source.yaml"
+mk list                        # now serves that directory
+```
+
+The config directory is the OS's own user-config location, not `~/.config`
+everywhere: `~/.config/meerkat` on Linux (or `$XDG_CONFIG_HOME/meerkat`),
+`~/Library/Application Support/meerkat` on macOS, `%AppData%\meerkat` on
+Windows. A `content-source.yaml` in the **working directory** is also picked
+up, which is often the easier thing to try first.
+
+A verified HTTPS archive, a GCS or S3 bucket, and several knowledge bases
+mounted side by side as named collections are `content-source.yaml` options
+too; a build from source can bake content into the binary instead. For the
+full resolution order and every backend, see the README's
+[Loading content](../README.md#loading-content); for the config schema, see
+[content-source.example.yaml](../content-source.example.yaml).
 
 ## Verify the download
 
