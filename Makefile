@@ -1,5 +1,31 @@
 # meerkat Makefile — convenience targets
 
+# ---------- toolchain ----------
+#
+# go.mod's `toolchain` line is the single source of truth for which Go
+# builds this project. `export GOTOOLCHAIN` makes every `go` command a
+# recipe below runs — including the ones inside golangci-lint and the
+# scanners — use exactly that toolchain, with no per-developer setup.
+#
+# Why it has to be set at all: a `toolchain` directive only ratchets
+# *up*. A host Go NEWER than the pin already satisfies go.mod, so it is
+# used as-is. Homebrew ships Go 1.27.x today, so an unpinned `make lint`
+# typechecked this code against the 1.27 standard library and died on
+# `math/rand/v2` signatures the pinned 1.26.8 does not have. Homebrew
+# also installs its own GOROOT/go.env with a GOTOOLCHAIN default in it,
+# so `go env GOTOOLCHAIN` is not necessarily what upstream Go ships.
+#
+# CI is unaffected and downloads nothing: actions/setup-go already runs
+# with `go-version-file: go.mod`, so the toolchain named here is the one
+# the runner is executing.
+#
+# `?=` so an explicit `GOTOOLCHAIN=go1.27.1 make lint` from the
+# environment still wins — make does not let `?=` override a variable it
+# inherited from the environment. Useful when bisecting a toolchain
+# regression; the default stays the pin.
+GOTOOLCHAIN ?= $(shell awk '/^toolchain /{print $$2; found=1; exit} END{if (!found) print "auto"}' go.mod)
+export GOTOOLCHAIN
+
 BINARY    := meerkat
 PKG       := github.com/zegit-zoo/meerkat
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -81,13 +107,55 @@ cover-check: test-cover ## Fail if total coverage is below COVERAGE_MIN
 	echo "total coverage: $${total}%"; \
 	awk -v t="$$total" -v m="$(COVERAGE_MIN)" 'BEGIN { if (t+0 < m+0) { printf "FAIL: coverage %.1f%% is below floor %d%%\n", t, m; exit 1 } printf "OK: coverage %.1f%% >= floor %d%%\n", t, m }'
 
+# ---------- pinned tooling ----------
+#
+# Every tool a gate runs is installed by this Makefile into its own
+# version-named directory under .tools/ and invoked from there by
+# absolute path; $PATH is never consulted. The directory IS the stamp:
+# if .tools/<name>@<version>/<name> exists, GOBIN pointed there for
+# exactly that `go install <module>@<version>`, so it cannot be anything
+# else. .tools/ is gitignored and excluded from the gosec walk, and
+# `make clean` deliberately leaves it alone — the tool builds are too
+# expensive to redo on every clean; `make clean-tools` drops them when
+# you want that. The scanner pins live in the security section below.
+
+TOOLS_DIR := $(CURDIR)/.tools
+
+# tool-install: install <module-path>@<version> into
+# .tools/<name>@<version>/ unless that binary is already there. GOBIN is
+# set per install, so the directory name and the binary inside it cannot
+# disagree. Re-runs are free; the module cache makes a cold install fast.
+define tool-install
+@test -x $(TOOLS_DIR)/$(1)@$(3)/$(1) || { \
+    echo ">> installing $(1)@$(3) into $(TOOLS_DIR)/$(1)@$(3)"; \
+    GOBIN=$(TOOLS_DIR)/$(1)@$(3) go install $(2)@$(3); \
+}
+endef
+
+# golangci-lint is pinned HERE and nowhere else. It used to be named in
+# three places that could drift apart: ci.yml and release.yml each
+# `go install`ed v2.14.0 onto $PATH before calling `make lint`, the
+# pre-commit hook carried its own `rev:`, and `make lint` itself ran
+# whatever `golangci-lint` was on $PATH — which is not a pin at all, just
+# a dependency on whatever the developer's package manager last shipped.
+# Now all three routes run this one binary: the workflows call `make
+# lint`, and the pre-commit hook is a `language: system` hook whose entry
+# is `make lint`.
+GOLANGCI_LINT_VERSION := v2.14.0
+GOLANGCI_LINT := $(TOOLS_DIR)/golangci-lint@$(GOLANGCI_LINT_VERSION)/golangci-lint
+
+# The 5m budget the old pre-commit hook passed as `--timeout 5m` is
+# already `run.timeout: 5m` in .golangci.yml, so it carries over here
+# rather than being duplicated on the command line.
 .PHONY: lint
-lint: ## golangci-lint (govet, staticcheck, errcheck, gosec, gofmt/goimports, …)
-	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "golangci-lint not found on PATH. Install: https://golangci-lint.run/usage/install/"; \
-		exit 1; \
-	fi
-	golangci-lint run ./...
+lint: ## golangci-lint, pinned + self-installing (govet, staticcheck, errcheck, gosec, gofmt/goimports, …)
+	$(call tool-install,golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+	$(GOLANGCI_LINT) run ./...
+
+.PHONY: lint-config
+lint-config: ## Validate .golangci.yml against the pinned golangci-lint's schema
+	$(call tool-install,golangci-lint,github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+	$(GOLANGCI_LINT) config verify
 
 .PHONY: pre-push
 pre-push: lint test docs-check ## CI parity (lint + test + docs-check) — fast gate before git push
@@ -144,24 +212,16 @@ docs-check: ## CI gate: ensure docs/CLI.md is in sync with the cobra tree
 
 # ---------- security scanning ----------
 #
-# Each target is self-installing so devs don't need a separate setup
-# step, and the version below is what actually runs — locally and in CI.
+# Each scanner self-installs through the shared .tools mechanism in
+# "pinned tooling" above, so devs don't need a separate setup step, and
+# the version below is what actually runs — locally and in CI.
 #
 # $PATH is never consulted. These targets used to prefer whatever
 # gosec/gitleaks/govulncheck was already on $PATH, so a Homebrew install
 # won silently and the pinned version below was a comment rather than a
 # fact; the $GOBIN/<tool>.<version> stamp files made it worse by claiming
 # a version for a binary they sat next to but did not describe (a stamp
-# for one gosec was found beside a gosec of another vintage). Instead,
-# each tool is installed into its own version-named directory under
-# .tools/ and invoked from there by absolute path. The directory IS the
-# stamp: if .tools/<name>@<version>/<name> exists, GOBIN pointed there
-# for exactly that `go install <module>@<version>`, so it cannot be
-# anything else.
-#
-# .tools/ is gitignored and excluded from the gosec walk. `make clean`
-# deliberately leaves it alone — three tool builds are too expensive to
-# redo on every clean; `make clean-tools` drops them when you want that.
+# for one gosec was found beside a gosec of another vintage).
 #
 # Severity gates: HIGH+ fails the job. MEDIUM/LOW emits a warning.
 # Tune in the underlying tool config if you need to adjust.
@@ -174,22 +234,9 @@ GOVULNCHECK_VERSION := v1.8.0
 GOSEC_VERSION       := v2.29.0
 GITLEAKS_VERSION    := v8.30.1
 
-TOOLS_DIR := $(CURDIR)/.tools
-
 GOVULNCHECK := $(TOOLS_DIR)/govulncheck@$(GOVULNCHECK_VERSION)/govulncheck
 GOSEC       := $(TOOLS_DIR)/gosec@$(GOSEC_VERSION)/gosec
 GITLEAKS    := $(TOOLS_DIR)/gitleaks@$(GITLEAKS_VERSION)/gitleaks
-
-# tool-install: install <module-path>@<version> into
-# .tools/<name>@<version>/ unless that binary is already there. GOBIN is
-# set per install, so the directory name and the binary inside it cannot
-# disagree. Re-runs are free; the module cache makes a cold install fast.
-define tool-install
-@test -x $(TOOLS_DIR)/$(1)@$(3)/$(1) || { \
-    echo ">> installing $(1)@$(3) into $(TOOLS_DIR)/$(1)@$(3)"; \
-    GOBIN=$(TOOLS_DIR)/$(1)@$(3) go install $(2)@$(3); \
-}
-endef
 
 .PHONY: vuln
 vuln: ## Scan for known CVEs in our actual import graph (govulncheck)

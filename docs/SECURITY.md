@@ -50,8 +50,13 @@ at it for exactly that `go install`. `govulncheck` is pinned the same
 way — its vulnerability *database* is still fetched live on every run,
 so the pin costs no freshness.
 
+`make lint` installs the pinned `golangci-lint` into `.tools/` the same
+way, so the linter that runs on your machine, in the pre-commit hook and
+in CI is one pinned binary instead of three separately-named ones that
+could drift apart.
+
 `.tools/` is gitignored and excluded from the `gosec` walk. `make clean`
-deliberately leaves it in place (three tool builds are expensive to redo
+deliberately leaves it in place (the tool builds are expensive to redo
 on every clean); `make clean-tools` removes it.
 
 ---
