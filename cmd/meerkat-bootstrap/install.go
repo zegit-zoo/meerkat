@@ -48,7 +48,7 @@ exactly what this command exists to cross, once, so every subsequent
 
 A --destination inside a Homebrew Cellar is refused: brew owns that
 file, and the next "brew upgrade" would discard anything installed
-over it. Use "brew upgrade meerkat" there instead.
+over it. Use "brew update && brew upgrade meerkat" there instead.
 
 Assets are only ever fetched from github.com/zegit-zoo/meerkat. The
 repository is public, so this works anonymously; a cached "gh auth

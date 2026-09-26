@@ -65,8 +65,15 @@ replacing them with "trust the tap".
 ### Updating a Homebrew install
 
 ```bash
-brew upgrade meerkat
+brew update && brew upgrade meerkat
 ```
+
+`brew update` refreshes the tap first. brew only re-reads a tap on its
+own schedule (`HOMEBREW_AUTO_UPDATE_SECS`, a day by default), and the
+tap itself trails a release by the hours its bump job takes, so a bare
+`brew upgrade meerkat` right after the update notice often answers
+"already up to date". If it still does after `brew update`, the tap has
+not picked the release up yet; try again later.
 
 **`mk update` is disabled for Homebrew installs.** The binary lives
 in `$(brew --prefix)/Cellar/meerkat/<version>/bin/`, which `brew`
@@ -81,12 +88,13 @@ refuses:
 ```console
 $ mk update
 meerkat: this install is managed by Homebrew — replacing the binary in
-place would be undone by the next `brew upgrade`; run `brew upgrade
-meerkat` instead
+place would be undone by the next `brew upgrade`; run `brew update &&
+brew upgrade meerkat` instead
 ```
 
 `mk update --check` still works everywhere — it only reads — and
-names `brew upgrade meerkat` as the update path on a brew install.
+names `brew update && brew upgrade meerkat` as the update path on a
+brew install.
 The same refusal applies to `meerkat-bootstrap --destination` when
 the destination resolves into a Cellar.
 
@@ -172,7 +180,7 @@ by platform:
 | `/usr/local/bin` (Intel macOS) | `root:wheel` | ✗ requires sudo |
 | `/usr/local/bin` (Apple Silicon macOS) | `root:wheel` | ✗ requires sudo |
 | `/usr/bin`, `/bin` (Linux) | `root:root` | ✗ requires sudo |
-| `$(brew --prefix)/Cellar/meerkat/...` | you | ✗ refused — use `brew upgrade meerkat` |
+| `$(brew --prefix)/Cellar/meerkat/...` | you | ✗ refused — use `brew update && brew upgrade meerkat` |
 
 The Cellar row is not about permissions: the directory is yours to
 write, and `mk update` refuses anyway because `brew` owns what's in
@@ -483,7 +491,7 @@ mk update --force                      # downgrade or re-install
 mk update --yes                        # skip confirmation
 ```
 
-**Homebrew installs update with `brew upgrade meerkat` instead** —
+**Homebrew installs update with `brew update && brew upgrade meerkat` instead** —
 `mk update` refuses to replace a binary in the Cellar, for the
 reasons in [Updating a Homebrew
 install](#updating-a-homebrew-install). Only `mk update --check`,
@@ -661,7 +669,7 @@ flag on `mk update` itself).
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| `mk update`: `this install is managed by Homebrew` | meerkat was installed with `brew install zegit-zoo/tap/meerkat`, so the binary lives in the Cellar and belongs to `brew` — an in-place swap would be undone by the next `brew upgrade` | Run `brew upgrade meerkat`. `mk update --check` still works. See [Updating a Homebrew install](#updating-a-homebrew-install). |
+| `mk update`: `this install is managed by Homebrew` | meerkat was installed with `brew install zegit-zoo/tap/meerkat`, so the binary lives in the Cellar and belongs to `brew` — an in-place swap would be undone by the next `brew upgrade` | Run `brew update && brew upgrade meerkat`. `mk update --check` still works. See [Updating a Homebrew install](#updating-a-homebrew-install). |
 | `mk update`: `install directory requires elevated privileges` | Binary installed in a root-owned directory (typically `/usr/local/bin` or `/usr/bin`) | Enter your password when `sudo` prompts. Permanent fix: move install to `~/.local/bin` (see [Why `~/.local/bin`](#why-localbin-and-not-usrlocalbin) above). |
 | `mk update`: `install with sudo failed` | `sudo` was unavailable, cancelled, or the final copy/move failed | Re-run `mk update` and complete the `sudo` prompt, or move install to `~/.local/bin`. |
 | `mk update`: `GitHub returned 401/403 ... likely the anonymous API rate limit` | Too many unauthenticated requests from your IP (60/hr) | `gh auth login` once for the higher authenticated rate limit (5000/hr), or wait an hour |
