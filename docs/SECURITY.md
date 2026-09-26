@@ -11,7 +11,7 @@ catches, and how to fix the things they flag.
 | Tool | What it catches | Where | Severity gate |
 |------|-----------------|-------|----------------|
 | `govulncheck` | Known CVEs in our **actual import graph** (Go vuln DB) | CI (Vulnerability scan job) + `make vuln` | Hard fail on any reachable vuln |
-| `gosec` | Go-specific weaknesses (weak crypto, command injection, file traversal, hardcoded creds) | CI (inside golangci-lint) + `make gosec` | Hard fail on HIGH severity, medium confidence |
+| `gosec` | Go-specific weaknesses (weak crypto, command injection, file traversal, hardcoded creds) | CI (gosec job, and low-severity inside golangci-lint) + release gate + `make gosec` | Hard fail on HIGH severity, medium confidence |
 | `gitleaks` | Accidentally committed secrets (PATs, OAuth tokens, private keys) | CI (gitleaks job) + `make gitleaks` | Hard fail on any leak |
 | `goreleaser sboms` | SPDX SBOM generated per release artifact via syft | CI release workflow | Attached to the GitHub release |
 | `goreleaser signs` | Cosign keyless (Fulcio + Rekor) signature on the checksums file | CI release workflow | Cosign-verifiable transparency-logged signature |
@@ -40,8 +40,19 @@ make gitleaks        # gitleaks
 
 Each target self-installs the tool from a pinned version (see the
 `*_VERSION` block in `Makefile`) so devs don't need a separate
-setup step. Pinned versions keep results reproducible across the
-team.
+setup step. The install lands in a repo-local, version-named
+directory — `.tools/<name>@<version>/<name>` — and the target runs
+it from there by absolute path. **`$PATH` is never consulted**, so a
+Homebrew `gosec` or `gitleaks` earlier on your `$PATH` cannot quietly
+stand in for the pinned one and make your results differ from CI's;
+the version-named directory is also the stamp, since `GOBIN` pointed
+at it for exactly that `go install`. `govulncheck` is pinned the same
+way — its vulnerability *database* is still fetched live on every run,
+so the pin costs no freshness.
+
+`.tools/` is gitignored and excluded from the `gosec` walk. `make clean`
+deliberately leaves it in place (three tool builds are expensive to redo
+on every clean); `make clean-tools` removes it.
 
 ---
 
@@ -132,7 +143,16 @@ Additional hardening in place:
   `*.github.com`, and `*.githubusercontent.com` for token-bearing
   release/download requests.
 - Ingest executor validates that task `page_path` resolves within the
-  configured KB workdir before reading/writing page files.
+  configured KB workdir before reading/writing page files, and `Finalize`
+  (`internal/ingest/roles.go`) does the candidate read and both candidate
+  writes through an `os.Root` opened on that workdir, addressed by the
+  relative page path. The lexical check is a cheap pre-filter only: it
+  compares `filepath.Abs`/`Rel` results and so cannot see symlinks, and the
+  agent run whose results are being finalized is exactly who could plant
+  one. `os.Root` re-resolves every component against the open directory and
+  refuses to leave it, so a link inside the working copy that points outside
+  is refused by the kernel rather than trusted by a string comparison
+  (`TestFinalize_SymlinkOutOfWorkingCopyIsRefused`).
 - `type: url` / `type: gcs` content archive extraction (`internal/contentsource/archive.go`)
   treats every entry as hostile: symlink and hardlink entries are skipped
   outright (never created, never followed — the same escape vector

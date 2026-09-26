@@ -5,6 +5,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -290,6 +291,22 @@ type Finalization struct {
 // confirmation or failure moves the item on, parks it after repeated
 // failure, and marks it done once it has the required confirmations.
 func Finalize(ctx context.Context, store *intake.Store, workdir string, results []Result, now time.Time) ([]Finalization, error) {
+	// SECURITY: every candidate read and write below goes through an os.Root
+	// opened on the working copy, addressed by the page's RELATIVE path —
+	// never by a string-joined absolute one. isPathWithinBase (kept below as
+	// the cheap pre-check) compares filepath.Abs/Rel results and therefore
+	// cannot see symlinks: a link planted inside the working copy by the very
+	// agent run that produced these results would pass it and redirect the
+	// write outside the tree. os.Root re-resolves every path component
+	// against the open directory and refuses to leave it, so containment is
+	// enforced by the OS rather than by string comparison — the same
+	// reasoning as internal/kbdir, internal/memory and internal/contentsource.
+	root, err := os.OpenRoot(workdir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
 	var out []Finalization
 	for _, r := range results {
 		t := r.Task
@@ -303,15 +320,24 @@ func Finalize(ctx context.Context, store *intake.Store, workdir string, results 
 			out = append(out, f)
 			continue
 		}
-		full := filepath.Join(workdir, filepath.FromSlash(t.PagePath))
-		if !isPathWithinBase(workdir, full) {
+		rel := filepath.FromSlash(t.PagePath)
+		if !isPathWithinBase(workdir, filepath.Join(workdir, rel)) {
 			f.Action, f.Detail = "failed", "candidate path escapes the working copy"
 			out = append(out, f)
 			continue
 		}
-		body, err := os.ReadFile(full) //nolint:gosec // G304: checked against the working copy above.
+		body, err := root.ReadFile(rel)
 		if err != nil {
-			f.Action, f.Detail = "failed", "candidate page missing after run: "+err.Error()
+			// os exports no sentinel for os.Root's containment refusal
+			// (os.ErrPathEscapes exists only inside the os package's own
+			// tests), so anything that is not a plain "not found" is
+			// reported as a containment failure and carries the underlying
+			// error so the operator still sees what the kernel said.
+			if errors.Is(err, fs.ErrNotExist) {
+				f.Action, f.Detail = "failed", "candidate page missing after run: "+err.Error()
+			} else {
+				f.Action, f.Detail = "failed", "candidate path escapes the working copy: "+err.Error()
+			}
 			out = append(out, f)
 			continue
 		}
@@ -325,7 +351,7 @@ func Finalize(ctx context.Context, store *intake.Store, workdir string, results 
 		case RoleResearcher:
 			stamped, changed := stampCandidate(page, body, t, now)
 			if changed {
-				if err := os.WriteFile(full, stamped, 0o600); err != nil { //nolint:gosec // G703: checked against the working copy above.
+				if err := root.WriteFile(rel, stamped, 0o600); err != nil {
 					return out, err
 				}
 			}
@@ -357,7 +383,7 @@ func Finalize(ctx context.Context, store *intake.Store, workdir string, results 
 				} else {
 					f.Action, f.Detail = "pending", fmt.Sprintf("validation failed (%d of %d): %s", n, ConfirmationsRequired, page.Front.FailureReason)
 				}
-				_ = os.WriteFile(full, bumpFailureCount(page, n), 0o600) //nolint:gosec // G703: checked against the working copy above.
+				_ = root.WriteFile(rel, bumpFailureCount(page, n), 0o600)
 			case agentConfirmations(page) >= ConfirmationsRequired:
 				if err := store.MarkDone(ctx, "validated-"+t.IntakeID, "confirmed by "+strings.Join(verifierNames(page), ", ")); err != nil {
 					return out, err

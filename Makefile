@@ -145,43 +145,60 @@ docs-check: ## CI gate: ensure docs/CLI.md is in sync with the cobra tree
 # ---------- security scanning ----------
 #
 # Each target is self-installing so devs don't need a separate setup
-# step. Versions are pinned to keep results reproducible across the
-# team (and to keep CI fast — go install caches the binary).
+# step, and the version below is what actually runs — locally and in CI.
+#
+# $PATH is never consulted. These targets used to prefer whatever
+# gosec/gitleaks/govulncheck was already on $PATH, so a Homebrew install
+# won silently and the pinned version below was a comment rather than a
+# fact; the $GOBIN/<tool>.<version> stamp files made it worse by claiming
+# a version for a binary they sat next to but did not describe (a stamp
+# for one gosec was found beside a gosec of another vintage). Instead,
+# each tool is installed into its own version-named directory under
+# .tools/ and invoked from there by absolute path. The directory IS the
+# stamp: if .tools/<name>@<version>/<name> exists, GOBIN pointed there
+# for exactly that `go install <module>@<version>`, so it cannot be
+# anything else.
+#
+# .tools/ is gitignored and excluded from the gosec walk. `make clean`
+# deliberately leaves it alone — three tool builds are too expensive to
+# redo on every clean; `make clean-tools` drops them when you want that.
 #
 # Severity gates: HIGH+ fails the job. MEDIUM/LOW emits a warning.
 # Tune in the underlying tool config if you need to adjust.
 
-GOVULNCHECK_VERSION := latest
+# govulncheck is pinned like the rest. The vulnerability DATABASE is
+# still fetched live from vuln.go.dev on every run, so pinning the
+# checker costs no freshness — it only stops the scanner itself from
+# changing underneath a release.
+GOVULNCHECK_VERSION := v1.8.0
 GOSEC_VERSION       := v2.29.0
 GITLEAKS_VERSION    := v8.30.1
 
-GOBIN_DIR := $(shell go env GOBIN)
-ifeq ($(GOBIN_DIR),)
-GOBIN_DIR := $(shell go env GOPATH)/bin
-endif
+TOOLS_DIR := $(CURDIR)/.tools
 
-# tool-bin: prefer a binary already on $PATH (CI image case) but
-# fall back to $GOBIN_DIR/<name> for local-dev installs.
-tool-bin = $(or $(shell command -v $(1) 2>/dev/null),$(GOBIN_DIR)/$(1))
+GOVULNCHECK := $(TOOLS_DIR)/govulncheck@$(GOVULNCHECK_VERSION)/govulncheck
+GOSEC       := $(TOOLS_DIR)/gosec@$(GOSEC_VERSION)/gosec
+GITLEAKS    := $(TOOLS_DIR)/gitleaks@$(GITLEAKS_VERSION)/gitleaks
 
-# install-tool: no-op if the tool is on $PATH. Otherwise installs
-# <module-path>@<version> into $GOBIN_DIR using a stamp file so we
-# don't reinstall on every run.
-define install-tool
-@command -v $(1) >/dev/null 2>&1 || test -f $(GOBIN_DIR)/$(1).$(3) || { \
-    echo ">> installing $(1)@$(3) into $(GOBIN_DIR)"; \
-    go install $(2)@$(3) && touch $(GOBIN_DIR)/$(1).$(3); \
+# tool-install: install <module-path>@<version> into
+# .tools/<name>@<version>/ unless that binary is already there. GOBIN is
+# set per install, so the directory name and the binary inside it cannot
+# disagree. Re-runs are free; the module cache makes a cold install fast.
+define tool-install
+@test -x $(TOOLS_DIR)/$(1)@$(3)/$(1) || { \
+    echo ">> installing $(1)@$(3) into $(TOOLS_DIR)/$(1)@$(3)"; \
+    GOBIN=$(TOOLS_DIR)/$(1)@$(3) go install $(2)@$(3); \
 }
 endef
 
 .PHONY: vuln
 vuln: ## Scan for known CVEs in our actual import graph (govulncheck)
-	$(call install-tool,govulncheck,golang.org/x/vuln/cmd/govulncheck,$(GOVULNCHECK_VERSION))
-	$(call tool-bin,govulncheck) ./...
+	$(call tool-install,govulncheck,golang.org/x/vuln/cmd/govulncheck,$(GOVULNCHECK_VERSION))
+	$(GOVULNCHECK) ./...
 
 .PHONY: gosec
 gosec: sync ## Static security analysis for Go (gosec)
-	$(call install-tool,gosec,github.com/securego/gosec/v2/cmd/gosec,$(GOSEC_VERSION))
+	$(call tool-install,gosec,github.com/securego/gosec/v2/cmd/gosec,$(GOSEC_VERSION))
 	# Severity / confidence: only HIGH-severity, medium+confidence findings fail.
 	# exclude-dir: skip the in-workspace go module cache (CI sets GOPATH=$$CI_PROJECT_DIR/.gopath
 	#              which would otherwise drag every dep into the scan), plus dist/ and bin/,
@@ -198,10 +215,11 @@ gosec: sync ## Static security analysis for Go (gosec)
 	#          FS in kb.Load).
 	#   G302/G306 — file permissions (0644 etc.) on the .old binary backup
 	#          path. Intentional; we want the backup readable.
-	$(call tool-bin,gosec) \
+	$(GOSEC) \
 		-severity high \
 		-confidence medium \
 		-exclude=G304,G302,G306 \
+		-exclude-dir=.tools \
 		-exclude-dir=.gopath \
 		-exclude-dir=.gocache \
 		-exclude-dir=dist \
@@ -212,8 +230,8 @@ gosec: sync ## Static security analysis for Go (gosec)
 
 .PHONY: gitleaks
 gitleaks: ## Scan git history + working tree for committed secrets (gitleaks)
-	$(call install-tool,gitleaks,github.com/zricethezav/gitleaks/v8,$(GITLEAKS_VERSION))
-	$(call tool-bin,gitleaks) detect --source . --redact --verbose --config .gitleaks.toml
+	$(call tool-install,gitleaks,github.com/zricethezav/gitleaks/v8,$(GITLEAKS_VERSION))
+	$(GITLEAKS) detect --source . --redact --verbose --config .gitleaks.toml
 
 .PHONY: security
 security: vuln gosec gitleaks ## Run all security scans (vuln + gosec + gitleaks)
@@ -230,5 +248,9 @@ release-snapshot: sync ## Local cross-platform release build (no publish)
 	KB_COMMIT=$(KBCOMMIT) goreleaser release --snapshot --clean --skip=publish
 
 .PHONY: clean
-clean: ## Remove build artifacts
+clean: ## Remove build artifacts (leaves .tools — see clean-tools)
 	rm -rf bin dist coverage.out coverage.xml
+
+.PHONY: clean-tools
+clean-tools: ## Remove the repo-local scanner installs in .tools
+	rm -rf $(TOOLS_DIR)
