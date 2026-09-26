@@ -147,11 +147,15 @@ func registerSaveMemory(s *mcpserver.MCPServer, reg *collections.Registry, opts 
 // collections in view. Split out from registerSaveMemory so the
 // per-request filter can rebuild it for each caller.
 func saveMemoryTool(view *collections.Registry) mcp.Tool {
-	names := view.Names()
-	target := "Collections accepting memories: " + strings.Join(names, ", ") +
+	// collectionList, so the collections are annotated with their
+	// operator descriptions exactly as the read tools' are (#84) —
+	// "where should this memory go" is the same routing question
+	// mk_search asks, over a different set: the collections this caller
+	// may WRITE to, which is not the set they may read.
+	target := "Collections accepting memories: " + collectionList(view) +
 		". Name one with the 'collection' argument."
-	if len(names) == 1 {
-		target = "Writes into the one collection that accepts memories (" + names[0] + "), so 'collection' can be omitted."
+	if view.Single() {
+		target = "Writes into the one collection that accepts memories (" + collectionList(view) + "), so 'collection' can be omitted."
 	}
 	return mcp.NewTool(toolSaveMemory,
 		mcp.WithDescription(

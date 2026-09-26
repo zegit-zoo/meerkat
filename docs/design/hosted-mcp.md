@@ -59,7 +59,7 @@ unusually rich:
 | --- | --- |
 | `mk_show` ambiguity error | `"shared/overview" … it exists in 3 collections — ask for one of runbooks:…, architecture:…, secrets:…` — the name of every collection holding that page, and the fact it holds it |
 | unknown-collection error | `available: runbooks, architecture, secrets` — the full mounted set, from any authenticated caller |
-| MCP tool descriptions | `This server mounts 3 collections (runbooks, architecture, secrets)` — the mounted set, in the one response every MCP client fetches first |
+| MCP tool descriptions | `This server mounts 3 collections (runbooks — on-call procedures; architecture — design decisions; secrets — confidential payroll records)` — the mounted set, in the one response every MCP client fetches first, and since #84 each collection's configured `description:` with it, which says what a hidden knowledge base *contains* and not merely that it exists |
 | `GET /collections` | the same, plus each collection's provenance |
 | 403 vs 404 on `mk_show` | a per-page existence oracle: probe an ID, read the status code |
 
@@ -101,7 +101,10 @@ The consequences fall out, rather than being implemented one by one:
 - **Tool descriptions are rebuilt per caller.** `WithToolFilter` runs on
   `tools/list` *and* `tools/call`, so the rebuilt descriptions are an
   access boundary, not a display fix. A caller with no readable
-  collection is offered no KB tools at all.
+  collection is offered no KB tools at all. Everything a description says
+  about the mounted set therefore comes from `reg.Restrict(g.CanRead)`,
+  which is what let #84 add each collection's `description:` to discovery
+  without opening a new oracle: one formatter, fed the caller's own view.
 - **One visible collection is single-collection meerkat.** `Single()`
   is true, nothing is qualified, and the UX is the pre-collections one.
 

@@ -78,6 +78,17 @@ func threeCollectionRegistry(t *testing.T) *collections.Registry {
 // unauthenticated.
 func newHostedFixture(t *testing.T, rules []authz.Rule) *hostedFixture {
 	t.Helper()
+	return newHostedFixtureWith(t, rules, nil)
+}
+
+// newHostedFixtureWith is newHostedFixture with a hook that runs over
+// each mounted collection before the server is built — for tests that
+// need a collection configured differently (e.g. an operator
+// `description:`, which a real deployment writes in content-source.yaml
+// and collections.Open applies at mount). It mirrors
+// newMemFixtureWith's shape in memory_test.go.
+func newHostedFixtureWith(t *testing.T, rules []authz.Rule, configure func(*collections.Collection)) *hostedFixture {
+	t.Helper()
 	f := &hostedFixture{t: t, logs: &bytes.Buffer{}}
 
 	var authCfg *authz.Config
@@ -92,8 +103,15 @@ func newHostedFixture(t *testing.T, rules []authz.Rule) *hostedFixture {
 		}
 	}
 
+	reg := threeCollectionRegistry(t)
+	if configure != nil {
+		for _, c := range reg.All() {
+			configure(c)
+		}
+	}
+
 	srv, err := NewHosted(context.Background(), HostedConfig{
-		Collections: threeCollectionRegistry(t),
+		Collections: reg,
 		Auth:        authCfg,
 		Version:     "test",
 		HTTPClient:  client,
@@ -485,6 +503,82 @@ func TestHosted_SingleVisibleCollectionGetsSingleCollectionUX(t *testing.T) {
 	}
 	if !strings.Contains(body, "Secrets Overview") {
 		t.Errorf("expected the secrets copy of the page: %s", body)
+	}
+}
+
+// TestHosted_ToolDiscoveryDescribesOnlyTheCallersCollections is #84's
+// second acceptance criterion, and it is the invisibility rule applied
+// to one more field: an operator `description:` says what a collection
+// CONTAINS, so it leaks strictly more than the name it accompanies.
+// Rendering it from the mounted registry instead of the caller's own
+// would hand every caller a sentence about a knowledge base they may not
+// read, through tools/list — the one response every MCP client fetches
+// first.
+//
+// It is therefore not enough that the hidden NAME is absent: the hidden
+// blurb has to be absent too, which is a distinct assertion because the
+// two are configured in different places and could be rendered from
+// different registries.
+func TestHosted_ToolDiscoveryDescribesOnlyTheCallersCollections(t *testing.T) {
+	const (
+		runbooksBlurb     = "on-call procedures for the paging rota"
+		architectureBlurb = "design decisions and the ADR log"
+		secretsBlurb      = "confidential payroll records"
+	)
+	blurbs := map[string]string{
+		"runbooks":     runbooksBlurb,
+		"architecture": architectureBlurb,
+		"secrets":      secretsBlurb,
+	}
+	f := newHostedFixtureWith(t, []authz.Rule{
+		{Name: "sre", Groups: []string{"sre"}, Collections: []string{"runbooks", "architecture"}},
+		{Name: "hr", Groups: []string{"hr"}, Collections: []string{"secrets"}},
+	}, func(c *collections.Collection) { c.Source.Description = blurbs[c.Name] })
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name   string
+		group  string
+		want   []string
+		hidden []string
+	}{{
+		name:  "a caller with two collections gets both, annotated",
+		group: "sre",
+		want: []string{
+			"runbooks — " + runbooksBlurb + "; architecture — " + architectureBlurb,
+		},
+		hidden: []string{"secrets", secretsBlurb},
+	}, {
+		name:  "a caller with one gets the single-collection phrasing",
+		group: "hr",
+		want:  []string{"mounts a single collection (secrets — " + secretsBlurb + ")"},
+		// The sre caller's two, name and blurb alike.
+		hidden: []string{"runbooks", runbooksBlurb, "architecture", architectureBlurb},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := f.client(ctx, f.token("alice", tc.group))
+			res, err := c.ListTools(ctx, mcpapi.ListToolsRequest{})
+			if err != nil {
+				t.Fatalf("tools/list: %v", err)
+			}
+			if len(res.Tools) == 0 {
+				t.Fatal("tools/list returned nothing")
+			}
+			for _, tool := range res.Tools {
+				blob, _ := json.Marshal(tool)
+				text := string(blob)
+				for _, want := range tc.want {
+					if !strings.Contains(text, want) {
+						t.Errorf("tool %q should carry %q:\n%s", tool.Name, want, text)
+					}
+				}
+				for _, leak := range tc.hidden {
+					if strings.Contains(text, leak) {
+						t.Errorf("tool %q discloses %q, which this caller may not read:\n%s", tool.Name, leak, text)
+					}
+				}
+			}
+		})
 	}
 }
 

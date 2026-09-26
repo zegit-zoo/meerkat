@@ -265,9 +265,14 @@ everything it serves.
 
 **MCP.** An optional `collection` argument on `mk_search`/`mk_show`/
 `mk_list`. Discovery is folded into the tool descriptions, which name the
-mounted collections: a client learns the set from the tool list it
-already fetches, with no extra tool to call and nothing added to a
-single-collection server's prose.
+mounted collections — and, since #84, carry each one's configured
+`description:` after an em dash, because a name is an identifier and the
+model's first routing decision is made from the tool list alone: a client
+learns the set *and what is in each* from the tool list it already
+fetches, with no extra tool to call and nothing added to a
+single-collection server's prose. One formatter (`collectionList` in
+`internal/mcp/server.go`) renders that list for every tool, so two tools in
+one `tools/list` response cannot describe the same server differently.
 
 **HTTP.** An optional `collection` field on `/search`, `/show` and
 `/list`; a new auth-gated `GET /collections` (which collections a

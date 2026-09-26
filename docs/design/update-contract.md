@@ -319,6 +319,15 @@ Because the rendering is effective rather than declared, the tool output
 differs per caller by construction — which is also why it must not be
 cached across sessions.
 
+`description:` has a second consumer since #84: MCP *tool discovery*
+carries it too (`collectionList` in `internal/mcp/server.go`), because a
+model's first routing decision is made from `tools/list`, before
+`mk_list_collections` has been called. The split is deliberate — discovery
+gets the name and the description, and nothing else. The contract, the
+contribution repo and the instructions stay here, where the rendering is
+per-caller, several fields long, and only matters to an agent that already
+has something to contribute.
+
 The same rendering is the natural body of a future `mk_contribute`-style
 tool ("how do I add this?"), and of `mk list --collections`, where the
 nil-grants path renders the declared contract for a single-user CLI.
