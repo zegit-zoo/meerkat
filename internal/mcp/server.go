@@ -12,11 +12,16 @@
 //
 // Every tool takes an optional "collection" argument. When several
 // collections are mounted (see internal/collections), each tool's
-// description names them, so a client discovers the set from the tool
-// list it already fetches — there is no extra tool to call. Omitting
-// the argument queries every collection; results carry the collection
-// they came from, and a page ID can be qualified as
-// "<collection>:<page-id>".
+// description names them — together with the operator's configured
+// description of each, where there is one (collectionList) — so a client
+// discovers the set, and what is in each, from the tool list it already
+// fetches: there is no discovery call to make first, and the first
+// routing decision is not made from bare identifiers.
+// mk_list_collections reports the same set in more detail (page counts,
+// the caller's own capabilities, the update contract) for an agent that
+// has decided to look closer. Omitting the argument queries every
+// collection; results carry the collection they came from, and a page ID
+// can be qualified as "<collection>:<page-id>".
 //
 // Two transports serve the identical tool set:
 //
@@ -309,19 +314,85 @@ func toolFilter(reg *collections.Registry) mcpserver.ToolFilterFunc {
 	}
 }
 
+// collectionList renders reg's collections for tool discovery: each
+// name, and — when the operator configured one — that collection's
+// description after an em dash, entries separated by "; ":
+//
+//	internal — Swish systems and operations; cra — EU Cyber Resilience Act guidance
+//
+// It is the ONE place this formatting lives. The "collection" argument's
+// description and the tool prose that repeats it are two renderings of
+// the same fact, and a client that read one and not the other would be
+// told two different things about the same server (#84).
+//
+// A name is an identifier; the description is the only thing that says
+// what is IN a collection, and tools/list is where the model makes its
+// FIRST routing decision — before it has called anything, including
+// mk_list_collections. So the description belongs here even though
+// mk_list_collections reports it too, in more detail. What deliberately
+// does NOT come here is the update contract and the contribution repo:
+// those are per-caller, several fields long, and only matter once an
+// agent has something to contribute.
+//
+// reg is the caller's own view: under the hosted transport toolFilter
+// rebuilds each tool against reg.Restrict(g.CanRead) per request, so a
+// collection this caller may not read was gone before this function saw
+// it — the same invisibility guarantee the handlers get from visible().
+//
+// No truncation happens here: `description:` is bounded to
+// maxDescriptionLen (500) at config load — internal/contentsource/
+// update.go's const, enforced in Source.validateContract — precisely
+// because it is rendered into an agent's context.
+func collectionList(reg *collections.Registry) string {
+	parts := make([]string, 0, reg.Len())
+	for _, c := range reg.All() {
+		if blurb := collectionBlurb(c.Description()); blurb != "" {
+			parts = append(parts, c.Name+" — "+blurb)
+			continue
+		}
+		// A collection with no description reads exactly as it always
+		// did: the bare name, no dangling separator.
+		parts = append(parts, c.Name)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// collectionBlurb normalises a configured description for prose. A
+// content-source.yaml description is very often a YAML block scalar, so
+// it arrives with newlines and indentation that would break a tool
+// description into ragged lines; and its own trailing punctuation would
+// collide with the "; " separator and the full stop the sentence around
+// it ends with. Both are presentation, so both are fixed here rather
+// than by asking operators to write their YAML to suit our prose.
+func collectionBlurb(desc string) string {
+	return strings.TrimRight(oneLine(desc), " .;,")
+}
+
 // collectionArg builds the shared, optional "collection" argument. Its
-// description carries the mounted collection names, which is how a
-// client discovers what it may pass — the tool list every MCP client
-// already fetches doubles as the collection listing.
+// description carries the mounted collections, which is how a client
+// discovers what it may pass — the tool list every MCP client already
+// fetches doubles as the collection listing.
 func collectionArg(reg *collections.Registry) mcp.ToolOption {
 	desc := "Optional. Restrict to one collection. "
 	if reg.Single() {
-		desc += "This server mounts a single collection (" + reg.Names()[0] + "), so this can be omitted."
+		desc += "This server mounts a single collection (" + collectionList(reg) + "), so this can be omitted."
 	} else {
-		desc += "Mounted collections: " + strings.Join(reg.Names(), ", ") +
+		desc += "Mounted collections: " + collectionList(reg) +
 			". Omit to query all of them; every result names the collection it came from."
 	}
 	return mcp.WithString("collection", mcp.Description(desc))
+}
+
+// mountedSentence is how a tool that takes no "collection" argument ends
+// its description (mk_list_collections, mk_report_outcome): there is no
+// argument schema to hang the list off, so the sentence stands alone.
+// Same formatter, so a caller reading tools/list is not told the set two
+// different ways in one response.
+func mountedSentence(reg *collections.Registry) string {
+	if reg.Single() {
+		return " This server currently mounts a single collection (" + collectionList(reg) + ")."
+	}
+	return " Mounted collections: " + collectionList(reg) + "."
 }
 
 // collectionSuffix is the sentence appended to every tool description
@@ -332,7 +403,7 @@ func collectionSuffix(reg *collections.Registry) string {
 		return ""
 	}
 	return " This server mounts " + fmt.Sprintf("%d", reg.Len()) + " collections (" +
-		strings.Join(reg.Names(), ", ") + "); results carry a 'collection' field, and a page ID " +
+		collectionList(reg) + "); results carry a 'collection' field, and a page ID " +
 		"may be written as '<collection>:<page-id>'."
 }
 
@@ -927,11 +998,7 @@ func listCollectionsTool(reg *collections.Registry) mcp.Tool {
 		"contribution path. " +
 		"A hosted server lists only the collections you may read; one you cannot read is " +
 		"absent from the result, not merely empty."
-	if reg.Single() {
-		desc += " This server currently mounts a single collection (" + reg.Names()[0] + ")."
-	} else {
-		desc += " Mounted collections: " + strings.Join(reg.Names(), ", ") + "."
-	}
+	desc += mountedSentence(reg)
 	return mcp.NewTool(toolListCollections,
 		mcp.WithDescription(desc),
 		// See registerSearch's comment: this tool only reads registry and

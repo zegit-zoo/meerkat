@@ -151,10 +151,11 @@ func registerReportOutcome(s *mcpserver.MCPServer, reg *collections.Registry, op
 }
 
 func reportOutcomeTool(reg *collections.Registry) mcp.Tool {
-	mounted := " Mounted collections: " + strings.Join(reg.Names(), ", ") + "."
-	if reg.Single() {
-		mounted = " This server currently mounts a single collection (" + reg.Names()[0] + ")."
-	}
+	// mountedSentence, not a second copy of this prose: the list — and
+	// each collection's configured description in it — is formatted in
+	// exactly one place, so no two tools in one tools/list response can
+	// describe the same server differently (#84).
+	mounted := mountedSentence(reg)
 	return mcp.NewTool(toolReportOutcome,
 		mcp.WithDescription(
 			"Report how a retrieval went. If meerkat did not have what you needed, report it "+

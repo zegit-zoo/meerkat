@@ -938,9 +938,21 @@ form, and only when more than one collection is mounted.
 
 **MCP and HTTP.** `mk_search`/`mk_show`/`mk_list` take an optional
 `collection` argument, and their descriptions name the mounted collections
-so a client discovers the set from the tool list it already fetches.
-`POST /search`, `/show` and `/list` take an optional `"collection"` field,
-and `GET /collections` (auth-gated) enumerates what's mounted.
+— each with its configured `description:`, where there is one — so a client
+discovers the set, and what is in each, from the tool list it already
+fetches:
+
+```text
+Mounted collections: internal — Swish systems and operations;
+cra — EU Cyber Resilience Act guidance.
+```
+
+A collection with no `description:` is named on its own, exactly as
+before, and a single-collection server keeps its one short phrase. On a
+hosted server this is rendered from the caller's own visible set, so it
+names nothing they may not read. `POST /search`, `/show` and `/list` take
+an optional `"collection"` field, and `GET /collections` (auth-gated)
+enumerates what's mounted.
 
 **A single collection behaves exactly as before.** Every configuration that
 predates collections — including a plain `content:` block, `--kb-dir`, and

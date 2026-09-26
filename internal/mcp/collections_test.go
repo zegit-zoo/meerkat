@@ -6,7 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/zegit-zoo/meerkat/internal/collections"
+	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 )
 
@@ -32,6 +35,180 @@ func multiRegistry(t *testing.T) *collections.Registry {
 	}
 	t.Cleanup(func() { _ = reg.Close() })
 	return reg
+}
+
+// describedRegistry mounts three collections in the shape a real
+// content-source.yaml produces: two with an operator `description:`, one
+// with none (every configuration that predates the field). The described
+// pair carries an `update:` block as well, so a test can pin that tool
+// discovery renders the description and NOT the contribution repo.
+func describedRegistry(t *testing.T) *collections.Registry {
+	t.Helper()
+	internal := collections.FromPages("internal", []kb.Page{
+		testPage("systems/paging", "Paging", "who to page during an incident", "systems", "reviewed", "team-a"),
+	})
+	internal.Source.Description = "Swish systems and operations"
+	internal.Source.Update = &contentsource.UpdateSpec{
+		Method:       contentsource.UpdateMergeRequest,
+		Repo:         "https://github.com/example-org/handbook.git",
+		Host:         contentsource.UpdateHostGitHub,
+		Instructions: "branch from main and open a merge request",
+	}
+	cra := collections.FromPages("cra", []kb.Page{
+		testPage("cra/overview", "CRA Overview", "what the regulation requires", "policies", "reviewed", "team-b"),
+	})
+	cra.Source.Description = "EU Cyber Resilience Act guidance"
+	scratch := collections.FromPages("scratch", []kb.Page{
+		testPage("notes/idea", "Idea", "an unfinished thought", "notes", "placeholder", "team-c"),
+	})
+	reg, err := collections.New(internal, cra, scratch)
+	if err != nil {
+		t.Fatalf("collections.New: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+	return reg
+}
+
+// TestTools_DescribeCollectionDescriptions is the acceptance test for
+// #84: tools/list has to say what each collection CONTAINS, not only
+// what it is called, because the model's first routing decision is made
+// from the tool list alone — before mk_list_collections has been called.
+//
+// Both renderings are checked, because they are the reason the formatter
+// is shared: the tool prose and the "collection" argument's description
+// must carry the same list.
+func TestTools_DescribeCollectionDescriptions(t *testing.T) {
+	reg := describedRegistry(t)
+	const (
+		wantInternal = "internal — Swish systems and operations"
+		wantCRA      = "cra — EU Cyber Resilience Act guidance"
+	)
+	for _, tool := range []struct {
+		name string
+		tool mcp.Tool
+	}{
+		{"mk_search", searchTool(reg)},
+		{"mk_show", showTool(reg)},
+		{"mk_list", listTool(reg)},
+	} {
+		t.Run(tool.name, func(t *testing.T) {
+			arg := collectionArgDescription(t, tool.tool)
+			for surface, text := range map[string]string{
+				"tool description":    tool.tool.Description,
+				"collection argument": arg,
+			} {
+				for _, want := range []string{wantInternal, wantCRA} {
+					if !strings.Contains(text, want) {
+						t.Errorf("%s should carry %q:\n%s", surface, want, text)
+					}
+				}
+				// The ";"-separated form, so the pair reads as a list.
+				if !strings.Contains(text, wantInternal+"; "+wantCRA) {
+					t.Errorf("%s should separate the entries with '; ':\n%s", surface, text)
+				}
+				// mk_list_collections stays the detailed surface: the
+				// contribution repo and its instructions are per-caller and
+				// several fields long, and have no business in discovery.
+				for _, leak := range []string{"github.com/example-org/handbook.git", "merge request", "merge-request"} {
+					if strings.Contains(text, leak) {
+						t.Errorf("%s leaks the update contract (%q):\n%s", surface, leak, text)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestTools_CollectionWithoutADescriptionStaysNameOnly pins the
+// back-compatible half: `description:` is optional, and a collection
+// that has none is still named exactly as it was before #84 — no em
+// dash, no empty gap, nothing invented on the operator's behalf.
+func TestTools_CollectionWithoutADescriptionStaysNameOnly(t *testing.T) {
+	reg := describedRegistry(t)
+	for _, text := range []string{listTool(reg).Description, collectionArgDescription(t, listTool(reg))} {
+		if !strings.Contains(text, "scratch") {
+			t.Fatalf("the undescribed collection is missing entirely:\n%s", text)
+		}
+		if strings.Contains(text, "scratch —") {
+			t.Errorf("an undescribed collection got a dangling em dash:\n%s", text)
+		}
+	}
+	// And a registry in which nobody configured a description is
+	// byte-identical to the pre-#84 rendering.
+	if got, want := collectionList(multiRegistry(t)), "runbooks; architecture"; got != want {
+		t.Errorf("collectionList without descriptions = %q, want %q", got, want)
+	}
+}
+
+// TestTools_SingleCollectionDescriptionStaysAShortPhrase: a
+// single-collection deployment gets the description too — it is the one
+// thing that says what the server is FOR — but as a phrase inside the
+// sentence it already had, never as a list header with routing rules
+// that can never apply.
+func TestTools_SingleCollectionDescriptionStaysAShortPhrase(t *testing.T) {
+	only := collections.FromPages("handbook", []kb.Page{
+		testPage("handbook/onboarding", "Onboarding", "how we onboard", "handbook", "reviewed", "team-a"),
+	})
+	only.Source.Description = "How Swish works, for people and agents"
+	reg, err := collections.New(only)
+	if err != nil {
+		t.Fatalf("collections.New: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+
+	arg := collectionArgDescription(t, searchTool(reg))
+	if want := "mounts a single collection (handbook — How Swish works, for people and agents)"; !strings.Contains(arg, want) {
+		t.Errorf("collection argument = %q, want it to contain %q", arg, want)
+	}
+	if strings.Contains(arg, "Mounted collections:") || strings.Contains(arg, ";") {
+		t.Errorf("single-collection wording became a list:\n%s", arg)
+	}
+	if s := collectionSuffix(reg); s != "" {
+		t.Errorf("collectionSuffix on a single-collection server = %q, want empty", s)
+	}
+	if strings.Contains(searchTool(reg).Description, "collections (") {
+		t.Errorf("single-collection tool prose carries multi-collection routing rules:\n%s", searchTool(reg).Description)
+	}
+}
+
+// TestCollectionList_NormalisesConfiguredProse: a `description:` is
+// usually a YAML block scalar, so it arrives with newlines and
+// indentation, and operators end sentences with a full stop. Neither may
+// reach the rendered list — one would break the tool description into
+// ragged lines, the other would collide with our own punctuation.
+func TestCollectionList_NormalisesConfiguredProse(t *testing.T) {
+	col := collections.FromPages("kb", []kb.Page{
+		testPage("a/b", "B", "body", "cat", "reviewed", "team-a"),
+	})
+	col.Source.Description = "  Two lines of\n  operator prose.  "
+	reg, err := collections.New(col)
+	if err != nil {
+		t.Fatalf("collections.New: %v", err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+	if got, want := collectionList(reg), "kb — Two lines of operator prose"; got != want {
+		t.Errorf("collectionList = %q, want %q", got, want)
+	}
+}
+
+// collectionArgDescription returns the description of a tool's
+// "collection" argument — the other half of the discovery surface,
+// which lives in the input schema rather than the prose.
+func collectionArgDescription(t *testing.T, tool mcp.Tool) string {
+	t.Helper()
+	prop, ok := tool.InputSchema.Properties["collection"]
+	if !ok {
+		t.Fatalf("tool %q has no 'collection' argument (properties: %v)", tool.Name, tool.InputSchema.Properties)
+	}
+	spec, ok := prop.(map[string]any)
+	if !ok {
+		t.Fatalf("tool %q's 'collection' argument is %T, want a JSON-schema object", tool.Name, prop)
+	}
+	desc, _ := spec["description"].(string)
+	if desc == "" {
+		t.Fatalf("tool %q's 'collection' argument has no description: %v", tool.Name, spec)
+	}
+	return desc
 }
 
 // TestTools_DescribeMountedCollections proves the tool list doubles as
