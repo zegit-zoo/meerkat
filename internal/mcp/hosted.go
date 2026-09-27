@@ -624,9 +624,12 @@ func (s *HostedServer) Close() error {
 // get the staging discipline, the generation preconditions and the
 // atomic swap wrong.
 //
-// A deployment with no `refresh:` block anywhere has nothing to reload,
-// and this is a no-op rather than an error: an operator sending SIGHUP
-// to the wrong process should not get a failure they have to interpret.
+// It also rebuilds the search index of every mounted `type: local`
+// collection from what is on disk now (#105): those are manual-only
+// targets with no schedule of their own. A deployment with neither a
+// `refresh:` block nor a local collection has nothing to reload, and
+// this is a no-op rather than an error: an operator sending SIGHUP to
+// the wrong process should not get a failure they have to interpret.
 func (s *HostedServer) Reload(ctx context.Context) error {
 	return s.refresh.ReloadNow(telemetry.NewContext(ctx, s.tel))
 }

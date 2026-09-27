@@ -644,6 +644,80 @@ func (c *Collection) ReloadContent(ctx context.Context) (refresh.Outcome, error)
 	return refresh.Outcome{Changed: true, Version: resolved}, nil
 }
 
+// ReloadLocal rebuilds a `type: local` collection's search index from
+// what is on disk NOW, and swaps it in (issue #105).
+//
+// A local collection's pages are already read live — mk_show, mk_list
+// and the page counts go through its filesystem on every request — but
+// its search index is built once, so a page added after startup is
+// unfindable, a deleted one stays quotable and an edited one keeps its
+// old snippet. The admin trigger (SIGHUP on `mk mcp serve-http`) fixes
+// that without a restart, through the same discipline ReloadContent
+// uses for object stores:
+//
+//  1. Take the collection's reload slot, or return ErrBusy — a second
+//     SIGHUP during a rebuild is not a second rebuild.
+//  2. Arm the write journal, so a memory saved during the rebuild is
+//     replayed into the new index rather than lost by the swap.
+//  3. Re-enumerate the pages through the collection's own filesystem
+//     (the live directory; the process globals for a single-collection
+//     deployment) and build the replacement index, all off the request
+//     path.
+//  4. Commit: one pointer swap under the write lock.
+//
+// There is no probe: an operator sending the signal is the change
+// detection, and rebuilding an unchanged directory is harmless. Queries
+// in flight during the rebuild keep the snapshot they acquired — the old
+// index — and later ones get the new one, so none sees an error or a
+// half-built index. The two indexes coexist until the last reader of the
+// old one returns (the snapshot's reference count), which is the memory
+// cost a limit has to leave room for. Any failure leaves the previous
+// index serving.
+func (c *Collection) ReloadLocal(ctx context.Context) (refresh.Outcome, error) {
+	if !c.reloadMu.TryLock() {
+		return refresh.Outcome{}, refresh.ErrBusy
+	}
+	defer c.reloadMu.Unlock()
+
+	if c.Source.Type != contentsource.TypeLocal {
+		return refresh.Outcome{}, fmt.Errorf("collection %q is not a type: local collection", c.Name)
+	}
+	if c.IsCold() {
+		return refresh.Outcome{}, fmt.Errorf("collection %q is cold; it is mounted on first request, not rebuilt", c.Name)
+	}
+
+	c.beginStaging()
+	committed := false
+	defer func() {
+		if !committed {
+			c.abortStaging()
+		}
+	}()
+
+	c.snapMu.RLock()
+	fsys, provenance, version := c.snap.fsys, c.snap.provenance, c.snap.version
+	c.snapMu.RUnlock()
+
+	pages, err := phase(ctx, telemetry.PhaseEnumerate, func(context.Context) ([]kb.Page, error) {
+		return c.contentPagesFrom(fsys)
+	})
+	if err != nil {
+		return refresh.Outcome{}, c.contentFailed(fmt.Errorf("enumerate pages: %w", err))
+	}
+	next, err := newBuiltSnapshot(ctx, fsys, provenance, version,
+		c.mergeOverlay(pages, kb.Unfiltered()), c.searchOptions()...)
+	if err != nil {
+		return refresh.Outcome{}, c.contentFailed(err)
+	}
+	if err := c.commitPhase(ctx, next, nil); err != nil {
+		next.discard()
+		return refresh.Outcome{}, c.contentFailed(err)
+	}
+	committed = true
+	c.status.succeeded(refresh.KindContent, version)
+	return refresh.Outcome{Changed: true, Version: version}, nil
+}
+
 // phase wraps one reconciliation step in a span.
 //
 // The step's error is classified rather than recorded: a probe or mount
@@ -806,8 +880,10 @@ func (r *reloadState) memoryVersion() string {
 
 // RefreshTargets returns the reconciliation targets this registry's
 // configuration declares, in configuration order: a content target for
-// every collection with a `refresh:` block, and a memory target for
-// every collection whose `memory:` block has one.
+// every collection with a `refresh:` block, a memory target for every
+// collection whose `memory:` block has one, and a MANUAL-ONLY local
+// target for every mounted `type: local` collection (see ReloadLocal —
+// it has no schedule and runs only on the admin trigger, SIGHUP).
 //
 // A DERIVED registry (Restrict, ViewedBy) returns none. A per-request
 // view borrows its collections; reconciling through one would be a
@@ -827,6 +903,9 @@ func (r *Registry) RefreshTargets() []refresh.Target {
 		}
 		if c.Source.Refreshable() {
 			out = append(out, &contentTarget{c: c, ordinal: i})
+		}
+		if c.Source.Type == contentsource.TypeLocal && c.byID == nil {
+			out = append(out, &localTarget{c: c, ordinal: i})
 		}
 		if c.Source.Memory != nil && c.Source.Memory.Refresh != nil {
 			out = append(out, &memoryTarget{c: c, ordinal: i})
@@ -849,6 +928,24 @@ func (t *contentTarget) Spec() *refresh.Spec { return t.c.Source.Refresh }
 
 func (t *contentTarget) Reconcile(ctx context.Context) (refresh.Outcome, error) {
 	return t.c.ReloadContent(ctx)
+}
+
+// localTarget rebuilds one `type: local` collection's search index. Its
+// nil Spec makes it manual-only (internal/refresh): ReloadNow runs it, no
+// schedule does.
+type localTarget struct {
+	c       *Collection
+	ordinal int
+}
+
+func (t *localTarget) Key() refresh.Key {
+	return refresh.Key{Ordinal: t.ordinal, Kind: refresh.KindContent, Name: t.c.Name}
+}
+
+func (t *localTarget) Spec() *refresh.Spec { return nil }
+
+func (t *localTarget) Reconcile(ctx context.Context) (refresh.Outcome, error) {
+	return t.c.ReloadLocal(ctx)
 }
 
 // memoryTarget reconciles one collection's memory store.

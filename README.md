@@ -856,7 +856,12 @@ one GCS memory store converge**: without it, a memory saved through one
 replica stays invisible to the others until they restart.
 
 `SIGHUP` runs every configured refresh immediately, through the same code
-path. There is deliberately no HTTP reload endpoint.
+path. There is deliberately no HTTP reload endpoint. It also rebuilds the
+search index of every `type: local` collection. Those pages are read live,
+but the index is built once, so without a SIGHUP (or a restart) a page
+added after startup is not searchable. A path unit or a git hook can send
+it; see
+[docs/design/hot-reload.md](docs/design/hot-reload.md#sighup-and-type-local).
 
 `generation:` and `refresh:` are **mutually exclusive** and refused together
 at load time: pinning means "serve exactly these bytes until the config

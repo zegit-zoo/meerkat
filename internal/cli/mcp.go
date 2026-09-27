@@ -174,8 +174,12 @@ rebuild and an atomic swap. Queries keep being served throughout, from
 the previous snapshot until the new one is complete. A "refresh:" block
 under a collection's "memory:" is the same thing for a shared GCS memory
 store, and is what makes several replicas converge on each other's
-writes. SIGHUP runs every configured refresh immediately. See
-docs/design/hot-reload.md.
+writes. SIGHUP runs every configured refresh immediately, and rebuilds
+the search index of every "type: local" collection from what is on disk
+now: its pages are read live, but its index is built once, so a page
+added after startup is only searchable after a SIGHUP (or a restart).
+The rebuild is swapped in atomically; queries keep being served from
+the old index until it is ready. See docs/design/hot-reload.md.
 
 An "observability:" block in content-source.yaml (or the standard OTEL_*
 environment variables) turns on OpenTelemetry tracing and optional OTLP
@@ -242,7 +246,8 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				fmt.Fprintf(cmd.ErrOrStderr(),
 					"meerkat hosted MCP serving on %s%s (auth: %s)\n",
 					s.Addr(), s.EndpointPath(), mode)
-				go watchReloadSignal(ctx, s, cmd.ErrOrStderr())
+				sighup := notifyReload()
+				go reloadOnSignal(ctx, s, cmd.ErrOrStderr(), sighup)
 			})
 			if err != nil && !errors.Is(err, context.Canceled) {
 				return fmt.Errorf("mcp serve-http: %w", err)
@@ -266,8 +271,25 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 	return cmd
 }
 
-// watchReloadSignal turns SIGHUP into an immediate reconciliation cycle
-// for every collection with a `refresh:` block.
+// notifyReload registers for SIGHUP and returns the channel it arrives
+// on. It registers synchronously, before the reload loop starts, so a
+// SIGHUP sent right after the "serving" line is caught rather than
+// killing the process — the default action for an unhandled SIGHUP. The
+// registration lives for the rest of the process.
+func notifyReload() <-chan os.Signal {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGHUP)
+	return ch
+}
+
+// reloader is the part of the hosted server reloadOnSignal needs.
+type reloader interface {
+	Reload(ctx context.Context) error
+}
+
+// reloadOnSignal turns each SIGHUP into an immediate reconciliation cycle
+// for every collection with a `refresh:` block, and an index rebuild for
+// every `type: local` collection (#105).
 //
 // SIGHUP rather than an admin HTTP endpoint, deliberately. An endpoint
 // would be a new mutating surface that has to be authenticated (the
@@ -284,10 +306,7 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 // cannot skip the staging discipline, the generation preconditions or
 // the atomic swap, and cannot run concurrently with a scheduled cycle:
 // the collection's reload slot refuses the second caller.
-func watchReloadSignal(ctx context.Context, s *mcp.HostedServer, w io.Writer) {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGHUP)
-	defer signal.Stop(ch)
+func reloadOnSignal(ctx context.Context, s reloader, w io.Writer, ch <-chan os.Signal) {
 	for {
 		select {
 		case <-ctx.Done():
