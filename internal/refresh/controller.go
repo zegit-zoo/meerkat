@@ -89,7 +89,11 @@ type Outcome struct {
 type Target interface {
 	// Key identifies the target for metrics and logs.
 	Key() Key
-	// Spec is the configured refresh policy.
+	// Spec is the configured refresh policy. Nil makes the target
+	// MANUAL-ONLY: Start schedules no loop for it, and it runs only when
+	// ReloadNow is called (SIGHUP). A `type: local` collection is one —
+	// its directory is re-read on request, so only an operator (or a
+	// path unit) knows when its search index is worth rebuilding.
 	Spec() *Spec
 	// Reconcile performs one full cycle: a cheap metadata probe and,
 	// only if that shows a change, a hardened re-resolve, an off-request-
@@ -186,14 +190,19 @@ func (c *Controller) Start(ctx context.Context) {
 	runCtx, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
 	c.running = true
+	scheduled := 0
 	for _, t := range c.targets {
+		if t.Spec() == nil {
+			continue // manual-only: ReloadNow runs it, no schedule does
+		}
+		scheduled++
 		c.wg.Add(1)
 		go func(t Target) {
 			defer c.wg.Done()
 			c.loop(runCtx, t)
 		}(t)
 	}
-	c.log.Info("collection refresh started", "targets", len(c.targets))
+	c.log.Info("collection refresh started", "targets", len(c.targets), "scheduled", scheduled)
 }
 
 // Close stops every loop and waits for the in-flight cycles to finish.

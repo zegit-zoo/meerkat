@@ -642,8 +642,12 @@ rebuild and an atomic swap. Queries keep being served throughout, from
 the previous snapshot until the new one is complete. A "refresh:" block
 under a collection's "memory:" is the same thing for a shared GCS memory
 store, and is what makes several replicas converge on each other's
-writes. SIGHUP runs every configured refresh immediately. See
-docs/design/hot-reload.md.
+writes. SIGHUP runs every configured refresh immediately, and rebuilds
+the search index of every "type: local" collection from what is on disk
+now: its pages are read live, but its index is built once, so a page
+added after startup is only searchable after a SIGHUP (or a restart).
+The rebuild is swapped in atomically; queries keep being served from
+the old index until it is ready. See docs/design/hot-reload.md.
 
 An "observability:" block in content-source.yaml (or the standard OTEL_*
 environment variables) turns on OpenTelemetry tracing and optional OTLP

@@ -344,3 +344,30 @@ func waitFor(t *testing.T, cond func() bool, msg string) {
 		time.Sleep(time.Millisecond)
 	}
 }
+
+// TestStart_ManualTargetIsNotScheduled pins the nil-Spec contract (issue
+// #105): a manual-only target — a `type: local` collection's rebuild —
+// gets no loop from Start, and runs exactly when ReloadNow is called.
+// A loop over a nil Spec would spin (its Delay is zero), so "no calls
+// while running" is a sharp test, not a timing guess.
+func TestStart_ManualTargetIsNotScheduled(t *testing.T) {
+	manual := newFakeTarget(0, KindContent)
+	manual.spec = nil
+	c := New(Options{Targets: []Target{manual}})
+	if c == nil {
+		t.Fatal("a manual-only target still needs a controller, for ReloadNow")
+	}
+	c.Start(context.Background())
+	t.Cleanup(func() { _ = c.Close() })
+
+	time.Sleep(150 * time.Millisecond)
+	if n := manual.callCount(); n != 0 {
+		t.Fatalf("a manual-only target was reconciled %d times with no ReloadNow", n)
+	}
+	if err := c.ReloadNow(context.Background()); err != nil {
+		t.Fatalf("ReloadNow: %v", err)
+	}
+	if n := manual.callCount(); n != 1 {
+		t.Fatalf("ReloadNow reconciled the manual target %d times, want 1", n)
+	}
+}

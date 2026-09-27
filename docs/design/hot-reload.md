@@ -35,7 +35,9 @@ still the default.
 
 - **Watching arbitrary local filesystems.** `type: local` already
   re-enumerates per request; a file watcher is a different problem with
-  different failure modes.
+  different failure modes. Its **search index** is built once, though,
+  and SIGHUP rebuilds it on demand. See
+  [SIGHUP and `type: local`](#sighup-and-type-local).
 - **GCS notifications / Pub/Sub.** Polling metadata is portable, needs no
   extra IAM surface, no topic, no subscription, and no inbound path into
   the process. It is sufficient at the cadences a knowledge base
@@ -358,6 +360,39 @@ to restart it, the thing this feature exists to avoid needing.
 It cannot race a scheduled cycle: the collection's reload slot refuses
 the second caller.
 
+### SIGHUP and `type: local`
+
+A `type: local` collection reads its pages live: `mk_show`, `mk_list` and
+the page counts go through its filesystem on every request. Its search
+index, however, is built once. Before #105 a long-running
+`mk mcp serve-http` therefore could not find a page added after startup,
+kept returning a deleted one, and kept an edited page's old snippet,
+until someone restarted it. A restart closes the port for as long as
+the index takes to build.
+
+SIGHUP now also rebuilds every mounted `type: local` collection:
+
+- **Same funnel.** Each local collection is a manual-only refresh target:
+  it has no `Spec`, so `Controller.Start` gives it no loop, and
+  `ReloadNow` runs it. Its `Reconcile` is `Collection.ReloadLocal`.
+- **Same discipline.** It takes the reload slot (a second SIGHUP
+  mid-rebuild is `ErrBusy`, not a second rebuild) and arms the write
+  journal. It re-enumerates the pages through the collection's own
+  filesystem, the live directory, and builds the replacement index off
+  the request path. It commits with one pointer swap. A failure leaves
+  the previous index serving.
+- **No probe.** The signal is the change detection. A path unit on a
+  git repository's `HEAD`, a post-merge hook, or an operator decides
+  when to send it. Rebuilding an unchanged directory is harmless.
+
+**Memory: old and new indexes coexist during a swap.** A query in flight
+keeps the snapshot it acquired, and the old index is closed only when
+its last reader returns (the snapshot's reference count). A memory limit
+must therefore leave room for two indexes for a moment. On mk-ai (about
+820 pages) the live heap is about 160–200 MB after GC, so a
+`GOMEMLIMIT` of 400 MiB and a hard limit of about 768 MB leave that
+room.
+
 ## Security and reliability properties
 
 - **ADC/WIF only.** The probe constructs the same credential-optionless
@@ -457,6 +492,12 @@ say so with `refresh:`.
   (ETag for a bundle, a `(key, ETag, size)` listing fingerprint for a
   prefix) and `S3Store` implements `Fingerprinter`. See
   `docs/design/object-stores.md` for what each provider enforces.
-- **Per-collection refresh for `type: local`**, if a file watcher ever
-  becomes worth its failure modes. The reconciliation half is already
-  backend-agnostic — only the probe is GCS-shaped.
+- **Scheduled, change-detecting refresh for `type: local`.** SIGHUP
+  rebuilds on demand (#105). A `refresh:` block on `type: local` would
+  add a version token (the git HEAD and refs of a working tree, or a
+  path/size/mtime fingerprint) and a probe, so the controller rebuilds
+  only when the tree moved. The reconciliation half is already
+  backend-agnostic, and `ReloadLocal` is the rebuild it would call.
+- **systemd socket activation (`LISTEN_FDS`).** It would let systemd hold
+  the port across a restart. With SIGHUP rebuilding local collections,
+  a restart is no longer needed to reindex.
