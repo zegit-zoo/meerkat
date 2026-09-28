@@ -8,7 +8,9 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    # The default branch is master (renamed from main on 2026-09-28); both are
+    # listed so push CI keeps running whichever name a merge lands on.
+    branches: ["master", "main"]
   pull_request:
 
 # Default GITHUB_TOKEN scope for every job below: none of them push,

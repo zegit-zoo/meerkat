@@ -166,9 +166,10 @@ package or subsystem (e.g. `feat(ingest): ...`).
 
 ## Pull request flow
 
-The default branch is `main`. (Some older docs in this repo mention
-pushing directly to `master` — that's stale internal convention from
-before the project moved to a PR-gated flow; ignore it.)
+The default branch is `master`. It was renamed from `main` on
+2026-09-28; GitHub redirects the old name, and CI runs on pushes to
+either. Nothing is pushed to it directly: every change arrives through
+a pull request.
 
 Write access to this repo is limited to the maintainers (the org's
 default member permission is read). If you're not a maintainer, you
@@ -179,7 +180,7 @@ exist in this repo is a maintainer working branch or a dependabot PR,
 not a landing spot for outside work.
 
 1. Fork the repo (see "Build and run") if you haven't already.
-2. Branch from `main` in your fork.
+2. Branch from `master` in your fork.
 3. Make your change, with tests.
 4. Confirm the local gates pass: `make pre-push` (and `make pre-release`
    if you touched anything security-sensitive).
@@ -202,14 +203,14 @@ model, not by a ruleset — there's nothing to bypass because there's no
 access to begin with. The fork-PR route described above is the
 supported path for everyone else.
 
-`main` is protected by a repository ruleset with no bypass, so it applies
+`master` is protected by a repository ruleset with no bypass, so it applies
 to maintainers too:
 
 - **Commits must be signed.** Set signing up before your first push —
   `git config gpg.format ssh`, `git config user.signingkey <your-key.pub>`,
   `git config commit.gpgsign true`. An unsigned commit is rejected at push
   time, not at review time.
-- **No force-push, no branch deletion.** History on `main` is append-only.
+- **No force-push, no branch deletion.** History on `master` is append-only.
 
 Release tags (`v*`) are protected separately: they must be signed, must
 match `vX.Y.Z` exactly, and once pushed can never be deleted or moved.

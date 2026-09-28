@@ -1264,7 +1264,7 @@ make release-check     # validate .goreleaser.yaml
 make release-snapshot  # local cross-platform build, no publish
 ```
 
-`.github/workflows/ci.yml` runs on every push to `main` and every pull
+`.github/workflows/ci.yml` runs on every push to `master` and every pull
 request, with no job-to-job dependency: `lint` (golangci-lint, `go mod tidy`
 drift, `make docs-check`), `test` (`make cover-check`), `vuln`
 (govulncheck), `gosec`, `markdown` (markdownlint over every `*.md`),
@@ -1286,7 +1286,7 @@ time"](#optional-embedding-content-at-build-time) to bake content into a
 binary you build yourself.
 
 Contributions go through a normal fork → branch → pull-request flow against
-`main`; there's no direct push. Run the same gates locally first — the
+`master`; there's no direct push. Run the same gates locally first — the
 [pre-commit](https://pre-commit.com/) hooks in
 [CONTRIBUTING.md](CONTRIBUTING.md) enforce them at commit and push time:
 

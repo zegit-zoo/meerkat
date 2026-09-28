@@ -2,7 +2,7 @@
 
 ## CI pipeline
 
-Every push to `main` and every pull request runs the repo's gates as
+Every push to `master` and every pull request runs the repo's gates as
 independent jobs in parallel — there's no job-to-job dependency, so one
 failure doesn't mask the rest. Which jobs those are changes as gates are
 added, so this page deliberately doesn't list them:

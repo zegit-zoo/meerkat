@@ -62,7 +62,7 @@ Labels every repo carries: `in-progress`, `needs-review`, `blocked` (plus GitHub
 
 ## 5. Local gotchas
 
-- `main` requires **signed commits** (repository ruleset, no bypass); a squash-merge does not
+- `master` requires **signed commits** (repository ruleset, no bypass); a squash-merge does not
   sign for you. Set up SSH or GPG signing before the first push.
 - The host Go may be newer than `go.mod`'s `toolchain` pin, and a `toolchain` line only ratchets
   *up* — so a newer host Go is used as-is. `make` targets and the pre-commit hooks handle that for
