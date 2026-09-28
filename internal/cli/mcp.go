@@ -194,6 +194,12 @@ collection name, a bucket, a token or a subject. A collector that is
 down never affects a request, /readyz or shutdown. See
 docs/design/observability.md.
 
+Under systemd socket activation (a .socket unit with one ListenStream=,
+which sets LISTEN_FDS=1 and LISTEN_PID) the server serves on the socket
+systemd passes in, and --host and --port are ignored. systemd then holds
+the port across a restart: a client that connects while the service
+restarts waits and is served, instead of being refused. See the README.
+
 The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -217,9 +223,23 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				return err
 			}
 
+			// Taken before the slow startup work, so the inherited socket
+			// is claimed (and its variables cleared) before anything could
+			// spawn a child. Until Serve, systemd's queued connections
+			// simply wait.
+			listener, err := mcp.ActivationListener()
+			if err != nil {
+				return fmt.Errorf("mcp serve-http: %w", err)
+			}
+			if listener != nil && (cmd.Flags().Changed("host") || cmd.Flags().Changed("port")) {
+				fmt.Fprintln(cmd.ErrOrStderr(),
+					"warning: socket-activated by systemd; --host and --port are ignored")
+			}
+
 			cfg := mcp.HostedConfig{
 				Outcome:                       outcome,
 				Addr:                          mcp.ResolveListenAddr(host, port),
+				Listener:                      listener,
 				EndpointPath:                  endpointPath,
 				Collections:                   registry(),
 				Auth:                          auth,
@@ -243,9 +263,13 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				case s.AuthEnabled():
 					mode = "oidc"
 				}
+				activated := ""
+				if s.SocketActivated() {
+					activated = " (socket-activated)"
+				}
 				fmt.Fprintf(cmd.ErrOrStderr(),
-					"meerkat hosted MCP serving on %s%s (auth: %s)\n",
-					s.Addr(), s.EndpointPath(), mode)
+					"meerkat hosted MCP serving on %s%s%s (auth: %s)\n",
+					s.Addr(), s.EndpointPath(), activated, mode)
 				sighup := notifyReload()
 				go reloadOnSignal(ctx, s, cmd.ErrOrStderr(), sighup)
 			})

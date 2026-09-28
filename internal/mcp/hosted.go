@@ -67,7 +67,12 @@ const (
 // authentication, which is the local-development shape.
 type HostedConfig struct {
 	// Addr is the bind address ("host:port"). Empty means DefaultAddr.
+	// Ignored when Listener is set.
 	Addr string
+	// Listener, when set, is served on instead of binding Addr: the
+	// socket systemd passed in (ActivationListener, #110). The server owns
+	// it from then on and closes it on shutdown.
+	Listener net.Listener
 	// EndpointPath is the MCP endpoint path. Empty means
 	// DefaultEndpointPath.
 	EndpointPath string
@@ -500,8 +505,21 @@ func (s *HostedServer) routes() http.Handler {
 // meerkat's MCP endpoint in a larger server.
 func (s *HostedServer) Handler() http.Handler { return s.handler }
 
-// Addr returns the configured bind address.
-func (s *HostedServer) Addr() string { return s.cfg.Addr }
+// Addr returns the address the server serves on.
+//
+// For a socket-activated server it is the inherited socket's own
+// address, not --host/--port. That is what decides who can reach an
+// unauthenticated server, so it is what the banner must show.
+func (s *HostedServer) Addr() string {
+	if s.cfg.Listener != nil {
+		return s.cfg.Listener.Addr().String()
+	}
+	return s.cfg.Addr
+}
+
+// SocketActivated reports whether the server serves on a socket it was
+// handed rather than one it bound.
+func (s *HostedServer) SocketActivated() bool { return s.cfg.Listener != nil }
 
 // EndpointPath returns the MCP endpoint path.
 func (s *HostedServer) EndpointPath() string { return s.cfg.EndpointPath }
@@ -561,7 +579,12 @@ func (s *HostedServer) ListenAndServe(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		err := s.srv.ListenAndServe()
+		var err error
+		if s.cfg.Listener != nil {
+			err = s.srv.Serve(s.cfg.Listener)
+		} else {
+			err = s.srv.ListenAndServe()
+		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
@@ -596,6 +619,12 @@ func (s *HostedServer) ListenAndServe(ctx context.Context) error {
 // in-flight cycle: a cycle that is mid-swap is about to install a
 // snapshot into a registry we are about to tear down.
 func (s *HostedServer) Close() error {
+	// A handed-over listener that was never served is still the server's
+	// to close. After a served shutdown it is closed already, and the
+	// second close's error means nothing.
+	if s.cfg.Listener != nil {
+		_ = s.cfg.Listener.Close()
+	}
 	if s.stopCache != nil {
 		s.stopCache()
 		s.stopCache = nil
