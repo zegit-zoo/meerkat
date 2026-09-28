@@ -51,7 +51,7 @@ jobs:
     permissions:
       # contents: write is what performs the merge; pull-requests: write lets gh read and
       # update the PR. The merge commit itself is created by the API and therefore signed
-      # by GitHub, which is what satisfies the required_signatures rule on main.
+      # by GitHub, which is what satisfies the required_signatures rule on master.
       contents: write
       pull-requests: write
     env:

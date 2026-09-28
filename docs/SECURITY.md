@@ -21,7 +21,7 @@ catches, and how to fix the things they flag.
 
 CI (GitHub Actions) runs lint, test, govulncheck, gosec, and gitleaks as
 **parallel** jobs on every push and PR; `release.yml` re-runs the full
-gate before GoReleaser, so a vulnerable `main` cannot be tagged.
+gate before GoReleaser, so a vulnerable `master` cannot be tagged.
 
 We don't run `semgrep-sast` (~19 min on a fresh runner); `gosec` — its
 own CI job at HIGH severity, plus the low-severity pass inside
