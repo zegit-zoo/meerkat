@@ -155,6 +155,11 @@ func planResearch(ctx context.Context, store *intake.Store, opts IntakePlanOpts,
 	if err != nil {
 		return nil, nil, err
 	}
+	root, err := os.OpenRoot(opts.Workdir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = root.Close() }()
 	var tasks []Task
 	var skips []Skip
 	for _, it := range items {
@@ -166,7 +171,7 @@ func planResearch(ctx context.Context, store *intake.Store, opts IntakePlanOpts,
 			continue
 		}
 		rawRel := path.Join(IntakeDir, it.ID+".md")
-		if err := writeWithin(opts.Workdir, rawRel, []byte(it.Body)); err != nil {
+		if err := writeWithin(root, rawRel, []byte(it.Body)); err != nil {
 			return nil, nil, err
 		}
 		pageID := path.Join(CandidateDir, it.ID)
@@ -210,6 +215,11 @@ func planValidation(ctx context.Context, store *intake.Store, opts IntakePlanOpt
 	if err != nil {
 		return nil, nil, err
 	}
+	root, err := os.OpenRoot(opts.Workdir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = root.Close() }()
 	var tasks []Task
 	var skips []Skip
 	for _, s := range staged {
@@ -222,13 +232,25 @@ func planValidation(ctx context.Context, store *intake.Store, opts IntakePlanOpt
 		}
 		pageID := path.Join(CandidateDir, s.ID)
 		pageRel := pagePathForRepo(opts.WikiDir, pageID)
-		full := filepath.Join(opts.Workdir, filepath.FromSlash(pageRel))
-		if _, err := os.Stat(full); errors.Is(err, os.ErrNotExist) {
-			if err := writeWithin(opts.Workdir, pageRel, s.Body); err != nil {
+		name := filepath.FromSlash(pageRel)
+		// Lstat through the root: a missing candidate is seeded, and a
+		// name that already resolves out of the working copy — a link
+		// left by an earlier run — is skipped, never followed (#92).
+		switch _, err := root.Lstat(name); {
+		case errors.Is(err, fs.ErrNotExist):
+			if err := writeWithin(root, pageRel, s.Body); err != nil {
 				return nil, nil, err
 			}
+		case err != nil:
+			skips = append(skips, Skip{s.ID, "candidate path escapes the working copy: " + err.Error()})
+			continue
 		}
-		page, err := kb.ParsePage(pageID, pageRel, mustRead(full))
+		body, err := root.ReadFile(name)
+		if err != nil {
+			skips = append(skips, Skip{s.ID, "candidate path escapes the working copy: " + err.Error()})
+			continue
+		}
+		page, err := kb.ParsePage(pageID, pageRel, body)
 		if err != nil {
 			skips = append(skips, Skip{s.ID, "candidate does not parse: " + err.Error()})
 			continue
@@ -262,21 +284,25 @@ func substitute(tpl string, subs map[string]string) string {
 	return out
 }
 
-func mustRead(p string) []byte {
-	b, _ := os.ReadFile(p) //nolint:gosec // G304: a path inside the operator's working copy.
-	return b
-}
-
-// writeWithin writes rel under base, refusing escapes, creating dirs.
-func writeWithin(base, rel string, body []byte) error {
-	full := filepath.Join(base, filepath.FromSlash(rel))
-	if !isPathWithinBase(base, full) {
-		return fmt.Errorf("path %q escapes the working copy", rel)
+// writeWithin writes rel under root, creating directories on the way.
+//
+// Everything goes through the os.Root (#92): a symlink left in a
+// persistent working copy by an earlier run — at rel itself or at any
+// directory on the way — cannot redirect the write out of the tree,
+// because the root re-resolves every component against the open
+// directory and refuses to leave it. And whatever already sits at rel is
+// unlinked first (the name, not its target), so a link there, even one
+// that stays inside the tree, is replaced rather than written through.
+// The same reasoning as Finalize and FinalizeRewrites (#74, #91).
+func writeWithin(root *os.Root, rel string, body []byte) error {
+	name := filepath.FromSlash(rel)
+	if err := root.MkdirAll(filepath.Dir(name), 0o750); err != nil {
+		return fmt.Errorf("path %q escapes the working copy: %w", rel, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
-		return err
+	if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("path %q escapes the working copy: %w", rel, err)
 	}
-	return os.WriteFile(full, body, 0o600)
+	return root.WriteFile(name, body, 0o600)
 }
 
 // Finalization is what Finalize did per task.
