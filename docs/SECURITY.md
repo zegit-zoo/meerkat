@@ -166,8 +166,15 @@ Additional hardening in place:
   snapshot is restored by unlinking whatever is at the path and writing a
   fresh file, never by writing through a link
   (`TestFinalizeRewrites_ReplacedPageIsRejectedNotWrittenThrough`). The
-  planning-path helpers (`writeWithin`, `mustRead`) do not use an
-  `os.Root` yet; that is tracked in #92.
+  planning half goes through an `os.Root` too (#92):
+  - The researcher's copy of each raw deposit, the validator's seed and
+    read of each candidate, the rewrite planner's page check, and the
+    tool-description proposal all go through a root opened once per plan.
+  - A link left in a persistent working copy by an earlier run cannot
+    redirect a planning write or read out of the tree.
+  - A link sitting at a write's own path is unlinked and replaced, never
+    written through.
+  - See `internal/ingest/plan_root_test.go`.
 - `type: url` / `type: gcs` / `type: s3` content archive extraction (`internal/contentsource/archive.go`)
   treats every entry as hostile: symlink and hardlink entries are skipped
   outright (never created, never followed — the same escape vector

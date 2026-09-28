@@ -90,6 +90,11 @@ func PlanRewrites(rep *Report, opts RewritePlanOpts) ([]Task, []Skip, error) {
 	if opts.SubagentType == "" {
 		opts.SubagentType = DefaultSubagentType
 	}
+	root, err := os.OpenRoot(opts.Workdir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = root.Close() }()
 	if opts.WallClockCap <= 0 {
 		opts.WallClockCap = DefaultWallClockCap
 	}
@@ -124,7 +129,10 @@ func PlanRewrites(rep *Report, opts RewritePlanOpts) ([]Task, []Skip, error) {
 				skips = append(skips, Skip{qualified, "page path escapes the working copy"})
 				continue
 			}
-			if _, err := os.Stat(full); err != nil {
+			// Through the root, so a page that is a link out of the working
+			// copy counts as absent rather than planned (#92); Snapshot
+			// refuses such a page anyway (#91).
+			if _, err := root.Stat(filepath.FromSlash(rel)); err != nil {
 				skips = append(skips, Skip{qualified, "not in this working copy (" + rel + ")"})
 				continue
 			}
@@ -418,7 +426,12 @@ func WriteToolProposal(rep *Report, workdir string, now time.Time) (string, erro
 		b.WriteString("\nSuggested addition: name the collection (or pointer) that answers these, in the words above, so the first search is scoped rather than unqualified.\n\n")
 	}
 	rel := path.Join(ToolProposalDir, "tool-description-"+now.UTC().Format("2006-01-02")+".md")
-	if err := writeWithin(workdir, rel, []byte(b.String())); err != nil {
+	root, err := os.OpenRoot(workdir)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = root.Close() }()
+	if err := writeWithin(root, rel, []byte(b.String())); err != nil {
 		return "", err
 	}
 	return rel, nil
