@@ -498,6 +498,6 @@ say so with `refresh:`.
   path/size/mtime fingerprint) and a probe, so the controller rebuilds
   only when the tree moved. The reconciliation half is already
   backend-agnostic, and `ReloadLocal` is the rebuild it would call.
-- **systemd socket activation (`LISTEN_FDS`).** It would let systemd hold
-  the port across a restart. With SIGHUP rebuilding local collections,
-  a restart is no longer needed to reindex.
+- **systemd socket activation (`LISTEN_FDS`).** Done (#110):
+  `serve-http` serves on a socket systemd passes in, so systemd holds the
+  port across a restart. See the README's "Socket activation (systemd)".

@@ -662,6 +662,12 @@ collection name, a bucket, a token or a subject. A collector that is
 down never affects a request, /readyz or shutdown. See
 docs/design/observability.md.
 
+Under systemd socket activation (a .socket unit with one ListenStream=,
+which sets LISTEN_FDS=1 and LISTEN_PID) the server serves on the socket
+systemd passes in, and --host and --port are ignored. systemd then holds
+the port across a restart: a client that connects while the service
+restarts waits and is served, instead of being refused. See the README.
+
 The server has no TLS of its own; terminate TLS at a reverse proxy.
 ```
 

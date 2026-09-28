@@ -257,6 +257,44 @@ over HTTP. Bind loopback (the default) or put a gateway in front. With one
 configured, every collection needs a token unless it is
 [explicitly published](#publishing-a-collection-to-unauthenticated-callers).
 
+### Socket activation (systemd)
+
+Under systemd, let a `.socket` unit own the port. `mk mcp serve-http` then
+serves on the socket systemd passes in (`LISTEN_FDS=1`), and `--host` and
+`--port` are ignored. A client that connects while the service restarts
+waits in the socket's queue and is served when the new process is ready,
+instead of being refused while it rebuilds its indexes.
+
+```ini
+# ~/.config/systemd/user/meerkat-mcp.socket
+[Socket]
+ListenStream=127.0.0.1:4005
+# Accept=no, the default, is required: meerkat takes the listening socket.
+
+[Install]
+WantedBy=sockets.target
+```
+
+```ini
+# ~/.config/systemd/user/meerkat-mcp.service
+[Unit]
+Requires=meerkat-mcp.socket
+After=meerkat-mcp.socket
+
+[Service]
+ExecStart=/usr/local/bin/mk --content-source %h/.config/meerkat/content-source.yaml mcp serve-http
+ExecReload=/bin/kill -HUP $MAINPID
+Environment=GOMEMLIMIT=400MiB
+MemoryMax=768M
+```
+
+`systemctl --user enable --now meerkat-mcp.socket` starts the service on
+the first connection. The startup line names the inherited address and
+says `(socket-activated)`. Exactly one `ListenStream=` is accepted:
+several sockets, or `Accept=yes` (one connected socket per client), fail
+at startup with the reason. `ExecReload` is the SIGHUP reload described
+under [`refresh:`](#refresh--follow-the-bucket-without-a-restart).
+
 ### Authentication and per-collection authorization
 
 Add an `auth:` block to `content-source.yaml` (or pass a standalone policy
