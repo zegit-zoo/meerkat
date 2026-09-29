@@ -22,9 +22,11 @@ import (
 	"github.com/blevesearch/bleve/v2/analysis/token/edgengram"
 	"github.com/blevesearch/bleve/v2/analysis/token/lowercase"
 	"github.com/blevesearch/bleve/v2/analysis/tokenizer/unicode"
+	"github.com/blevesearch/bleve/v2/index/scorch"
 	"github.com/blevesearch/bleve/v2/mapping"
 	"github.com/blevesearch/bleve/v2/search"
 	"github.com/blevesearch/bleve/v2/search/query"
+	bleveindex "github.com/blevesearch/bleve_index_api"
 
 	"github.com/zegit-zoo/meerkat/internal/kb"
 )
@@ -178,7 +180,7 @@ func NewFromPages(pages []kb.Page, opts ...Option) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	idx, err := bleve.NewMemOnly(mapping)
+	idx, err := newMemIndex(mapping)
 	if err != nil {
 		return nil, fmt.Errorf("create bleve index: %w", err)
 	}
@@ -286,8 +288,16 @@ const hintField = "hint"
 // 0.05 MRR against no hint, a ×1 hint 0.03. The dedicated clause still
 // makes a hint-only term find its pointer, and the pointer's type boost
 // multiplies the result afterwards, as it does for any other field.
+//
+// title is ×3, level with id, since BM25 (#101). Under TF-IDF it was ×5.
+// BM25 normalises a field's length against that field's own average
+// instead of rewarding the shortest field outright. Re-derived on the dev
+// splits of three collections: ×3 raised dev MRR on all of them (mk-mpe
+// +0.019, mk-ai +0.010, mk-ms +0.029), and ×8 lowered it on all of them.
+// Holdout, checked once afterwards: mk-ai +0.024, mk-ms +0.051, mk-mpe
+// -0.005. Numbers in docs/SEARCH.md.
 const (
-	titleBoost       = 5.0
+	titleBoost       = 3.0
 	idBoost          = 3.0
 	descriptionBoost = 2.0
 	hintBoost        = bodyBoost
@@ -675,11 +685,27 @@ func (i *Index) Close() error {
 	return i.bleve.Close()
 }
 
+// newMemIndex creates the in-memory index every collection searches.
+//
+// It is scorch, not what bleve.NewMemOnly gives (upsidedown), because
+// bleve implements BM25 only for scorch: on upsidedown a mapping's
+// ScoringModel is ignored and every query scores with TF-IDF (#101).
+// An empty path keeps scorch entirely in memory: no directory, no
+// persister, nothing written to disk, exactly like NewMemOnly.
+func newMemIndex(m mapping.IndexMapping) (bleve.Index, error) {
+	return bleve.NewUsing("", m, scorch.Name, scorch.Name, nil)
+}
+
 // buildMapping configures Bleve's analysis pipeline. Title gets a
 // higher boost than body so page-name matches outrank casual mentions,
 // and the frontmatter description sits between the two.
 func buildMapping(titleAnalyzer string) (*mapping.IndexMappingImpl, error) {
 	im := bleve.NewIndexMapping()
+	// BM25 (k1 = 1.2, b = 0.75, bleve's defaults): term frequency
+	// saturates, and a field's length is normalised against that field's
+	// average rather than rewarding the shortest field outright. Honoured
+	// by scorch only; see newMemIndex.
+	im.ScoringModel = bleveindex.BM25Scoring
 
 	docMap := bleve.NewDocumentMapping()
 
