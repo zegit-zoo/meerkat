@@ -1062,8 +1062,10 @@ on every hit and on `meerkat_search_total{stage}`; queries that use
 search syntax are never rewritten. A hub collection can set
 `layout.analyzer: ngram` to index titles as edge n-grams, and any
 collection can override the per-`type` score multipliers with
-`search.type_boosts` — a leaf that cites through pointers sets
-`{pointer: 1.0}`. See [docs/SEARCH.md](docs/SEARCH.md).
+`search.type_boosts`. By default those follow the collection's role: a
+hub (a tree root, or `layout.analyzer: ngram`) ranks pointers × 4, and
+every other collection ranks with no type boost. See
+[docs/SEARCH.md](docs/SEARCH.md).
 
 ### The intake pipeline (`mk ingest --role`)
 

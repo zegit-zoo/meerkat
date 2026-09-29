@@ -85,9 +85,11 @@ func WithTitleAnalyzer(name string) Option {
 }
 
 // DefaultTypeBoosts is what an index ranks by when WithTypeBoosts is not
-// given: a hub's routing pages outrank its own thin content, and the
-// two other members of a capability bundle sit between a pointer and a
-// plain page. The values are starting points to be tuned from retrieval
+// given, and it is the HUB table: a hub's routing pages outrank its own
+// thin content, and the two other members of a capability bundle sit
+// between a pointer and a plain page. A collection passes it only when it
+// is a routing tier (collections.Collection.IsHub, #95). A leaf passes
+// an empty map. The values are starting points to be tuned from retrieval
 // telemetry (meerkat-mob issue F), not constants of nature.
 var DefaultTypeBoosts = map[string]float64{
 	kb.TypePointer: 4.0,

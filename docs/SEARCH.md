@@ -166,16 +166,30 @@ type boosting switched off.
 ## Type boosts, per collection (`search.type_boosts`)
 
 After the field-boosted relevance score, a hit is multiplied by a weight for
-its frontmatter `type`. The defaults (`search.DefaultTypeBoosts`) are
-pointer × 4, skill × 2, example × 1.5, and they assume a **hub**: a
-small set of routing pages above thin content, where "the pointer
-outranks the page" is the point. The design and the multiplier's rule
-are in [docs/design/links.md](design/links.md#ranking).
+its frontmatter `type`. Which weights apply by default depends on the
+collection's **role** (#95):
 
-A **leaf** collection is the opposite shape. When it cites its sources
-through pointers — one per book chapter or article — the × 4 lets a
-citation outrank the page that answers the question. A collection
-overrides the defaults for itself in `content-source.yaml`:
+| role | how meerkat knows | default weights |
+|---|---|---|
+| **hub**, a routing tier | the root of a `tree:` deployment, or `layout.analyzer: ngram` | `search.DefaultTypeBoosts`: pointer × 4, skill × 2, example × 1.5 |
+| **leaf**, anything else | a single `content:` or `--kb-dir` collection, a flat `collections:` entry, a tree child | none: every type × 1 |
+
+In a hub, "the pointer outranks the page" is the point: a small set of
+routing pages sits above thin content. A leaf is the opposite shape.
+When it cites its sources through pointers, one per book chapter or
+article, a × 4 would let a citation outrank the page that answers the
+question. In a flat mount it would also crowd a sibling's answers out
+of the merge ([#88](https://github.com/zegit-zoo/meerkat/issues/88)). The
+role is never inferred from how many collections are mounted: a tree is
+always several collections, and its root is exactly the one that should
+keep the × 4. The design and the multiplier's rule are in
+[docs/design/links.md](design/links.md#ranking).
+
+A collection can always set its weights explicitly in
+`content-source.yaml`, and the explicit map wins over the role in both
+directions. A flat hub keeps its routing pages on top with
+`{pointer: 4, skill: 2, example: 1.5}`, and a leaf pins today's
+behaviour with:
 
 ```yaml
 collections:
@@ -188,7 +202,7 @@ collections:
 
 | `type_boosts` | Meaning |
 |---|---|
-| absent, or `null` | the defaults |
+| absent, or `null` | the role's defaults: × 4 pointers for a hub, none for a leaf |
 | `{}` | no type boosting at all |
 | `{pointer: 1.0}` | exactly this map; a type it does not list is unboosted |
 
@@ -203,7 +217,10 @@ ranking (`internal/collections/typeboosts_test.go`).
 The case that motivated the knob is a leaf of 196 pointers against 61
 concept pages, where a labelled retrieval eval put a chapter pointer
 first for most questions a concept page answers; the measurements are
-on [#88](https://github.com/zegit-zoo/meerkat/issues/88).
+on [#88](https://github.com/zegit-zoo/meerkat/issues/88). Before #95
+every collection defaulted to the hub weights, so each such leaf had to
+opt out. Now a leaf starts unboosted and a hub keeps the × 4
+(`internal/collections/role_test.go`).
 
 ## Search syntax
 
@@ -274,8 +291,9 @@ there are no snippets to build.
 ### Type boosts are applied before the cut
 
 Every stage ends in the same step (`run` in `index.go`): score, apply
-the per-`type` multiplier (`search.DefaultTypeBoosts`, pointer ×4 —
-see [docs/design/links.md](design/links.md#ranking)), and only then cut
+the per-`type` multiplier (a hub's `search.DefaultTypeBoosts`, pointer
+×4, or the collection's own map — see
+[docs/design/links.md](design/links.md#ranking)), and only then cut
 to the limit. Before [#87](https://github.com/zegit-zoo/meerkat/issues/87)
 the cut came first: bleve returned the raw top-`limit`, so a pointer
 whose raw score sat just outside it was dropped even when its boosted

@@ -99,25 +99,35 @@ content hit. Defaults (`search.DefaultTypeBoosts`): pointer ×4, skill
 ×2, example ×1.5 — starting points to be tuned from retrieval telemetry
 (issue F), not constants. An empty map disables the boost.
 
-The defaults are right for a **hub** and wrong for a **leaf**, and a
-collection says which it is in `content-source.yaml` (#88):
+The defaults are right for a **hub** and wrong for a **leaf**, so they
+apply by ROLE (#95), which meerkat reads from the deployment's shape
+(`Collection.IsHub`):
+
+- **Hub**: a small tier of routing pages above thin content, each
+  pointer a hop to another collection or an MCP server. That is the
+  root of a `tree:` deployment, or a collection that declares a hub tier
+  with `layout.analyzer: ngram`. It ranks with the defaults, because the
+  pointer outranking the page is the point.
+- **Leaf**: everything else. A single collection, a flat `collections:`
+  entry, a tree child. It is a content collection whose pointers, when it
+  has any, are citations (one per book chapter or article). A citation is
+  a reference, not a route, and ×4 would let it outrank the page that
+  answers the question. So a leaf ranks with no type boost.
+
+The role is never taken from how many collections are mounted: a tree
+is always several collections, and its root is exactly the one that
+keeps ×4. A collection states its own weights in `content-source.yaml`,
+and they replace the role's defaults for that collection only, in either
+direction:
 
 ```yaml
     search:
-      type_boosts: {pointer: 1.0}
+      type_boosts: {pointer: 4, skill: 2, example: 1.5}   # a flat hub keeps the ×4
 ```
 
-- **Hub** — a small tier of routing pages above thin content, each
-  pointer a hop to another collection or an MCP server. Keep the
-  defaults: the pointer outranking the page is the point.
-- **Leaf** — a content collection that cites its sources through
-  pointers, one per book chapter or article. There a pointer is a
-  reference, not a route, and ×4 lets a citation outrank the page that
-  answers the question. Set `pointer: 1.0` (or `type_boosts: {}` to
-  switch type boosting off entirely).
-
-Absent keeps the defaults; the map, when given, replaces them for that
-collection only. A pointer's `hint:` is indexed too, at the body's
+Before #95 every collection defaulted to the hub weights, and each leaf
+opted out with `{pointer: 1.0}` (#88). That setting is now the leaf
+default, and harmless to keep. A pointer's `hint:` is indexed too, at the body's
 weight (`docs/SEARCH.md`), so the one sentence that says what is at the
 other end is searchable on either shape.
 
