@@ -249,8 +249,9 @@ func ServeStdioWith(ctx context.Context, reg *collections.Registry, outcome Outc
 // run a manual-only target. Local only, deliberately: an object store's
 // or memory store's refresh: block has never polled under stdio, and
 // starting to would be new credentialed bucket traffic from every laptop
-// that runs `mk mcp serve` with an existing configuration. That is a
-// decision of its own (#112).
+// that runs `mk mcp serve` with an existing configuration. Decided in
+// #112: stdio stays local-only, and a per-transport opt-in
+// (`mk mcp serve --refresh`) is the route if one is ever needed.
 //
 // No metrics registry: stdio exposes no /metrics.
 func stdioRefresh(reg *collections.Registry, log *slog.Logger) *refresh.Controller {

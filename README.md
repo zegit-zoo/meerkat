@@ -918,7 +918,9 @@ size and modification time; no page is read and no git command runs) and
 rebuilds the index only when the fingerprint moved, or when a page was
 modified within two seconds of the last check, which the timestamp may
 not yet show. `mk mcp serve` runs this for `type: local` collections as
-well as `mk mcp serve-http`. A collection without the block behaves as
+well as `mk mcp serve-http`. Under stdio, an object-store or memory
+`refresh:` block is not followed: the bucket is read once, at startup
+(#112). A collection without the block behaves as
 before. On `type: local`, the block also accepts `remote_check` and
 `on_divergence`; any other key is refused at load.
 
