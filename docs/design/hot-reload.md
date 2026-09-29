@@ -516,11 +516,20 @@ treats only a missing content root as "no pages".
 local` targets only. stdio has no admin trigger, so a manual-only target
 could never run there. With no local `refresh:` block there are no such
 targets, `refresh.New` returns nil, and there is no controller, goroutine
-or timer (MK-FRESH-09). An object store's or memory store's `refresh:`
-block is still followed by `serve-http` only, as before. Starting to poll
-it from stdio would mean new credentialed bucket traffic from every
-laptop running an existing configuration, which is a decision of its own
-(#112).
+or timer (MK-FRESH-09).
+
+**stdio follows `type: local` blocks only** (decided 2026-09-29 by the
+operator, #112). An object store's or memory store's `refresh:` block is
+followed by `serve-http` alone. Under stdio, a bucket-backed collection
+serves the snapshot it resolved at startup until the process restarts,
+and a memory store does not pick up other replicas' writes. The
+alternative was rejected: every laptop running `mk mcp serve` with an
+existing configuration would start polling the bucket with the user's
+own credentials, one metadata call per target per interval, for as long
+as the MCP client keeps the process alive. That would be new credentialed
+traffic on upgrade, opted into only by a block written for `serve-http`.
+If someone does run stdio against a bucket, the route is a per-transport
+opt-in (`mk mcp serve --refresh`), which is not built.
 
 **The freshness record** (`collections.Freshness`, MK-FRESH-06) is what a
 refreshable local collection knows about itself: `loaded` (the token the
