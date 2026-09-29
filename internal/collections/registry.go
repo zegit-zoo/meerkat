@@ -1387,12 +1387,15 @@ func (r *Registry) Pages(collection string) ([]PageRef, error) {
 // collection is empty, and returns up to limit hits.
 //
 // Cross-collection ranking is a plain score merge: each collection is
-// queried with the same limit and the union re-sorted by score. Scores
-// are BM25 values from independent indexes, so they are comparable only
-// approximately — good enough to interleave results usefully, and the
-// alternative (one shared index) would forfeit the per-collection
-// isolation this whole abstraction exists to provide. Ties break on
-// configuration order, then page ID, so output is deterministic.
+// queried with the same limit and the union re-sorted by final score
+// (after type boosts). Scores are BM25 values from independent indexes,
+// so they are comparable only approximately. That is still the rule,
+// because it measured best (#94): per-query normalisation and rank fusion
+// both lift a sibling's weak best match to parity with the home
+// collection's strong answers. The alternative of one shared index would
+// forfeit the per-collection isolation this whole abstraction exists to
+// provide. Ties break on configuration order, then page ID, so output is
+// deterministic. See docs/SEARCH.md, "Searching several collections".
 func (r *Registry) Search(ctx context.Context, collection, query string, limit int) ([]Hit, error) {
 	targets, err := r.targetCtx(ctx, collection)
 	if err != nil {

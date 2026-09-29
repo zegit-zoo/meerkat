@@ -340,6 +340,68 @@ hits returned. A collection whose weights are all 1 — or that has none,
 | exact hit, no typed pages (as above) | 0.60 ms |
 | exact hit, one page in ten a pointer (`BenchmarkQueryStagedExactBoosted`) | 0.61 ms, from 0.59 ms before #87 |
 
+## Searching several collections: the merge rule
+
+With several collections mounted and no `collection` named, a search
+fans out and merges (`Registry.Search` in `internal/collections`):
+
+1. Each collection runs the query on its own index, through its own
+   staged planner and its own type boosts (by role, or its
+   `type_boosts`), with the caller's visibility clause inside the query,
+   and returns its best `limit` hits.
+2. The union is sorted by **final score**, the BM25 score after the type
+   multiplier.
+3. Ties break on configuration order, then page ID, so the output is
+   deterministic. The union is then cut to `limit`, and the merged
+   result reports the deepest planner stage any collection used.
+
+The scores come from **independent BM25 indexes**. Document counts,
+term frequencies across documents, and average field lengths all differ
+per collection, so two collections' scores are comparable only
+approximately. The merge uses them as they are anyway, on purpose,
+because that is what measured best
+([#94](https://github.com/zegit-zoo/meerkat/issues/94)).
+
+**Flat merging loses nothing against a collection alone.** On the mk-mpe
+retrieval eval, mk-mpe and mk-ms mounted flat against mk-mpe alone,
+over the queries both can answer:
+
+| scoring | split | hit@10 alone | hit@10 flat | rank shifts inside the top 10 |
+|---|---|---|---|---|
+| BM25 + role boosts (current) | dev | 27/30 | 27/30 | 1 |
+| | holdout | 14/16 | 14/16 | 2 |
+| TF-IDF, `pointer: 1.0` (before #101) | dev | 26/30 | 26/30 | 1 |
+| | holdout | 14/16 | 14/16 | 1–2 |
+
+**Normalising per collection makes it worse.** Measured under TF-IDF,
+before #101, on the dev split: dividing by each collection's top score,
+min-max, z-score and reciprocal rank fusion all did worse than the raw
+merge. Dividing by the top score and rank fusion each pushed 7 of 30 dev
+answers down. The reason is structural, and does not depend on the
+scoring model. The one thing a raw score carries across indexes is
+**how well this collection matches at all**. Per-query normalisation,
+rank fusion included, lifts every collection's best hit to parity, so a
+sibling's weak best match lands beside the home collection's strong
+answers.
+
+What actually crowds a flat mount is **boosting**, not scale. A
+pointer-first leaf ranked with the hub weights (pointer × 4) lets its
+citations outrank the other collection's answers
+([#88](https://github.com/zegit-zoo/meerkat/issues/88)). Since #95 a
+leaf ranks unboosted by default; see
+[Type boosts, per collection](#type-boosts-per-collection-searchtype_boosts).
+
+If a sibling ever shows a real gap, two routes remain:
+
+- Corpus-wide statistics: IDF computed over the union's document counts
+  at query time. That needs a custom scorer.
+- A `tree:` deployment whose root routes to the right child instead of
+  merging a flat list.
+
+Per-query normalisation is not a third route. Measure a change with the
+mk-mpe eval's flat run (`bin/eval-retrieval.py` with `.refs/mk-ms`
+linked) against its single-collection run.
+
 ## Frontmatter as fields
 
 `type`, `status`, `subcategory` and `tags` are indexed as **keyword
