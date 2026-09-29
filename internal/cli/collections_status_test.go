@@ -192,3 +192,21 @@ func TestVersion_ReportsLocalCommitOffline(t *testing.T) {
 		t.Errorf("commits = %v, want kb at %s and none for other", got, head)
 	}
 }
+
+// A checkout that fetched the remote's tip without merging it reads
+// unknown, and --check passes: the check never walks history
+// (MK-SEC-12), so it cannot call that checkout behind. The help says
+// so; this pins the exit code the help promises (#118 review N3, S3).
+func TestCollectionsStatus_FetchedNotMergedIsUnknownAndPasses(t *testing.T) {
+	resetKBToEmbedded(t)
+	dir, bare := clonedKB(t)
+	pushAhead(t, bare)
+	gitCLI(t, dir, "fetch", "-q", "origin")
+	out, err := execRoot(t, "--content-source", statusConfig(t, dir, remoteRefresh), "collections", "status", "--check")
+	if err != nil {
+		t.Fatalf("--check on a fetched, unmerged checkout failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "kb") || !strings.Contains(out, " unknown ") || !strings.Contains(out, "fetched but not merged") {
+		t.Errorf("table = %q, want kb unknown with the fetched-but-not-merged note", out)
+	}
+}

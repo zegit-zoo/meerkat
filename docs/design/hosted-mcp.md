@@ -631,7 +631,11 @@ freshness: collection "notes" is behind-remote (the remote has commits this serv
 A client that reads the first item keeps working. A client that renders
 every item shows the line. It is sent once per (session, collection,
 state), at most 240 bytes, and never names a commit, path or URL. It only
-covers collections the caller may read. Only a `type: local` collection
+covers collections the caller may read. The session is the explicit
+`session_id`, else the MCP session. Calls with neither share one bucket
+across every caller, so one principal's session-less call can use up
+another's advisory. That costs a missed line, never a disclosure, and a
+caller that wants its own passes `session_id`. Only a `type: local` collection
 with a `refresh:` block has a state at all, so a deployment without one
 never sees a second item. See
 [hot-reload.md](hot-reload.md#part-c-the-surfaces).

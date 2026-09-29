@@ -242,16 +242,25 @@ Report the freshness of every type: local collection that has a
 git ls-remote the server uses. Nothing is ever pulled, whatever
 "on_divergence" says: this command reports, the server acts.
 
-States: current, behind-remote, dirty, diverged, unknown (see
+States here are current, behind-remote and unknown (see
 docs/design/hot-reload.md). In a freshly started process the on-disk
-half is always current. The index was just built.
+half is always current. The index was just built. dirty and diverged
+come only from a running server's pull, so this command never reports
+them: a dirty or diverged checkout that is behind reads behind-remote.
 
 With --check, the exit status is 1 when any collection is behind-remote,
-dirty or diverged, or when a configured remote check could not run
-because of the checkout's own configuration (not a git working tree,
-a detached HEAD, no upstream, a refused name). It is 0 for current and
-unknown, including an unreachable remote: a CI job must not fail because
-a remote was briefly down. The output says which problem it was.
+or when a configured remote check could not run because of the
+checkout's own configuration (not a git working tree, a detached HEAD,
+no upstream, a refused name). It is 0 for current and unknown,
+including an unreachable remote: a CI job must not fail because a
+remote was briefly down. The output says which problem it was.
+
+--check does not catch a checkout that fetched the remote's tip without
+merging it. The check reads git's files and never walks history
+(MK-SEC-12), so that checkout reads unknown and passes. Where CI
+checkouts fetch, compare explicitly as well:
+git rev-list --count HEAD..@{upstream} prints 0 only when nothing is
+left to merge.
 ```
 
 #### Usage
@@ -263,7 +272,7 @@ meerkat collections status [flags]
 #### Flags
 
 ```text
-      --check   Exit 1 when any collection is behind-remote, dirty or diverged, or its remote check could not run because of its configuration
+      --check   Exit 1 when any collection is behind-remote, or its remote check could not run because of its configuration
       --json    Output as JSON
 ```
 
@@ -320,6 +329,10 @@ Run an HTTP/OpenAPI server. Endpoints:
 
 /search, /show and /list take an optional "collection" field; omitted,
 they span every mounted collection.
+
+This server loads its collections once and never runs a "refresh:"
+block, so GET /collections reports no freshness. For a server that
+follows its sources, use "mk mcp serve-http".
 
 Authentication: all data endpoints require an Authorization: Bearer
 header carrying the configured API key. The key is supplied via

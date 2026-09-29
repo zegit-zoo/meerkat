@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,22 @@ func writeWikiPage(t *testing.T, dir, id, body string) {
 // returns the registry, the remote tip and kb's working tree.
 func staleRegistry(t *testing.T, onDivergence string) (*collections.Registry, string, string) {
 	t.Helper()
+	fx := newStaleFixture(t, onDivergence, "kb", "plain")
+	return fx.reg, fx.tip, fx.dir
+}
+
+// staleFixture is staleRegistry with everything a disclosure test needs
+// to look for: both names, every directory, the bare remote and both
+// commits.
+type staleFixture struct {
+	reg                 *collections.Registry
+	kbName, plainName   string
+	dir, plainDir, bare string
+	head, tip           string
+}
+
+func newStaleFixture(t *testing.T, onDivergence, kbName, plainName string) *staleFixture {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
 	}
@@ -70,6 +87,7 @@ func staleRegistry(t *testing.T, onDivergence string) (*collections.Registry, st
 	gitIn(t, seed, "clone", "-q", "--bare", seed, bare)
 	dir := filepath.Join(t.TempDir(), "kb")
 	gitIn(t, t.TempDir(), "clone", "-q", bare, dir)
+	head := gitIn(t, dir, "rev-parse", "HEAD")
 	pusher := filepath.Join(t.TempDir(), "pusher")
 	gitIn(t, t.TempDir(), "clone", "-q", bare, pusher)
 	writeWikiPage(t, pusher, "notes/zebrafish", "About zebrafish.")
@@ -81,11 +99,11 @@ func staleRegistry(t *testing.T, onDivergence string) (*collections.Registry, st
 	plain := t.TempDir()
 	writeWikiPage(t, plain, "other/page", "An unrelated page.")
 	reg, err := collections.Open(context.Background(), []contentsource.ResolvedCollection{
-		{Name: "kb", Dir: dir, Provenance: "disk:" + dir, Source: contentsource.Source{
+		{Name: kbName, Dir: dir, Provenance: "disk:" + dir, Source: contentsource.Source{
 			Type: contentsource.TypeLocal, Path: dir, Layout: contentsource.Layout{Wiki: "wiki"},
 			Refresh: &refresh.Spec{Interval: refresh.Duration(time.Minute), RemoteCheck: refresh.Duration(time.Minute), OnDivergence: onDivergence},
 		}},
-		{Name: "plain", Dir: plain, Provenance: "disk:" + plain, Source: contentsource.Source{
+		{Name: plainName, Dir: plain, Provenance: "disk:" + plain, Source: contentsource.Source{
 			Type: contentsource.TypeLocal, Path: plain, Layout: contentsource.Layout{Wiki: "wiki"},
 		}},
 	})
@@ -93,7 +111,7 @@ func staleRegistry(t *testing.T, onDivergence string) (*collections.Registry, st
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = reg.Close() })
-	kb, err := reg.Get("kb")
+	kb, err := reg.Get(kbName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +122,8 @@ func staleRegistry(t *testing.T, onDivergence string) (*collections.Registry, st
 	if f, _ := kb.Freshness(); f.State != collections.FreshBehindRemote {
 		t.Fatalf("precondition: kb freshness = %+v, want behind-remote", f)
 	}
-	return reg, tip, dir
+	return &staleFixture{reg: reg, kbName: kbName, plainName: plainName,
+		dir: dir, plainDir: plain, bare: bare, head: head, tip: tip}
 }
 
 func TestListCollections_CarriesFreshnessOnlyWhereConfigured(t *testing.T) {
@@ -237,6 +256,58 @@ func TestAdvisory_NewStateAndExpiryReAdvise(t *testing.T) {
 	}
 }
 
+func staleRecords(n int) []record {
+	recs := make([]record, n)
+	for i := range recs {
+		recs[i] = record{name: "c" + strconv.Itoa(i), f: collections.Freshness{State: collections.FreshBehindRemote}}
+	}
+	return recs
+}
+
+// One result carries at most maxAdvised advisories; the rest come on
+// the next result (#118 review N1).
+func TestAdvisory_AtMostMaxAdvisedPerResult(t *testing.T) {
+	a := newAdvisories()
+	recs := staleRecords(maxAdvised + 2)
+	if got := a.takeRecords("s", recs); len(got) != maxAdvised {
+		t.Fatalf("first result carried %d advisories, want %d", len(got), maxAdvised)
+	}
+	if got := a.takeRecords("s", recs); len(got) != 2 {
+		t.Errorf("second result carried %d advisories, want the 2 held back", len(got))
+	}
+}
+
+// At the cap the oldest key goes, not an arbitrary one; a key advised
+// again moves to the back; and expired keys leave before a live one
+// is evicted (#118 review N2, S1).
+func TestAdvisory_EvictionIsOldestFirstAndExpiredFirst(t *testing.T) {
+	a := newAdvisories()
+	t0 := time.Now()
+	at := func(i int) time.Time { return t0.Add(time.Duration(i) * time.Millisecond) }
+	for i := range advisoryCap {
+		a.remember("k"+strconv.Itoa(i), at(i))
+	}
+	a.remember("k0", at(advisoryCap)) // advised again: now the newest
+	a.remember("new", at(advisoryCap+1))
+	if len(a.seen) != advisoryCap {
+		t.Fatalf("set holds %d keys, want the cap %d", len(a.seen), advisoryCap)
+	}
+	if _, ok := a.seen["k1"]; ok {
+		t.Error("the oldest key (k1) survived an eviction at the cap")
+	}
+	for _, k := range []string{"k0", "k2", "new"} {
+		if _, ok := a.seen[k]; !ok {
+			t.Errorf("%s was evicted; only the oldest may go", k)
+		}
+	}
+	// Everything but k0 and "new" has expired by now: one more key
+	// clears them, rather than evicting a live key.
+	a.remember("later", at(advisoryCap).Add(advisoryTTL-time.Millisecond))
+	if len(a.seen) != 3 {
+		t.Errorf("after expiry the set holds %d keys, want 3 (k0, new, later)", len(a.seen))
+	}
+}
+
 func TestAdvisory_TrackerIsBounded(t *testing.T) {
 	a := newAdvisories()
 	now := time.Now()
@@ -321,5 +392,21 @@ func TestHosted_MetricsCarryFreshness(t *testing.T) {
 	code, body := get(t, ts, MetricsPath)
 	if code != http.StatusOK || !strings.Contains(body, `meerkat_collection_freshness{state="behind-remote"} 1`) {
 		t.Errorf("metrics = %d, want the behind-remote count:\n%s", code, body)
+	}
+}
+
+// BenchmarkAdvisory_TakeAtCap is the flood from #118 review S1: every
+// call a new session_id, the set full, five stale collections per
+// result. Each op must stay constant, not a scan of the set.
+func BenchmarkAdvisory_TakeAtCap(b *testing.B) {
+	a := newAdvisories()
+	recs := staleRecords(maxAdvised)
+	for i := range advisoryCap {
+		a.takeRecords("warm"+strconv.Itoa(i), recs[:1])
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		a.takeRecords("s"+strconv.Itoa(i), recs)
 	}
 }

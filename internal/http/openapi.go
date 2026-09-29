@@ -208,7 +208,7 @@ func openAPISchema(version string, collectionNames []string) map[string]any {
 			"get": map[string]any{
 				"operationId": "mk_collections",
 				"summary":     "List the knowledge-base collections this server mounts",
-				"description": "Returns one entry per mounted collection: its name (what to pass as \"collection\" to /search, /show and /list), the content-source type behind it, its provenance, how many pages it serves, and — for a collection configured for runtime reconciliation — the state of each refresh target.",
+				"description": "Returns one entry per mounted collection: its name (what to pass as \"collection\" to /search, /show and /list), the content-source type behind it, its provenance, how many pages it serves, and — for a collection with a refresh: block — that block's targets. This server loads its collections once and never reconciles, so the targets never run here and no freshness is reported; `mk mcp serve-http` follows its sources.",
 				"security":    bearerSecurity,
 				"responses": map[string]any{
 					"200": map[string]any{

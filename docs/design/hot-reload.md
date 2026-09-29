@@ -713,13 +713,26 @@ so its on-disk half is always current. What it adds is the remote half.
 For each collection with `remote_check`, it runs one `ls-remote`, now,
 through `ProbeRemote`, which never pulls, whatever `on_divergence`
 says. The command reports, and the server acts. With `--check` (pin 3),
-it exits 1 when any collection is `behind-remote`, `dirty` or
-`diverged`, or when a check could not run because of the checkout's
-own configuration: not a git tree, a detached HEAD, no upstream, or a
-refused name. It exits 0 for `current` and `unknown`, including an
-unreachable remote, because a CI job must not fail when a remote is
-briefly down. The table says which problem it was (`config problem:` or
-`network problem:`).
+it exits 1 when any collection is `behind-remote`, or when a check
+could not run because of the checkout's own configuration: not a git
+tree, a detached HEAD, no upstream, or a refused name. It exits 0 for
+`current` and `unknown`, including an unreachable remote, because a CI
+job must not fail when a remote is briefly down. The table says which
+problem it was (`config problem:` or `network problem:`).
+
+Two limits follow from reporting without acting (#118 review S2, S3):
+
+- **`dirty` and `diverged` come only from a server's pull.** A
+  command that never pulls cannot tell them apart from `behind-remote`,
+  so a dirty or diverged checkout that is behind reads `behind-remote`
+  and fails `--check` as such. The two states stay in the failing set
+  so the rule reads like the server's advisory set.
+- **A checkout that fetched without merging reads `unknown` and
+  passes.** The flag verdict never walks history (MK-SEC-12), and once
+  the tip is present it cannot tell a behind branch from an ahead one.
+  CI checkouts usually fetch. There, run
+  `git rev-list --count HEAD..@{upstream}` as well: it prints 0 only
+  when nothing is left to merge.
 
 **`mk version`** names the commit each refreshed local collection is
 checked out at, read from git's files. It stays offline: no network, no
@@ -738,7 +751,9 @@ collections once and never reconciles: it runs no controller and no
 remote check. A freshness record there would be frozen at the moment of
 mount, and would read `current` for as long as the process lives. No
 answer is better than a wrong one. It gains the field when it gains a
-controller.
+controller. Its help, the README and its OpenAPI description say so.
+The same endpoint's older `refresh` array has the same problem, and
+[#119](https://github.com/zegit-zoo/meerkat/issues/119) tracks it.
 
 ## Security and reliability properties
 
@@ -850,9 +865,17 @@ say so with `refresh:`.
   tracker stays within its cap; the gauge is absent without records and
   labelled by state only with them, on the hosted `/metrics` too. On
   the CLI: `--check` fails on behind-remote and a config problem, and
-  passes on current and an unreachable remote; `--json`; the command
-  never pulls; `mk version` reports the commit with the remote gone.
-  Each protection's test was checked to fail with the protection
+  passes on current, an unreachable remote and a fetched-but-unmerged
+  checkout (`unknown`); `--json`; the command never pulls; `mk version`
+  reports the commit with the remote gone. The advisory tracker: at most
+  five per result, oldest-first eviction at the cap, expired keys
+  leaving before a live one, and a constant cost per call at the cap
+  (`BenchmarkAdvisory_TakeAtCap`). The disclosure test
+  (`TestObservability_FreshnessCarriesNoNamePathCommitOrToken`) runs a
+  content cycle, a remote check and the pull it triggers, with tracing
+  on and the gauge registered. It asserts that no span or label carries
+  a collection name, a directory, the remote's path, either commit or a
+  token. Each protection's test was checked to fail with the protection
   removed.
 
 ## Follow-ups

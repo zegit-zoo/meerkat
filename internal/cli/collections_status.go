@@ -51,16 +51,25 @@ func newCollectionsStatusCmd() *cobra.Command {
 git ls-remote the server uses. Nothing is ever pulled, whatever
 "on_divergence" says: this command reports, the server acts.
 
-States: current, behind-remote, dirty, diverged, unknown (see
+States here are current, behind-remote and unknown (see
 docs/design/hot-reload.md). In a freshly started process the on-disk
-half is always current. The index was just built.
+half is always current. The index was just built. dirty and diverged
+come only from a running server's pull, so this command never reports
+them: a dirty or diverged checkout that is behind reads behind-remote.
 
 With --check, the exit status is 1 when any collection is behind-remote,
-dirty or diverged, or when a configured remote check could not run
-because of the checkout's own configuration (not a git working tree,
-a detached HEAD, no upstream, a refused name). It is 0 for current and
-unknown, including an unreachable remote: a CI job must not fail because
-a remote was briefly down. The output says which problem it was.`,
+or when a configured remote check could not run because of the
+checkout's own configuration (not a git working tree, a detached HEAD,
+no upstream, a refused name). It is 0 for current and unknown,
+including an unreachable remote: a CI job must not fail because a
+remote was briefly down. The output says which problem it was.
+
+--check does not catch a checkout that fetched the remote's tip without
+merging it. The check reads git's files and never walks history
+(MK-SEC-12), so that checkout reads unknown and passes. Where CI
+checkouts fetch, compare explicitly as well:
+git rev-list --count HEAD..@{upstream} prints 0 only when nothing is
+left to merge.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rows := collectionStatus(cmd)
@@ -77,6 +86,9 @@ a remote was briefly down. The output says which problem it was.`,
 			}
 			var failed []string
 			for _, r := range rows {
+				// dirty and diverged never occur here (only a server's pull
+				// decides them); they stay so the rule reads like the
+				// server's advisory set.
 				switch {
 				case r.Freshness.State == collections.FreshBehindRemote,
 					r.Freshness.State == collections.FreshDirty,
@@ -94,7 +106,7 @@ a remote was briefly down. The output says which problem it was.`,
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Output as JSON")
 	cmd.Flags().BoolVar(&check, "check", false,
-		"Exit 1 when any collection is behind-remote, dirty or diverged, or its remote check could not run because of its configuration")
+		"Exit 1 when any collection is behind-remote, or its remote check could not run because of its configuration")
 	return cmd
 }
 

@@ -547,7 +547,11 @@ Register `http://127.0.0.1:4004/openapi.json` as a Tool Server in OpenWebUI.
 The search/show/list tools are available as `POST /search`, `POST /show`,
 `POST /list`, and `GET /collections` enumerates what's mounted. `/healthz`
 and `/openapi.json` are exempt from auth; everything else needs the bearer
-token, and the server refuses to start without one.
+token, and the server refuses to start without one. `mk http serve` loads
+its collections once and never runs a `refresh:` block, so `GET /collections`
+reports no freshness (its `refresh` array describes configuration only; see
+[#119](https://github.com/zegit-zoo/meerkat/issues/119)). For a server that
+follows its sources, use `mk mcp serve-http`.
 
 If OpenWebUI runs on another host, don't just add `--host 0.0.0.0` —
 meerkat has no TLS of its own, so that puts the bearer token on the
@@ -886,8 +890,10 @@ collection is marked degraded — visible in `/readyz`'s counts and in
 readiness probe, for a collection where stale content is a correctness
 problem rather than an inconvenience. The detail behind it (which
 generation is applied, when the last cycle succeeded, what failed) is on the
-authenticated discovery surfaces — `mk_list_collections` and
-`GET /collections` — not on the unauthenticated probes.
+authenticated discovery surface, `mk_list_collections`, not on the
+unauthenticated probes. (`mk http serve`'s `GET /collections` shows the same
+array, but that server never runs a cycle; see
+[#119](https://github.com/zegit-zoo/meerkat/issues/119).)
 
 `refresh:` under a `memory:` block is what makes **several replicas sharing
 one GCS memory store converge**: without it, a memory saved through one
@@ -944,11 +950,16 @@ per session. `/metrics` counts collections per state in
 
 ```bash
 mk collections status            # asks each remote once; never pulls
-mk collections status --check    # exit 1 if behind-remote, dirty, diverged,
-                                 # or the remote check is misconfigured
+mk collections status --check    # exit 1 if behind-remote, or the remote
+                                 # check is misconfigured
 ```
 
-An unreachable remote does not fail `--check`. See
+An unreachable remote does not fail `--check`. `dirty` and `diverged` come
+only from a running server's pull. The command reports such a checkout as
+`behind-remote`. A checkout that fetched the remote's tip without merging
+it reads `unknown` and passes, because the check never walks history. In a
+CI job that fetches, also run `git rev-list --count HEAD..@{upstream}`,
+which prints 0 only when nothing is left to merge. See
 [docs/design/hot-reload.md](docs/design/hot-reload.md#part-c-the-surfaces).
 
 `generation:` and `refresh:` are **mutually exclusive** and refused together

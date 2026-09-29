@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"container/list"
 	"sync"
 	"time"
 
@@ -25,6 +26,13 @@ import (
 //     advisory.
 //   - It is bounded: one line, at most collections.MaxAdvisory bytes,
 //     naming the collection and the state and nothing else.
+//
+// The seen-set is shared by every session, under one lock, so its cost
+// per key is constant: keys sit in a list in the order they were last
+// advised, which is also the order they expire in. Expired keys leave
+// from the front as new ones arrive, and a full set drops its oldest,
+// so no caller can make the lock expensive by varying session_id
+// (#118 review S1).
 
 const (
 	advisoryCap = 10000            // (session, collection, state) keys remembered
@@ -34,13 +42,25 @@ const (
 
 // advisories remembers which advisories each session has already seen.
 type advisories struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
-	now  func() time.Time
+	mu    sync.Mutex
+	seen  map[string]*list.Element // key -> element holding a seenKey
+	order *list.List               // oldest advised at the front
+	now   func() time.Time
+}
+
+type seenKey struct {
+	key string
+	at  time.Time
 }
 
 func newAdvisories() *advisories {
-	return &advisories{seen: make(map[string]time.Time), now: time.Now}
+	return &advisories{seen: make(map[string]*list.Element), order: list.New(), now: time.Now}
+}
+
+// record is one collection's name and freshness, as take reads them.
+type record struct {
+	name string
+	f    collections.Freshness
 }
 
 // take returns the advisory lines for cols that session has not seen in
@@ -49,49 +69,59 @@ func (a *advisories) take(session string, cols []*collections.Collection) []stri
 	if a == nil {
 		return nil
 	}
+	recs := make([]record, 0, len(cols))
+	for _, c := range cols {
+		if f, ok := c.Freshness(); ok {
+			recs = append(recs, record{name: c.Name, f: f})
+		}
+	}
+	return a.takeRecords(session, recs)
+}
+
+func (a *advisories) takeRecords(session string, recs []record) []string {
 	var out []string
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
-	for _, c := range cols {
+	for _, r := range recs {
 		if len(out) == maxAdvised {
 			break
 		}
-		f, ok := c.Freshness()
-		if !ok || !f.Stale() {
+		if !r.f.Stale() {
 			continue
 		}
-		key := session + "\x00" + c.Name + "\x00" + f.State
-		if at, seen := a.seen[key]; seen && now.Sub(at) < advisoryTTL {
+		key := session + "\x00" + r.name + "\x00" + r.f.State
+		if el, seen := a.seen[key]; seen && now.Sub(el.Value.(seenKey).at) < advisoryTTL {
 			continue
 		}
 		a.remember(key, now)
-		out = append(out, f.Advisory(c.Name))
+		out = append(out, r.f.Advisory(r.name))
 	}
 	return out
 }
 
-// remember records key, evicting expired keys first and then the oldest
-// when the set is full, so it never grows past advisoryCap.
+// remember records key as advised now. Keys that have expired leave
+// from the front first; if the set is still full, the oldest goes. Both
+// are O(1) per key, so the set never grows past advisoryCap and never
+// costs a scan.
 func (a *advisories) remember(key string, now time.Time) {
-	if len(a.seen) >= advisoryCap {
-		for k, at := range a.seen {
-			if now.Sub(at) >= advisoryTTL {
-				delete(a.seen, k)
-			}
-		}
+	if el, ok := a.seen[key]; ok {
+		el.Value = seenKey{key: key, at: now}
+		a.order.MoveToBack(el)
+		return
+	}
+	for front := a.order.Front(); front != nil && now.Sub(front.Value.(seenKey).at) >= advisoryTTL; front = a.order.Front() {
+		a.drop(front)
 	}
 	if len(a.seen) >= advisoryCap {
-		var oldest string
-		var oldestAt time.Time
-		for k, at := range a.seen {
-			if oldest == "" || at.Before(oldestAt) {
-				oldest, oldestAt = k, at
-			}
-		}
-		delete(a.seen, oldest)
+		a.drop(a.order.Front())
 	}
-	a.seen[key] = now
+	a.seen[key] = a.order.PushBack(seenKey{key: key, at: now})
+}
+
+func (a *advisories) drop(el *list.Element) {
+	delete(a.seen, el.Value.(seenKey).key)
+	a.order.Remove(el)
 }
 
 // withAdvisories appends each advisory line as its own text item AFTER
