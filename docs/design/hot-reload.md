@@ -732,7 +732,10 @@ Two limits follow from reporting without acting (#118 review S2, S3):
   the tip is present it cannot tell a behind branch from an ahead one.
   CI checkouts usually fetch. There, run
   `git rev-list --count HEAD..@{upstream}` as well: it prints 0 only
-  when nothing is left to merge.
+  when nothing is left to merge. Most CI checkouts (`actions/checkout`
+  included) are a detached HEAD, where `--check` exits 1 with `HEAD is
+  detached` and `@{upstream}` does not resolve. Those compare with
+  `git rev-list --count HEAD..origin/<branch>` instead.
 
 **`mk version`** names the commit each refreshed local collection is
 checked out at, read from git's files. It stays offline: no network, no

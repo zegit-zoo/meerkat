@@ -260,7 +260,10 @@ merging it. The check reads git's files and never walks history
 (MK-SEC-12), so that checkout reads unknown and passes. Where CI
 checkouts fetch, compare explicitly as well:
 git rev-list --count HEAD..@{upstream} prints 0 only when nothing is
-left to merge.
+left to merge. Most CI checkouts (actions/checkout included) are a
+detached HEAD, where --check exits 1 with "HEAD is detached" and
+@{upstream} does not resolve; there, use
+git rev-list --count HEAD..origin/<branch> instead.
 ```
 
 #### Usage

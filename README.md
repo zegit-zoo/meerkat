@@ -959,7 +959,10 @@ only from a running server's pull. The command reports such a checkout as
 `behind-remote`. A checkout that fetched the remote's tip without merging
 it reads `unknown` and passes, because the check never walks history. In a
 CI job that fetches, also run `git rev-list --count HEAD..@{upstream}`,
-which prints 0 only when nothing is left to merge. See
+which prints 0 only when nothing is left to merge. Most CI checkouts
+(`actions/checkout` included) are a detached HEAD. There, `--check` exits
+1 with `HEAD is detached` and `@{upstream}` does not resolve, so compare
+with `git rev-list --count HEAD..origin/<branch>` instead. See
 [docs/design/hot-reload.md](docs/design/hot-reload.md#part-c-the-surfaces).
 
 `generation:` and `refresh:` are **mutually exclusive** and refused together
