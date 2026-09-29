@@ -23,12 +23,20 @@ import (
 // reconciliation.
 //
 // It is the single predicate every caller uses, so the "object stores
-// only, never alongside a pinned version" rule enforced at config load
-// (see Source.validateRefresh) has exactly one runtime counterpart. A
-// pinned source answers false even if a refresh block somehow reached
-// here, which keeps the failure direction closed: the worst outcome of
-// a validation gap is a source that does not move, never one that does.
+// and type: local only, never alongside a pinned version" rule enforced
+// at config load (see Source.validateRefresh) has exactly one runtime
+// counterpart. A pinned source answers false even if a refresh block
+// somehow reached here, which keeps the failure direction closed: the
+// worst outcome of a validation gap is a source that does not move,
+// never one that does.
+//
+// A `type: local` source has no pinned version: its token is a
+// fingerprint of the directory (kb.FingerprintFS), and it answers true
+// whenever it carries a refresh: block.
 func (s Source) Refreshable() bool {
+	if s.Type == TypeLocal {
+		return s.Refresh != nil
+	}
 	kind, ok := kindFor(s.Type)
 	if !ok || s.Refresh == nil {
 		return false

@@ -235,7 +235,8 @@ func TestRefreshable(t *testing.T) {
 		{"gcs with refresh", Source{Type: TypeGCS, Bucket: "b", Prefix: "p/", Refresh: minuteRefresh()}, true},
 		{"gcs without refresh", Source{Type: TypeGCS, Bucket: "b", Prefix: "p/"}, false},
 		{"pinned generation", Source{Type: TypeGCS, Bucket: "b", Object: "o", Generation: 7, Refresh: minuteRefresh()}, false},
-		{"local with refresh", Source{Type: TypeLocal, Path: "p", Refresh: minuteRefresh()}, false},
+		{"local with refresh", Source{Type: TypeLocal, Path: "p", Refresh: minuteRefresh()}, true},
+		{"local without refresh", Source{Type: TypeLocal, Path: "p"}, false},
 		{"url with refresh", Source{Type: TypeURL, URL: "https://x", Refresh: minuteRefresh()}, false},
 	}
 	for _, tc := range cases {
@@ -317,16 +318,6 @@ func TestConfig_RefreshRejections(t *testing.T) {
 			wantErr: "pins this source to one immutable object generation",
 		},
 		{
-			name: "refresh on a local source",
-			yaml: `collections:
-  - name: docs
-    type: local
-    path: ./kb
-    refresh: {interval: 60s}
-`,
-			wantErr: "refresh applies to type: gcs or",
-		},
-		{
 			name: "refresh on a url source",
 			yaml: `collections:
   - name: docs
@@ -335,7 +326,7 @@ func TestConfig_RefreshRejections(t *testing.T) {
     sha256: "` + strings.Repeat("a", 64) + `"
     refresh: {interval: 60s}
 `,
-			wantErr: "refresh applies to type: gcs or",
+			wantErr: "refresh applies to type: gcs, type: s3 or type: local only",
 		},
 		{
 			name: "interval below the minimum",

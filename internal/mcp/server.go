@@ -49,6 +49,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -61,6 +62,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/kb"
+	"github.com/zegit-zoo/meerkat/internal/refresh"
 	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/search"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
@@ -222,11 +224,46 @@ func ServeStdioWith(ctx context.Context, reg *collections.Registry, outcome Outc
 	defer stopSessions()
 	defer func() { _ = reg.Close() }()
 
+	// Registered after reg.Close, so it runs before it: an in-flight
+	// rebuild finishes before the registry is torn down under it.
+	ctl := stdioRefresh(reg, slog.New(slog.NewTextHandler(defaultLogWriter(), &slog.HandlerOptions{Level: slog.LevelInfo})))
+	ctl.Start(ctx)
+	defer func() { _ = ctl.Close() }()
+
 	// AllowAnonymousPersonal is true here and nowhere else: a stdio
 	// server was spawned by the one user it serves, so a personal memory
 	// has an unambiguous owner even though no token established it. See
 	// transportOptions.
 	return mcpserver.ServeStdio(newServer(reg, transportOptions{AllowAnonymousPersonal: true, Outcome: outcome}))
+}
+
+// stdioRefresh returns the refresh controller a stdio server runs: one
+// over the SCHEDULED targets of `type: local` collections, those that
+// carry a refresh: block. It returns nil when there are none, and a nil
+// controller's Start and Close do nothing, so a configuration with no
+// local refresh: block gets no controller, no goroutine and no timer
+// (MK-FRESH-09, meerkat-mob#25).
+//
+// Scheduled only, because stdio has no admin trigger: nothing would ever
+// run a manual-only target. Local only, deliberately: an object store's
+// or memory store's refresh: block has never polled under stdio, and
+// starting to would be new credentialed bucket traffic from every laptop
+// that runs `mk mcp serve` with an existing configuration. That is a
+// decision of its own (#112).
+//
+// No metrics registry: stdio exposes no /metrics.
+func stdioRefresh(reg *collections.Registry, log *slog.Logger) *refresh.Controller {
+	var scheduled []refresh.Target
+	for _, t := range reg.RefreshTargets() {
+		if t.Spec() == nil || t.Key().Kind != refresh.KindContent {
+			continue
+		}
+		if c, err := reg.Get(t.Key().Name); err != nil || c.Source.Type != contentsource.TypeLocal {
+			continue
+		}
+		scheduled = append(scheduled, t)
+	}
+	return refresh.New(refresh.Options{Targets: scheduled, Logger: log})
 }
 
 // Tool names. Constants because the per-request tool filter

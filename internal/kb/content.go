@@ -373,31 +373,11 @@ func List() ([]Page, error) { return ListFS(loadFS()) }
 // (internal/collections), where several content roots are mounted at
 // once and there is no single "current" filesystem to be redirected to:
 // each collection holds its own fs.FS and reads through it directly.
-// List is ListFS(the UseFS filesystem).
+// List is ListFS(the UseFS filesystem). The files it considers are
+// walkPages' (fingerprint.go), the same set FingerprintFS covers.
 func ListFS(fsys fs.FS) ([]Page, error) {
 	var pages []Page
-	err := fs.WalkDir(fsys, "content", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		// Skip anything that isn't a regular file. With a runtime
-		// --kb-dir this walks a live filesystem, so the tree can contain
-		// FIFOs, sockets and device nodes. Opening a FIFO blocks until a
-		// writer appears, which never happens — one stray pipe under
-		// wiki/ would otherwise hang `mk list` and stop `http serve` and
-		// `mcp serve` from ever binding, with no diagnostic.
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		if !strings.HasSuffix(p, ".md") {
-			return nil
-		}
-		if isExcluded(p) {
-			return nil
-		}
+	err := walkPages(fsys, func(p string, _ fs.DirEntry) error {
 		pg, err := loadByPath(fsys, p)
 		if err != nil {
 			if errors.Is(err, errReservedArtifact) {

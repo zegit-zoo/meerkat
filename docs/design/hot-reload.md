@@ -1,6 +1,6 @@
 # Spec: Runtime reconciliation — hot-reload GCS collections and memory
 
-**Status:** Implemented (`internal/refresh`, `internal/collections` reload path, `internal/contentsource` probe, `internal/memory` fingerprint; wired into `mk mcp serve-http`) · **Builds on:** [multi-collection.md](multi-collection.md), [memory.md](memory.md), [hosted-mcp.md](hosted-mcp.md) · **Issue:** #28
+**Status:** Implemented (`internal/refresh`, `internal/collections` reload path, `internal/contentsource` probe, `internal/memory` fingerprint, `internal/kb` local fingerprint; wired into `mk mcp serve-http`, and for scheduled targets into `mk mcp serve`) · **Builds on:** [multi-collection.md](multi-collection.md), [memory.md](memory.md), [hosted-mcp.md](hosted-mcp.md) · **Issue:** #28
 
 *(`docs/design/` is a design record. The up-to-date schema reference is
 [content-source.example.yaml](../../content-source.example.yaml); the
@@ -33,11 +33,18 @@ still the default.
 
 ## Non-goals
 
-- **Watching arbitrary local filesystems.** `type: local` already
-  re-enumerates per request; a file watcher is a different problem with
-  different failure modes. Its **search index** is built once, though,
-  and SIGHUP rebuilds it on demand. See
-  [SIGHUP and `type: local`](#sighup-and-type-local).
+- **A file watcher.** No inotify, no fsnotify, no per-request
+  re-indexing. A `type: local` collection reads its pages live but builds
+  its **search index** once. SIGHUP rebuilds it on demand, and a
+  `refresh:` block rebuilds it on a timer when a cheap fingerprint of the
+  directory moves. A timer and a token, not a watcher. See
+  [SIGHUP and `type: local`](#sighup-and-type-local) and
+  [Scheduled refresh for `type: local`](#scheduled-refresh-for-type-local).
+  An earlier version of this list called watching local filesystems a
+  non-goal on the grounds that `type: local` is already live. That was
+  only half true. The pages were live and the index was not, so a
+  long-running server's search disagreed with its own `mk_show`
+  (meerkat-mob#25).
 - **GCS notifications / Pub/Sub.** Polling metadata is portable, needs no
   extra IAM surface, no topic, no subscription, and no inbound path into
   the process. It is sufficient at the cadences a knowledge base
@@ -91,10 +98,12 @@ at the same instant, so one publication costs N simultaneous fetches.
 Both are refusals at config load, not warnings, because in each case the
 tolerant reading is the dangerous one.
 
-**`refresh:` is `type: gcs` only.** `type: local` is already live,
+**`refresh:` is for the object stores and `type: local` only.**
 `type: url` is pinned by a mandatory digest that cannot move without the
-config moving, and watching local filesystems is a non-goal. A `refresh:`
-block on any of them is a misunderstanding worth naming.
+config moving, and git, submodule and embedded content is resolved at
+build time. A `refresh:` block on any of them is a misunderstanding worth
+naming. (`type: local` joined the list with meerkat-mob#25. See
+[Scheduled refresh for `type: local`](#scheduled-refresh-for-type-local).)
 
 **`generation:` and `refresh:` are mutually exclusive.** This is the
 security-relevant one. Pinning a generation means *serve exactly these
@@ -372,18 +381,23 @@ the index takes to build.
 
 SIGHUP now also rebuilds every mounted `type: local` collection:
 
-- **Same funnel.** Each local collection is a manual-only refresh target:
-  it has no `Spec`, so `Controller.Start` gives it no loop, and
-  `ReloadNow` runs it. Its `Reconcile` is `Collection.ReloadLocal`.
+- **Same funnel.** Each local collection is a refresh target whose
+  `Reconcile` is `Collection.ReloadLocal`. Without a `refresh:` block it
+  is manual-only: it has no `Spec`, so `Controller.Start` gives it no
+  loop, and only `ReloadNow` runs it. With a block it is scheduled too;
+  see [Scheduled refresh for `type: local`](#scheduled-refresh-for-type-local).
 - **Same discipline.** It takes the reload slot (a second SIGHUP
   mid-rebuild is `ErrBusy`, not a second rebuild) and arms the write
   journal. It re-enumerates the pages through the collection's own
   filesystem, the live directory, and builds the replacement index off
   the request path. It commits with one pointer swap. A failure leaves
   the previous index serving.
-- **No probe.** The signal is the change detection. A path unit on a
-  git repository's `HEAD`, a post-merge hook, or an operator decides
-  when to send it. Rebuilding an unchanged directory is harmless.
+- **Without a block, the signal is the change detection.** A path unit
+  on a git repository's `HEAD`, a post-merge hook, or an operator decides
+  when to send it, and the rebuild always runs. Rebuilding an unchanged
+  directory is harmless. The rebuild takes the directory's token first,
+  with no span, only so that the new snapshot's version moves (see
+  below). With a block, SIGHUP runs the scheduled cycle, probe first.
 
 **Memory: old and new indexes coexist during a swap.** A query in flight
 keeps the snapshot it acquired, and the old index is closed only when
@@ -392,6 +406,153 @@ must therefore leave room for two indexes for a moment. On mk-ai (about
 820 pages) the live heap is about 160–200 MB after GC, so a
 `GOMEMLIMIT` of 400 MiB and a hard limit of about 768 MB leave that
 room.
+
+### Scheduled refresh for `type: local`
+
+SIGHUP needs something outside meerkat to know when the directory moved.
+A `refresh:` block on a `type: local` collection moves that decision into
+meerkat, through the same controller, the same cycle and the same failure
+policies the object stores use (meerkat-mob#25, MK-FRESH-01..03):
+
+```yaml
+collections:
+  - name: notes
+    type: local
+    path: /srv/kb/notes
+    refresh: {}          # interval 60s, jitter a tenth of it; both may be set
+```
+
+The block takes `interval`, `jitter` and `failure_policy` and nothing
+else. An unknown key (a typo, or `remote_check:` and `on_divergence:`
+before part B defines them) is refused at load. That now holds for every
+`refresh:` block, since a block whose interval defaults can no longer
+fail on a missing one. An omitted `jitter` defaults to a tenth of the
+interval, and an explicit `jitter: 0s` turns the spread off.
+
+**The token** is `kb.FingerprintFS`: a SHA-256 over every candidate
+page's `(path, size, mtime)`, in walk order. It is the object stores'
+listing fingerprint, with a stat in place of a metadata call. Adding,
+deleting, renaming or resizing a page moves it, and so does rewriting one
+once the clock has moved on, or a `git pull` or checkout that touches
+one. It walks the files `kb.ListFS` considers (one shared `walkPages`),
+so a file the index never reads never costs a rebuild. A file `ListFS`
+reads and then skips (an OKF navigation artifact, an unparseable page)
+costs at most a spare one. It reads no page content, no git metadata,
+and runs nothing: pointing meerkat at a knowledge base never runs that
+repository's hooks or config (MK-SEC-12). A directory that is not a git
+repository refreshes the same way.
+
+**What the token cannot see, and the settle rule.** A modification time
+comes from the kernel's coarse clock. It ticks every few milliseconds,
+and some filesystems (FAT, several network filesystems) store it to the
+second or coarser. Two same-size writes inside one tick leave the token
+unchanged. Measured on kernel 6.12, back-to-back same-size writes with a
+fingerprint between them left it unchanged 997 times in 1000 on tmpfs.
+A probe that lands between two such writes would stamp a stale index
+current for good. So the probe also returns the newest page mtime. A
+token taken while any page is younger than two seconds (`settleWindow`)
+is **unsettled**, and the next probe rebuilds whatever it sees. This is
+git's "racy clean" rule. A future mtime counts within the same window; a
+far-future one does not, so one badly dated file cannot force a rebuild
+every tick. What stays invisible is a same-size rewrite that also keeps
+its mtime, such as an mtime-preserving copy. A restart rebuilds
+regardless.
+
+**The cycle** is `Collection.ReloadLocal`, the SIGHUP rebuild with a
+probe in front of it:
+
+1. Take the reload slot, or `ErrBusy`. A timer tick and a SIGHUP cannot
+   both rebuild.
+2. Probe: fingerprint the tree. Equal to the serving snapshot's token,
+   and that token settled, ends the cycle. That is the common case, and
+   it costs a stat per page.
+3. Otherwise rebuild off the request path, commit with one pointer swap,
+   and stamp the new snapshot with the probe's token.
+
+The token is taken before the pages are read. A change that lands between
+the two is in the new index but not its token, so the next probe rebuilds
+once more. The opposite order could stamp a token on content the index
+never saw, and a stale index would then pass for current. For the same
+reason the mount stamps the first snapshot's token before its lazily
+built index exists: the index can only be newer than its token.
+
+A failed probe or rebuild leaves the last index serving and marks the
+collection degraded under its `failure_policy`, exactly as for an object
+store. With the block, SIGHUP runs this same cycle, so an unchanged tree
+is not rebuilt. Without the block, SIGHUP still always rebuilds, since the
+signal is the change detection there.
+
+Every rebuild now moves the snapshot's version, including a SIGHUP
+rebuild of a collection with no block. The link graph keys on that
+version (`links.go`), so `linked_from` follows a rebuild. Before, a local
+rebuild kept its empty version and served the cached backlinks until a
+restart.
+
+**The token stays off spans** (MK-FRESH-10). An object store's version
+goes on the cycle span as `meerkat.refresh.version`. A local token is a
+fingerprint of somebody's directory, and the design keeps it to
+structured status (`ReloadStatus`, `Freshness`) and the log. So
+`ReloadLocal` reports it as `Outcome.LogVersion`, which the controller
+logs and never puts on a span. A collection without a block emits
+exactly the spans it did before: its token is taken with no probe span,
+and a failure to take it is not a failure at all (the enumerate phase
+reports a broken directory, as it always did).
+
+**A `mount: lazy` child with a block is scheduled from startup.** Its
+cycle is a no-op while it is cold, since nothing is loaded. The cache
+stamps its token when it mounts it (`cache.go`), and the scheduled cycle
+probes from then on. The cycle holds the child's `mountMu`, so a cull
+cannot return it to cold underneath a rebuild. A cull resets its record
+to `unknown`. A lazy child of any other kind gets no target and no
+status slot, so it advertises no schedule that never runs.
+
+**A vanishing subdirectory is skipped, not fatal.** A pull that deletes a
+directory while the walk is inside it used to surface as "no content
+root" and an empty page list, which a timed rebuild would have swapped
+in for one interval. The shared walk now skips a vanished entry and
+treats only a missing content root as "no pages".
+
+**`mk mcp serve` runs the controller too**, over the scheduled `type:
+local` targets only. stdio has no admin trigger, so a manual-only target
+could never run there. With no local `refresh:` block there are no such
+targets, `refresh.New` returns nil, and there is no controller, goroutine
+or timer (MK-FRESH-09). An object store's or memory store's `refresh:`
+block is still followed by `serve-http` only, as before. Starting to poll
+it from stdio would mean new credentialed bucket traffic from every
+laptop running an existing configuration, which is a decision of its own
+(#112).
+
+**The freshness record** (`collections.Freshness`, MK-FRESH-06) is what a
+refreshable local collection knows about itself: `loaded` (the token the
+index was built from), `on_disk` (what the last probe saw), `remote`,
+`behind`, `state` and `checked_at`. The state set is closed, fixed before
+all of its producers exist, so later parts add producers and never a
+word a client has not seen:
+
+| state | meaning | produced by |
+| --- | --- | --- |
+| `unknown` | no probe has succeeded yet, or the last one failed | part A |
+| `behind-disk` | the tree moved and the rebuild has not landed; persisting means rebuilds are failing | part A |
+| `diverged` | the local branch cannot fast-forward to the remote tip | part B |
+| `dirty` | a pull was due and the tree has uncommitted changes; only with `on_divergence: pull` | part B |
+| `behind-remote` | the tree is current and the remote tip is ahead of it | part B |
+| `current` | the index was built from what the last check saw | part A |
+
+When more than one holds, the first row that applies is the state. A
+collection without a `refresh:` block has no record.
+
+meerkat-mob#25 is delivered in three parts, landed in order:
+
+- **A** (this section): the token, the probe, the schedule on both
+  transports, and the record, as internal API.
+- **B**: git identity for display (the commit read from `.git/HEAD`, the
+  ref and `packed-refs` as plain files), an opt-in `remote_check:` via a
+  fixed-argv `git ls-remote`, and `on_divergence: flag | pull` (pull
+  fast-forward-only, clean-tree-only).
+- **C**: the surfaces: `freshness` on `mk_list_collections`, one bounded
+  advisory per session per collection in the `mk_search` / `mk_show`
+  envelope, `mk collections status [--check]`, and a freshness gauge
+  whose only label is the state.
 
 ## Security and reliability properties
 
@@ -469,6 +630,20 @@ say so with `refresh:`.
   race (the detector's job) and a use-after-close (which surfaces as a
   query error). Afterwards, every write that was reported as saved is
   still findable, and still invisible to the other principals.
+- **Local refresh (`internal/kb`, `internal/collections`,
+  `internal/mcp`):** the fingerprint moves on add, delete, rename, resize
+  and mtime, and not for non-page files; a vanishing subdirectory no
+  longer empties the page list; an unchanged, settled tree rebuilds
+  nothing; a same-size rewrite inside one timestamp tick is still indexed
+  (the settle rule); add, edit and delete each agree across search, show
+  and the page list after one cycle; a failed probe serves the last good
+  index and degrades, and recovers; the scheduled path finds a new page
+  with nobody calling anything; a lazy child is a no-op while cold and is
+  stamped and probed once mounted; a rebuild moves backlinks; the manual
+  target still always rebuilds; no span carries a local token or path,
+  and a collection without a block emits no probe span; stdio has no
+  controller without a local block and never polls an object or memory
+  store; unknown `refresh:` keys are refused; the state set is pinned.
 - **Hosted surface:** refresh is off unless configured and publishes no
   metrics then; a failed cycle produces `status: degraded` with HTTP 200,
   the documented counts, and the documented series — with no collection
@@ -492,12 +667,11 @@ say so with `refresh:`.
   (ETag for a bundle, a `(key, ETag, size)` listing fingerprint for a
   prefix) and `S3Store` implements `Fingerprinter`. See
   `docs/design/object-stores.md` for what each provider enforces.
-- **Scheduled, change-detecting refresh for `type: local`.** SIGHUP
-  rebuilds on demand (#105). A `refresh:` block on `type: local` would
-  add a version token (the git HEAD and refs of a working tree, or a
-  path/size/mtime fingerprint) and a probe, so the controller rebuilds
-  only when the tree moved. The reconciliation half is already
-  backend-agnostic, and `ReloadLocal` is the rebuild it would call.
+- **Scheduled, change-detecting refresh for `type: local`.** Part A is
+  done: see
+  [Scheduled refresh for `type: local`](#scheduled-refresh-for-type-local).
+  Parts B (git identity, remote check, divergence ladder) and C
+  (surfaces) follow, in that order.
 - **systemd socket activation (`LISTEN_FDS`).** Done (#110):
   `serve-http` serves on a socket systemd passes in, so systemd holds the
   port across a restart. See the README's "Socket activation (systemd)".

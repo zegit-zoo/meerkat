@@ -405,6 +405,9 @@ type reloadState struct {
 	mu      sync.RWMutex
 	content *ReloadStatus
 	memory  *ReloadStatus
+	// fresh is the freshness record of a `type: local` collection with a
+	// refresh: block, nil for every other collection (freshness.go).
+	fresh *Freshness
 }
 
 // configure records which refresh targets a source declares.
@@ -424,6 +427,9 @@ func (r *reloadState) configure(src contentsource.Source) {
 			Interval: src.Refresh.Interval.String(),
 			Policy:   src.Refresh.Policy(),
 		}
+	}
+	if src.Type == contentsource.TypeLocal && src.Refreshable() && r.fresh == nil {
+		r.fresh = &Freshness{Remote: RemoteUnknown, State: FreshUnknown}
 	}
 	if src.Memory != nil && src.Memory.Refresh != nil && r.memory == nil {
 		r.memory = &ReloadStatus{
@@ -562,7 +568,7 @@ func (c *Collection) ReloadContent(ctx context.Context) (refresh.Outcome, error)
 	defer c.reloadMu.Unlock()
 
 	src := c.Source
-	if !src.Refreshable() {
+	if !src.Refreshable() || !src.IsObjectStore() {
 		return refresh.Outcome{}, fmt.Errorf("collection %q is not configured for content refresh", c.Name)
 	}
 	if c.IsCold() {
@@ -645,34 +651,47 @@ func (c *Collection) ReloadContent(ctx context.Context) (refresh.Outcome, error)
 }
 
 // ReloadLocal rebuilds a `type: local` collection's search index from
-// what is on disk NOW, and swaps it in (issue #105).
+// what is on disk NOW, and swaps it in (issue #105, meerkat-mob#25).
 //
 // A local collection's pages are already read live — mk_show, mk_list
 // and the page counts go through its filesystem on every request — but
 // its search index is built once, so a page added after startup is
 // unfindable, a deleted one stays quotable and an edited one keeps its
-// old snippet. The admin trigger (SIGHUP on `mk mcp serve-http`) fixes
-// that without a restart, through the same discipline ReloadContent
-// uses for object stores:
+// old snippet. ReloadLocal closes that gap through the same discipline
+// ReloadContent uses for object stores:
 //
 //  1. Take the collection's reload slot, or return ErrBusy — a second
-//     SIGHUP during a rebuild is not a second rebuild.
-//  2. Arm the write journal, so a memory saved during the rebuild is
+//     SIGHUP, or a timer tick, during a rebuild is not a second rebuild.
+//  2. Probe: fingerprint the pages on disk (kb.FingerprintFS), one stat
+//     per page and nothing read. With a refresh: block, a token equal
+//     to the one the serving index was built from ends the cycle here,
+//     unless that token was unsettled (settleWindow); that is the common
+//     case, and it costs no parse and no index build. Without one, the
+//     operator's signal is the change detection and the rebuild always
+//     runs, as it did before refresh: existed.
+//  3. Arm the write journal, so a memory saved during the rebuild is
 //     replayed into the new index rather than lost by the swap.
-//  3. Re-enumerate the pages through the collection's own filesystem
+//  4. Re-enumerate the pages through the collection's own filesystem
 //     (the live directory; the process globals for a single-collection
 //     deployment) and build the replacement index, all off the request
 //     path.
-//  4. Commit: one pointer swap under the write lock.
+//  5. Commit: one pointer swap under the write lock. The new snapshot
+//     carries the probe's token, which also moves the link graph's key
+//     (links.go), so backlinks follow the rebuild.
 //
-// There is no probe: an operator sending the signal is the change
-// detection, and rebuilding an unchanged directory is harmless. Queries
-// in flight during the rebuild keep the snapshot they acquired — the old
-// index — and later ones get the new one, so none sees an error or a
-// half-built index. The two indexes coexist until the last reader of the
-// old one returns (the snapshot's reference count), which is the memory
-// cost a limit has to leave room for. Any failure leaves the previous
-// index serving.
+// The token is taken BEFORE the pages are read. A change that lands
+// between the two is then in the new index but not in its token, and
+// the next probe rebuilds once more. The opposite order could stamp a
+// token on content the index never saw, and the next probe would call
+// a stale index current.
+//
+// Queries in flight during the rebuild keep the snapshot they acquired —
+// the old index — and later ones get the new one, so none sees an error
+// or a half-built index. The two indexes coexist until the last reader
+// of the old one returns (the snapshot's reference count), which is the
+// memory cost a limit has to leave room for. Any failure leaves the
+// previous index serving and, with a refresh: block, marks the
+// collection degraded.
 func (c *Collection) ReloadLocal(ctx context.Context) (refresh.Outcome, error) {
 	if !c.reloadMu.TryLock() {
 		return refresh.Outcome{}, refresh.ErrBusy
@@ -682,8 +701,58 @@ func (c *Collection) ReloadLocal(ctx context.Context) (refresh.Outcome, error) {
 	if c.Source.Type != contentsource.TypeLocal {
 		return refresh.Outcome{}, fmt.Errorf("collection %q is not a type: local collection", c.Name)
 	}
+	refreshable := c.Source.Refreshable()
+	if c.lazy {
+		// A lazy child is mounted and culled by the cache (cache.go) under
+		// mountMu. Holding it for the cycle keeps a cull from returning the
+		// collection to cold underneath a rebuild, which would then install
+		// a warm snapshot on a cold collection.
+		c.mountMu.Lock()
+		defer c.mountMu.Unlock()
+		if c.IsCold() && refreshable {
+			// Nothing is loaded, so there is nothing to be behind. The next
+			// mount reads the directory as it is and stamps its token.
+			return refresh.Outcome{}, nil
+		}
+	}
 	if c.IsCold() {
 		return refresh.Outcome{}, fmt.Errorf("collection %q is cold; it is mounted on first request, not rebuilt", c.Name)
+	}
+
+	// Stable for the whole cycle: only another reload replaces the
+	// snapshot's filesystem, and this one holds the reload slot.
+	c.snapMu.RLock()
+	fsys, provenance := c.snap.fsys, c.snap.provenance
+	c.snapMu.RUnlock()
+
+	probeStart := time.Now()
+	var fp kb.Fingerprint
+	if refreshable {
+		var err error
+		fp, err = phase(ctx, telemetry.PhaseProbe, func(context.Context) (kb.Fingerprint, error) {
+			return localFingerprint(fsys)
+		})
+		if err != nil {
+			c.status.probeFailed(time.Now())
+			return refresh.Outcome{}, c.contentFailed(fmt.Errorf("probe: %w", err))
+		}
+		c.status.probed(fp.Token, time.Now())
+		if fp.Token == c.currentVersion() && !c.localUnsettled {
+			// The serving snapshot carries this token, so it is what the
+			// index was built from. Recording it here as well covers a
+			// record created after the snapshot was stamped.
+			c.status.loaded(fp.Token)
+			c.status.succeeded(refresh.KindContent, fp.Token)
+			return refresh.Outcome{Changed: false, LogVersion: fp.Token}, nil
+		}
+	} else if got, err := localFingerprint(fsys); err == nil {
+		// No span and no failure: a collection without a refresh: block
+		// keeps exactly the telemetry and the failure it had before
+		// (MK-FRESH-09). The token is taken only so that the rebuilt
+		// snapshot's version, and with it the link graph's key, moves. If
+		// the walk fails, the enumerate phase below reports it as it
+		// always did.
+		fp = got
 	}
 
 	c.beginStaging()
@@ -694,17 +763,13 @@ func (c *Collection) ReloadLocal(ctx context.Context) (refresh.Outcome, error) {
 		}
 	}()
 
-	c.snapMu.RLock()
-	fsys, provenance, version := c.snap.fsys, c.snap.provenance, c.snap.version
-	c.snapMu.RUnlock()
-
 	pages, err := phase(ctx, telemetry.PhaseEnumerate, func(context.Context) ([]kb.Page, error) {
 		return c.contentPagesFrom(fsys)
 	})
 	if err != nil {
 		return refresh.Outcome{}, c.contentFailed(fmt.Errorf("enumerate pages: %w", err))
 	}
-	next, err := newBuiltSnapshot(ctx, fsys, provenance, version,
+	next, err := newBuiltSnapshot(ctx, fsys, provenance, fp.Token,
 		c.mergeOverlay(pages, kb.Unfiltered()), c.searchOptions()...)
 	if err != nil {
 		return refresh.Outcome{}, c.contentFailed(err)
@@ -714,8 +779,12 @@ func (c *Collection) ReloadLocal(ctx context.Context) (refresh.Outcome, error) {
 		return refresh.Outcome{}, c.contentFailed(err)
 	}
 	committed = true
-	c.status.succeeded(refresh.KindContent, version)
-	return refresh.Outcome{Changed: true, Version: version}, nil
+	c.localUnsettled = unsettled(fp, probeStart)
+	c.status.loaded(fp.Token)
+	c.status.succeeded(refresh.KindContent, fp.Token)
+	// LogVersion, not Version: a local token stays in status and the log
+	// and never reaches the cycle span (MK-FRESH-10).
+	return refresh.Outcome{Changed: true, LogVersion: fp.Token}, nil
 }
 
 // phase wraps one reconciliation step in a span.
@@ -880,10 +949,13 @@ func (r *reloadState) memoryVersion() string {
 
 // RefreshTargets returns the reconciliation targets this registry's
 // configuration declares, in configuration order: a content target for
-// every collection with a `refresh:` block, a memory target for every
-// collection whose `memory:` block has one, and a MANUAL-ONLY local
-// target for every mounted `type: local` collection (see ReloadLocal —
-// it has no schedule and runs only on the admin trigger, SIGHUP).
+// every object-store collection with a `refresh:` block, a local target
+// for every mounted `type: local` collection, and a memory target for
+// every collection whose `memory:` block has one.
+//
+// A local target is SCHEDULED when its collection carries a refresh:
+// block and MANUAL-ONLY otherwise: no schedule runs it, only the admin
+// trigger (SIGHUP). See ReloadLocal.
 //
 // A DERIVED registry (Restrict, ViewedBy) returns none. A per-request
 // view borrows its collections; reconciling through one would be a
@@ -894,18 +966,29 @@ func (r *Registry) RefreshTargets() []refresh.Target {
 	}
 	out := make([]refresh.Target, 0, len(r.list))
 	for i, c := range r.list {
+		if c.lazy {
+			// Mounted on demand. Only a local child with a refresh: block
+			// is reconciled: its cycle is a no-op while it is cold, and
+			// probes once the cache has mounted it (ReloadLocal). Any
+			// other lazy child gets no target and no status slot, so it
+			// advertises no schedule that never runs.
+			if c.Source.Type == contentsource.TypeLocal && c.Source.Refreshable() {
+				c.status.configure(c.Source)
+				out = append(out, &localTarget{c: c, ordinal: i})
+			}
+			continue
+		}
 		// Idempotent, and here as well as in Open so that a hand-assembled
 		// collection still gets a status slot — without one, a failed
 		// refresh would be invisible to readiness.
 		c.status.configure(c.Source)
-		if c.lazy {
-			continue // mounted on demand; a cold collection has nothing to reconcile
-		}
-		if c.Source.Refreshable() {
+		switch {
+		case c.Source.Type == contentsource.TypeLocal:
+			if c.byID == nil {
+				out = append(out, &localTarget{c: c, ordinal: i})
+			}
+		case c.Source.Refreshable():
 			out = append(out, &contentTarget{c: c, ordinal: i})
-		}
-		if c.Source.Type == contentsource.TypeLocal && c.byID == nil {
-			out = append(out, &localTarget{c: c, ordinal: i})
 		}
 		if c.Source.Memory != nil && c.Source.Memory.Refresh != nil {
 			out = append(out, &memoryTarget{c: c, ordinal: i})
@@ -931,8 +1014,9 @@ func (t *contentTarget) Reconcile(ctx context.Context) (refresh.Outcome, error) 
 }
 
 // localTarget rebuilds one `type: local` collection's search index. Its
-// nil Spec makes it manual-only (internal/refresh): ReloadNow runs it, no
-// schedule does.
+// Spec is the collection's refresh: block: with one the controller
+// schedules it, and without one the nil Spec makes it manual-only
+// (internal/refresh): ReloadNow runs it, no schedule does.
 type localTarget struct {
 	c       *Collection
 	ordinal int
@@ -942,7 +1026,7 @@ func (t *localTarget) Key() refresh.Key {
 	return refresh.Key{Ordinal: t.ordinal, Kind: refresh.KindContent, Name: t.c.Name}
 }
 
-func (t *localTarget) Spec() *refresh.Spec { return nil }
+func (t *localTarget) Spec() *refresh.Spec { return t.c.Source.Refresh }
 
 func (t *localTarget) Reconcile(ctx context.Context) (refresh.Outcome, error) {
 	return t.c.ReloadLocal(ctx)
