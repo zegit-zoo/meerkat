@@ -47,6 +47,10 @@ var (
 	ErrNoUpstream = errors.New("the branch tracks no remote branch")
 	// ErrCapped means a bounded lookup gave up before it could answer.
 	ErrCapped = errors.New("lookup capped before it could answer")
+	// ErrUnsafeName is a remote or branch name from the repository's
+	// config that could be read as a command-line option, or is not a
+	// plain name. It is refused before any git call sees it.
+	ErrUnsafeName = errors.New("refused a remote or branch name")
 )
 
 // Size caps for the files this package reads. None of them is large in a
@@ -187,7 +191,11 @@ func (r *Repo) resolveRef(ref string, depth int) (string, error) {
 // packedRef looks ref up in packed-refs: `<name> <ref>` lines, with `#`
 // headers and `^` peeled lines skipped.
 func (r *Repo) packedRef(ref string) (string, error) {
-	f, err := os.Open(filepath.Join(r.commonDir, "packed-refs")) //nolint:gosec // G304: packed-refs of the working tree meerkat was pointed at; read-only, size-capped.
+	path := filepath.Join(r.commonDir, "packed-refs")
+	if err := mustBeRegular(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	f, err := os.Open(path) //nolint:gosec // G304: packed-refs of the working tree meerkat was pointed at; read-only, size-capped.
 	if errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("ref %q: not found", ref)
 	}
@@ -235,11 +243,38 @@ func (r *Repo) Upstream(branch string) (Upstream, error) {
 	if remote == "" || merge == "" || remote == "." {
 		return Upstream{}, ErrNoUpstream
 	}
-	url := cfg.get("remote", remote, "url")
+	remoteBranch := strings.TrimPrefix(merge, "refs/heads/")
+	// Both names reach `git pull` as arguments, and git forwards them to
+	// fetch WITHOUT a `--`: a name starting with `-` would be an option
+	// there (`--upload-pack=…` runs a command). Refused here, and again
+	// in PullFFOnly.
+	if err := CheckName(remote); err != nil {
+		return Upstream{}, fmt.Errorf("remote: %w", err)
+	}
+	if err := CheckName(remoteBranch); err != nil {
+		return Upstream{}, fmt.Errorf("branch: %w", err)
+	}
+	url := cfg.first("remote", remote, "url")
 	if url == "" {
 		return Upstream{}, fmt.Errorf("remote %q has no url", remote)
 	}
-	return Upstream{Remote: remote, URL: url, Branch: strings.TrimPrefix(merge, "refs/heads/")}, nil
+	return Upstream{Remote: remote, URL: url, Branch: remoteBranch}, nil
+}
+
+// CheckName refuses a remote or branch name that could be read as an
+// option, or that is not a plain name: empty, starting with `-`,
+// containing whitespace, a control character, `..`, `:` or a backslash.
+// It is stricter than git, and errs toward refusing.
+func CheckName(name string) error {
+	if name == "" || name[0] == '-' || strings.Contains(name, "..") || strings.ContainsAny(name, ":\\") {
+		return fmt.Errorf("%w: %q", ErrUnsafeName, name)
+	}
+	for _, r := range name {
+		if r <= ' ' || r == 0x7f {
+			return fmt.Errorf("%w: %q", ErrUnsafeName, name)
+		}
+	}
+	return nil
 }
 
 // Limits bound HasObject.
@@ -307,6 +342,9 @@ func (r *Repo) HasObject(ctx context.Context, name string, lim Limits) (bool, er
 
 // idxContains searches one version-2 pack index for name.
 func idxContains(path string, name []byte) (bool, error) {
+	if err := mustBeRegular(path); err != nil {
+		return false, err
+	}
 	f, err := os.Open(path) //nolint:gosec // G304: a pack index inside the working tree meerkat was pointed at; read with fixed-size ReadAt calls, never executed.
 	if err != nil {
 		return false, err
@@ -373,8 +411,25 @@ func checkRefName(ref string) error {
 	return nil
 }
 
+// mustBeRegular refuses anything but a regular file before it is opened:
+// a FIFO planted at `.git/HEAD` or as a pack index would otherwise block
+// the probe on open, as kb's page walk already guards against for pages.
+func mustBeRegular(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s: not a regular file", path)
+	}
+	return nil
+}
+
 // readCapped reads at most max bytes of a file, refusing a larger one.
 func readCapped(path string, max int64) ([]byte, error) {
+	if err := mustBeRegular(path); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path) //nolint:gosec // G304: git's own files in the working tree meerkat was pointed at; read-only, size-capped, parsed and never executed.
 	if err != nil {
 		return nil, err

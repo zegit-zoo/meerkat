@@ -205,14 +205,30 @@ func TestRemote_FlagCurrentBehindAndLocalAhead(t *testing.T) {
 		t.Errorf("flag mode made the remote's page searchable: %v", got)
 	}
 
-	// Catch up by hand, then commit locally without pushing: the remote's
-	// tip is in the local history, so local is ahead, and nothing is due.
+	// A plain fetch makes the remote tip PRESENT while the branch is still
+	// behind. Presence is not ancestry, so flag mode must not call that
+	// current, or "local ahead" (#116 review, M1).
+	gitT(t, f.dir, "fetch", "-q")
+	if _, fr := f.check(t); fr.State != FreshUnknown || fr.Note != noteFetchedAhead || fr.Remote != tip {
+		t.Errorf("fetched but behind: %+v, want unknown noted %q", fr, noteFetchedAhead)
+	}
+}
+
+// A behind-remote verdict clears as soon as the index is built at the
+// remote tip, without waiting for the next remote check (review S2).
+func TestRemote_BehindClearsWhenTheIndexReachesTheTip(t *testing.T) {
+	f := newRemoteFixture(t, refresh.DivergenceFlag)
+	tip := f.pushPage(t, "notes/zebrafish", "About zebrafish.")
+	if _, fr := f.check(t); fr.State != FreshBehindRemote {
+		t.Fatalf("precondition: %+v, want behind-remote", fr)
+	}
 	gitT(t, f.dir, "pull", "-q", "--ff-only")
-	writeLocalPage(t, f.dir, "notes/local", "A local page.")
-	gitT(t, f.dir, "add", ".")
-	gitT(t, f.dir, "commit", "-q", "-m", "local")
-	if _, fr := f.check(t); fr.State == FreshBehindRemote || fr.Note != noteLocalAhead || fr.Remote != tip {
-		t.Errorf("local ahead: %+v, want not behind-remote, noted %q, remote %s", fr, noteLocalAhead, tip)
+	if _, err := targetFor(t, f.reg, "kb").Reconcile(context.Background()); err != nil {
+		t.Fatalf("local Reconcile: %v", err)
+	}
+	fr, _ := f.kb.Freshness()
+	if fr.LoadedCommit != tip || fr.State != FreshCurrent {
+		t.Errorf("after a hand pull and a rebuild: %+v, want current at %s", fr, tip)
 	}
 }
 
@@ -253,6 +269,24 @@ func TestRemote_PullRefusesADirtyTreeAndLeavesIt(t *testing.T) {
 	}
 }
 
+// In pull mode git decides: a branch that is ahead pulls nothing, and is
+// reported as ahead, because git confirmed there was nothing to take.
+func TestRemote_PullWithLocalAheadPullsNothing(t *testing.T) {
+	f := newRemoteFixture(t, refresh.DivergencePull)
+	tip := gitT(t, f.dir, "rev-parse", "HEAD")
+	writeLocalPage(t, f.dir, "notes/local", "A local page.")
+	gitT(t, f.dir, "add", ".")
+	gitT(t, f.dir, "commit", "-q", "-m", "local")
+	local := gitT(t, f.dir, "rev-parse", "HEAD")
+	_, fr := f.check(t)
+	if got := gitT(t, f.dir, "rev-parse", "HEAD"); got != local {
+		t.Fatalf("HEAD moved to %s; a branch that is ahead has nothing to fast-forward", got)
+	}
+	if fr.State != FreshCurrent || fr.Note != noteLocalAhead || fr.Remote != tip {
+		t.Errorf("local ahead: %+v, want current noted %q", fr, noteLocalAhead)
+	}
+}
+
 func TestRemote_PullRefusesDivergenceAndLeavesTheTree(t *testing.T) {
 	f := newRemoteFixture(t, refresh.DivergencePull)
 	writeLocalPage(t, f.dir, "notes/local", "A local page.")
@@ -271,6 +305,11 @@ func TestRemote_PullRefusesDivergenceAndLeavesTheTree(t *testing.T) {
 	}
 	if !sameTree(before, snapshotTree(t, f.dir)) || gitT(t, f.dir, "rev-parse", "HEAD") != local {
 		t.Error("a refused pull touched the working tree")
+	}
+	// The refused pull fetched the remote tip, so it is now present. The
+	// next check must still say diverged, not current (review M1).
+	if _, fr := f.check(t); fr.State != FreshDiverged {
+		t.Errorf("second check after a refused pull: %+v, want still diverged", fr)
 	}
 }
 
@@ -294,6 +333,12 @@ func TestRemote_UnknownNeverDegrades(t *testing.T) {
 		"no upstream": {
 			setup: func(t *testing.T, f *remoteFixture) { gitT(t, f.dir, "checkout", "-q", "-b", "untracked") },
 			note:  noteNoUpstream,
+		},
+		"an option-shaped upstream remote": {
+			setup: func(t *testing.T, f *remoteFixture) {
+				gitT(t, f.dir, "config", "branch.main.remote", "--upload-pack=touch "+filepath.Join(t.TempDir(), "pwned"))
+			},
+			note: noteUnsafeName,
 		},
 	}
 	for name, tc := range cases {

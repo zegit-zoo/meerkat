@@ -140,9 +140,18 @@ func (r Runner) Clean(ctx context.Context, root string) (bool, error) {
 // or a reset. A branch that cannot fast-forward returns ErrNotFastForward
 // and leaves the working tree as it was.
 func (r Runner) PullFFOnly(ctx context.Context, root, remote, branch string) error {
+	// git pull forwards remote and branch to fetch without a `--`, so a
+	// name starting with `-` would be an option there. Upstream refuses
+	// such names already; this is the second line.
+	if err := CheckName(remote); err != nil {
+		return fmt.Errorf("git pull: remote: %w", err)
+	}
+	if err := CheckName(branch); err != nil {
+		return fmt.Errorf("git pull: branch: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, r.PullTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, r.Git, r.hardened("pull", "--ff-only", "--no-rebase", "--no-edit", "--", remote, branch)...) //nolint:gosec // G204: fixed argv, no shell; remote and branch come after "--", read from the repo's own config.
+	cmd := exec.CommandContext(ctx, r.Git, r.hardened("pull", "--ff-only", "--no-rebase", "--no-edit", "--", remote, branch)...) //nolint:gosec // G204: fixed argv, no shell; remote and branch pass CheckName (no leading "-"), read from the repo's own config.
 	cmd.Dir = root
 	cmd.Env = r.env()
 	var stderr bytes.Buffer

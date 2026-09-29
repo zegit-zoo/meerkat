@@ -531,7 +531,7 @@ word a client has not seen:
 
 | state | meaning | produced by |
 | --- | --- | --- |
-| `unknown` | no probe has succeeded yet, or the last one failed | part A |
+| `unknown` | no probe has succeeded yet, or the last one failed; or the local and remote tips differ in a way the check cannot resolve | parts A and B |
 | `behind-disk` | the tree moved and the rebuild has not landed; persisting means rebuilds are failing | part A |
 | `diverged` | the local branch cannot fast-forward to the remote tip | part B |
 | `dirty` | a pull was due and the tree has uncommitted changes; only with `on_divergence: pull` | part B |
@@ -570,7 +570,9 @@ collections:
 
 **Git identity is read, never run.** `internal/gitinfo` finds the working
 tree holding the collection's directory (a `.git` directory, or a
-`gitdir:` file for a linked worktree, with `commondir`). It reads `HEAD`,
+`gitdir:` file for a linked worktree, with `commondir`). Like git, it
+walks up from the directory, so a collection that is a subdirectory of a
+repository, or sits inside one by accident, reports that repository. It reads `HEAD`,
 the loose ref or `packed-refs`, and the tracking branch and remote URL
 from `config`, with a size cap on every read. The commit goes into the
 freshness record as `loaded_commit` and `on_disk_commit`, for display.
@@ -595,31 +597,53 @@ refs/heads/<branch>`, hardened:
 - **No prompting** (`GIT_TERMINAL_PROMPT=0`, both askpass variables
   `/bin/false`), and a 30 s timeout.
 
-Its verdicts. R is the remote tip, L the local commit:
+Its verdicts. R is the remote tip, L the local commit. An object being
+**present** locally says nothing about ancestry: any `git fetch` makes R
+present while the branch is still behind. So presence is never read as
+"contained" (review of #116, M1).
 
 | case | state | note |
 | --- | --- | --- |
 | R = L | `current` | |
-| R ≠ L, R **absent** from the local object store | `behind-remote` | |
-| R ≠ L, R **present** locally | `current` | "local ahead of remote" |
-| no git tree, detached HEAD, no upstream, unreachable remote | remote `unknown` | a fixed phrase |
-| the object lookup hits its cap (64 pack indexes, 250 ms) or alternates | remote `unknown` | a fixed phrase |
+| `flag`, R ≠ L, R **absent** from the local object store | `behind-remote` | |
+| `flag`, R ≠ L, R **present** locally | `unknown` | "remote tip fetched but not merged; run the pull or check manually" |
+| `flag`, the object lookup hits its cap (64 pack indexes, 250 ms) or alternates | `unknown` | a fixed phrase |
+| `pull`, R ≠ L | git decides (below) | |
+| no git tree, detached HEAD, no upstream, a refused name, unreachable remote | remote `unknown`, state from the disk probe | a fixed phrase |
 
 The object lookup reads loose objects and each pack's `.idx`: a fanout
 lookup, then a binary search, never a whole file. `flag` mode fetches
-nothing, so it cannot tell "behind" from "diverged". Only `pull` can.
+nothing and walks no history, so it cannot tell behind from diverged,
+or a fetched-but-unmerged tip from an unpushed local branch. It says so.
+`pull` asks git.
+
+A `behind-remote` verdict clears as soon as the index is built at the
+remote tip (a hand pull and a rebuild), without waiting for the next
+remote check. A remote or branch name that starts with `-`, or is not a
+plain name, is refused before any git call sees it. `git pull` forwards
+both to `fetch` without a `--`, where such a name would be an option.
+When `remote.<name>.url` is set more than once, the first value is used,
+as git fetches from it.
 
 **A remote check never fails and never degrades** (MK-FRESH-04).
 Anything that stops it from answering leaves the remote `unknown`,
 explained by a fixed note on the record. The detail, which may name a
 URL, goes to the log only (`Outcome.Note`).
 
-**`on_divergence: pull`** acts only when all of these hold: the remote is
-behind-remote by the rule above, the reload slot is free, and the tree
-is clean (`git --no-optional-locks status --porcelain
---untracked-files=no` is empty). It then runs `git pull --ff-only`, and
-rebuilds the index under the same reload slot, so the pulled pages are
-searchable in the same cycle. Both calls run with `core.hooksPath=/dev/null`
+**`on_divergence: pull`** acts whenever R ≠ L, the reload slot is free,
+and the tree is clean (`git --no-optional-locks status --porcelain
+--untracked-files=no` is empty). It runs `git pull --ff-only`, and lets
+git decide:
+
+- the branch **fast-forwards to R**: `current`;
+- **nothing to fast-forward**, because the branch is ahead: `current`,
+  noted "local ahead of remote" (git confirmed it);
+- **not a fast-forward**: `diverged`, and the next check says so again;
+- the pull lands **somewhere other than R**: `unknown`. That can happen
+  when the repository's own config rewrites the URL for the pull.
+
+Then it rebuilds the index under the same reload slot, so the pulled
+pages are searchable in the same cycle. Both calls run with `core.hooksPath=/dev/null`
 and `core.fsmonitor=false`, under the same environment and protocol
 allowlist.
 

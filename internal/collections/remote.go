@@ -16,15 +16,20 @@ import (
 // remote tip (`refresh.remote_check`), and optionally fast-forward to it
 // (`refresh.on_divergence: pull`).
 //
-// The verdicts, as agreed on meerkat-mob#25:
+// The verdicts, as agreed on meerkat-mob#25 and corrected in the review
+// of #116 (M1: an object's presence says nothing about ancestry; any
+// fetch, the pull's own included, makes the remote tip present):
 //
 //	remote tip R = the local commit L        current
-//	R != L, R absent from the local objects  behind-remote (flag cannot
+//	flag, R absent from the local objects    behind-remote (flag cannot
 //	                                          tell behind from diverged)
-//	R != L, R present locally                current, noted "local ahead
-//	                                          of remote"
-//	pull, dirty tree                         dirty
-//	pull, not a fast-forward                 diverged
+//	flag, R present locally                  unknown, noted "remote tip
+//	                                          fetched but not merged"
+//	pull, R != L                             pull, and let git decide:
+//	  fast-forwarded to R                    current
+//	  nothing to fast-forward                current, "local ahead"
+//	  not a fast-forward                     diverged
+//	  dirty tree                             dirty
 //
 // A remote check NEVER fails the cycle and never degrades the collection
 // (MK-FRESH-04): anything that stops it from answering leaves the remote
@@ -103,6 +108,9 @@ func (c *Collection) CheckRemote(ctx context.Context) (refresh.Outcome, error) {
 		return report(RemoteUnknown, remoteNone, noteNotGit, "remote check skipped: "+err.Error())
 	}
 	up, err := repo.Upstream(branch)
+	if errors.Is(err, gitinfo.ErrUnsafeName) {
+		return report(RemoteUnknown, remoteNone, noteUnsafeName, fmt.Sprintf("remote check skipped: branch %q: %v", branch, err))
+	}
 	if err != nil {
 		return report(RemoteUnknown, remoteNone, noteNoUpstream, fmt.Sprintf("remote check skipped: branch %q: %v", branch, err))
 	}
@@ -113,19 +121,23 @@ func (c *Collection) CheckRemote(ctx context.Context) (refresh.Outcome, error) {
 	if tip == local {
 		return report(tip, remoteCurrent, "", "")
 	}
+	if spec.Pulls() {
+		// Let git decide: it knows the ancestry, this package only reads
+		// files. A branch that is ahead fast-forwards to nothing, a behind
+		// one to the tip, and a diverged one is refused.
+		return c.pull(ctx, repo, up, local, tip, report)
+	}
 	has, err := repo.HasObject(ctx, tip, gitinfo.DefaultLimits)
 	if err != nil {
-		return report(RemoteUnknown, remoteNone, noteCapped, "remote check inconclusive: "+err.Error())
+		return report(tip, remoteUndetermined, noteCapped, "remote check inconclusive: "+err.Error())
 	}
 	if has {
-		// The remote's tip is already here, so the local branch contains it
-		// or has moved away from it: nothing to fetch either way.
-		return report(tip, remoteCurrent, noteLocalAhead, "")
+		// Present is not contained: a plain `git fetch` makes the tip
+		// present while the branch is still behind. Flag mode cannot walk
+		// the history, so it says so rather than guessing.
+		return report(tip, remoteUndetermined, noteFetchedAhead, "")
 	}
-	if !spec.Pulls() {
-		return report(tip, remoteBehind, "", "")
-	}
-	return c.pull(ctx, repo, up, tip, report)
+	return report(tip, remoteBehind, "", "")
 }
 
 // pull fast-forwards a clean working tree to the remote's tip and
@@ -134,7 +146,7 @@ func (c *Collection) CheckRemote(ctx context.Context) (refresh.Outcome, error) {
 // merges, rebases, stashes, checks out or resets: a dirty tree or a
 // branch that cannot fast-forward is reported, and left exactly as it
 // was.
-func (c *Collection) pull(ctx context.Context, repo *gitinfo.Repo, up gitinfo.Upstream, tip string,
+func (c *Collection) pull(ctx context.Context, repo *gitinfo.Repo, up gitinfo.Upstream, local, tip string,
 	report func(string, remoteVerdict, string, string) (refresh.Outcome, error),
 ) (refresh.Outcome, error) {
 	if !c.reloadMu.TryLock() {
@@ -156,15 +168,29 @@ func (c *Collection) pull(ctx context.Context, repo *gitinfo.Repo, up gitinfo.Up
 	if err != nil {
 		return report(tip, remoteBehind, notePullFailed, "pull failed: "+err.Error())
 	}
+	// Where did the pull land? git decided; the files say what it did.
+	// The pull fetches through the repository's own config, which may
+	// rewrite the URL, so it is compared, not assumed (review N3).
+	head, _, herr := repo.Head()
+	verdict, note, logNote := remoteCurrent, "", "pulled to "+short(head)
+	switch {
+	case herr != nil:
+		verdict, note, logNote = remoteUndetermined, notePulledElse, "pulled, but HEAD could not be read: "+herr.Error()
+	case head == tip:
+	case head == local:
+		verdict, note, logNote = remoteCurrent, noteLocalAhead, "nothing to fast-forward: local is ahead of the remote tip"
+	default:
+		verdict, note, logNote = remoteUndetermined, notePulledElse, "pulled to "+short(head)+", not to the remote tip "+short(tip)
+	}
 	out, err := c.reloadLocalLocked(ctx)
 	if err != nil {
 		// The tree moved and the index did not: the rebuild's own failure
 		// already marked the content degraded, and the next local probe
 		// retries it.
-		o, _ := report(tip, remoteCurrent, notePullRebuildKO, "pulled to "+short(tip)+", but the rebuild failed: "+err.Error())
+		o, _ := report(tip, verdict, notePullRebuildKO, logNote+"; the rebuild failed: "+err.Error())
 		return o, nil
 	}
-	o, _ := report(tip, remoteCurrent, "", "pulled to "+short(tip))
+	o, _ := report(tip, verdict, note, logNote)
 	o.Changed = out.Changed
 	return o, nil
 }

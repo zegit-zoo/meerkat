@@ -395,3 +395,115 @@ func TestPullFFOnly_RunsNoHooks(t *testing.T) {
 		t.Fatal("the post-merge hook ran during a pull")
 	}
 }
+
+// A remote or branch name from the repository's config that starts with
+// `-` would become a fetch option inside `git pull` (#116 review, M2).
+// Upstream refuses it, and so does PullFFOnly, before git ever runs.
+func TestUpstreamAndPull_RefuseOptionShapedNames(t *testing.T) {
+	requireGit(t)
+	marker := filepath.Join(t.TempDir(), "pwned")
+	payload := "--upload-pack=touch " + marker
+	dir := newRepoWithCommit(t)
+	git(t, dir, "remote", "add", "origin", "https://real.example/kb.git")
+	r, err := Find(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, cfg := range map[string][2]string{
+		"remote": {payload, "refs/heads/main"},
+		"branch": {"origin", "refs/heads/" + payload},
+	} {
+		git(t, dir, "config", "branch.main.remote", cfg[0])
+		git(t, dir, "config", "branch.main.merge", cfg[1])
+		if _, err := r.Upstream("main"); !errors.Is(err, ErrUnsafeName) {
+			t.Errorf("%s: Upstream = %v, want ErrUnsafeName", name, err)
+		}
+	}
+	bare, _ := bareWithBranch(t, "v1")
+	kb := cloneOf(t, bare)
+	for _, args := range [][2]string{{payload, "main"}, {"origin", payload}} {
+		if err := testRunner().PullFFOnly(context.Background(), kb, args[0], args[1]); !errors.Is(err, ErrUnsafeName) {
+			t.Errorf("PullFFOnly(%q, %q) = %v, want ErrUnsafeName", args[0], args[1], err)
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("an option-shaped name ran a command")
+	}
+}
+
+// Each ls-remote protection, alone (#116 review, S1).
+
+// The empty working directory is what keeps the KB's own config out:
+// run from INSIDE a KB that rewrites the remote, ls-remote still reads
+// the real remote. Without cmd.Dir it would inherit the test's cwd, the
+// KB, and follow the rewrite.
+func TestLsRemote_RunsOutsideTheKB(t *testing.T) {
+	requireGit(t)
+	realRemote, realTip := bareWithBranch(t, "real")
+	evilRemote, _ := bareWithBranch(t, "evil")
+	kb := newRepoWithCommit(t)
+	git(t, kb, "config", "url."+evilRemote+".insteadOf", realRemote)
+	t.Chdir(kb)
+	if tip, err := testRunner().LsRemote(context.Background(), realRemote, "main"); err != nil || tip != realTip {
+		t.Fatalf("LsRemote from inside the KB = %s, %v; want the real remote's %s", tip, err, realTip)
+	}
+}
+
+// `--` alone: with the file transport allowed, an option-shaped URL is
+// still a repository name, never --upload-pack.
+func TestLsRemote_URLIsNeverAnOption(t *testing.T) {
+	requireGit(t)
+	marker := filepath.Join(t.TempDir(), "pwned")
+	if _, err := testRunner().LsRemote(context.Background(), "--upload-pack=touch "+marker, "main"); err == nil {
+		t.Error("an option-shaped URL succeeded")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("an option-shaped URL ran a command")
+	}
+}
+
+// GIT_ALLOW_PROTOCOL alone: the file transport, which git allows by
+// default, is refused under the production allowlist.
+func TestLsRemote_TransportsArePinned(t *testing.T) {
+	requireGit(t)
+	bare, _ := bareWithBranch(t, "v1")
+	if _, err := testRunner().LsRemote(context.Background(), bare, "main"); err != nil {
+		t.Fatalf("precondition: the file transport works when allowed: %v", err)
+	}
+	if _, err := DefaultRunner.LsRemote(context.Background(), bare, "main"); err == nil {
+		t.Error("the production runner reached a file:// remote; the allowlist is https, ssh and git")
+	}
+}
+
+// The lookup budget answers ErrCapped once it is spent (review N1).
+func TestHasObject_BudgetCaps(t *testing.T) {
+	requireGit(t)
+	dir := newRepoWithCommit(t)
+	git(t, dir, "gc", "-q")
+	r, err := Find(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absent := strings.Repeat("0", 39) + "1"
+	if _, err := r.HasObject(context.Background(), absent, Limits{MaxPacks: 64, Budget: 0}); !errors.Is(err, ErrCapped) {
+		t.Errorf("zero budget: err = %v, want ErrCapped", err)
+	}
+}
+
+// With several URLs, git fetches from the first; so does the remote check
+// (review N2).
+func TestUpstream_FirstURLWins(t *testing.T) {
+	requireGit(t)
+	dir := newRepoWithCommit(t)
+	git(t, dir, "config", "remote.origin.url", "https://first.example/kb.git")
+	git(t, dir, "config", "--add", "remote.origin.url", "https://second.example/kb.git")
+	git(t, dir, "config", "branch.main.remote", "origin")
+	git(t, dir, "config", "branch.main.merge", "refs/heads/main")
+	r, err := Find(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up, err := r.Upstream("main"); err != nil || up.URL != "https://first.example/kb.git" {
+		t.Errorf("Upstream = %+v, %v; want the first url", up, err)
+	}
+}

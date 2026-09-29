@@ -5,8 +5,8 @@ import (
 	"strings"
 )
 
-// gitConfig is the part of a git config file this package needs: the
-// last value of each `section.subsection.key`. Section and key names are
+// gitConfig is the part of a git config file this package needs: every
+// value of each `section.subsection.key`, in file order. Section and key names are
 // case-insensitive in git and are lowercased here; a subsection is
 // case-sensitive and kept as written.
 //
@@ -15,10 +15,29 @@ import (
 // not a full implementation. It follows no `[include]`, applies no
 // `insteadOf`, and treats anything it cannot parse as absent, so a
 // surprise reads as "no upstream" and never as a wrong one.
-type gitConfig map[string]string
+type gitConfig map[string][]string
 
-func (c gitConfig) get(section, subsection, key string) string {
+func (c gitConfig) values(section, subsection, key string) []string {
 	return c[strings.ToLower(section)+"\x00"+subsection+"\x00"+strings.ToLower(key)]
+}
+
+// get is a single-valued key's value: the last one, as git reads it.
+func (c gitConfig) get(section, subsection, key string) string {
+	v := c.values(section, subsection, key)
+	if len(v) == 0 {
+		return ""
+	}
+	return v[len(v)-1]
+}
+
+// first is a multi-valued key's first value: remote.<name>.url, of which
+// git fetches from the first when several are set.
+func (c gitConfig) first(section, subsection, key string) string {
+	v := c.values(section, subsection, key)
+	if len(v) == 0 {
+		return ""
+	}
+	return v[0]
 }
 
 func (r *Repo) config() (gitConfig, error) {
@@ -53,7 +72,8 @@ func parseConfig(text string) gitConfig {
 		if hasValue {
 			v = parseValue(value)
 		}
-		cfg[section+"\x00"+subsection+"\x00"+strings.ToLower(key)] = v
+		k := section + "\x00" + subsection + "\x00" + strings.ToLower(key)
+		cfg[k] = append(cfg[k], v)
 	}
 	return cfg
 }

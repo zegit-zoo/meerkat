@@ -34,6 +34,7 @@ import (
 //	current        A: the served index was built from what the last probe saw
 //	behind-disk    A: the on-disk token moved and the rebuild has not landed
 //	unknown        A: no probe has succeeded yet, or the last one failed
+//	               B: the tips differ and how they relate cannot be told
 //	behind-remote  B: the tree is current, and the remote tip is ahead of it
 //	dirty          B: a pull was due but the tree has uncommitted changes
 //	               (decided inside the opt-in pull, so never under `flag`)
@@ -105,21 +106,25 @@ type Freshness struct {
 type remoteVerdict int
 
 const (
-	remoteNone     remoteVerdict = iota // no check, or it could not tell
-	remoteCurrent                       // the remote has nothing the tree lacks
-	remoteBehind                        // the remote is ahead (or diverged; flag cannot tell)
-	remoteDirty                         // pull refused: uncommitted changes
-	remoteDiverged                      // pull refused: not a fast-forward
+	remoteNone         remoteVerdict = iota // no check, or the remote could not be asked
+	remoteCurrent                           // the remote has nothing the tree lacks
+	remoteBehind                            // the remote is ahead (or diverged; flag cannot tell)
+	remoteDirty                             // pull refused: uncommitted changes
+	remoteDiverged                          // pull refused: not a fast-forward
+	remoteUndetermined                      // the tips differ, and how they relate is not known
 )
 
 // Fixed notes. A Note is one of these, never free text.
 const (
 	noteLocalAhead    = "local ahead of remote"
+	noteFetchedAhead  = "remote tip fetched but not merged; run the pull or check manually"
+	notePulledElse    = "pulled, but the tree is not at the remote tip"
 	noteNotGit        = "not a git working tree"
 	noteDetached      = "HEAD is detached"
 	noteNoUpstream    = "the branch tracks no remote branch"
+	noteUnsafeName    = "the upstream's remote or branch name was refused"
 	noteRemoteFailed  = "the remote could not be reached"
-	noteCapped        = "cannot tell whether local is behind: object lookup capped"
+	noteCapped        = "cannot tell how local and remote relate: object lookup capped"
 	notePullDeferred  = "pull deferred: a rebuild was in flight"
 	notePullFailed    = "pull failed"
 	noteDirty         = "not pulled: the working tree has uncommitted changes"
@@ -129,9 +134,17 @@ const (
 
 // settle recomputes State and Behind, in the documented precedence:
 // the on-disk half first (unknown, behind-disk), then the remote half.
+//
+// A remote verdict that the tips differ in an undetermined way reads as
+// unknown: the tree is not at the remote tip, and claiming current, or
+// "local ahead", from an object's mere presence would be wrong (#116
+// review, M1). A behind-remote verdict clears once the index is built at
+// the remote tip, as after a hand pull and a rebuild, without waiting for
+// the next remote check (S2).
 func (f *Freshness) settle() {
+	behind := f.remote == remoteBehind && (f.LoadedCommit == "" || f.LoadedCommit != f.Remote)
 	switch {
-	case f.OnDisk == "" || f.Loaded == "":
+	case f.OnDisk == "" || f.Loaded == "" || f.remote == remoteUndetermined:
 		f.State = FreshUnknown
 	case f.OnDisk != f.Loaded:
 		f.State = FreshBehindDisk
@@ -139,7 +152,7 @@ func (f *Freshness) settle() {
 		f.State = FreshDiverged
 	case f.remote == remoteDirty:
 		f.State = FreshDirty
-	case f.remote == remoteBehind:
+	case behind:
 		f.State = FreshBehindRemote
 	default:
 		f.State = FreshCurrent
