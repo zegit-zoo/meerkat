@@ -121,6 +121,9 @@ func visible(ctx context.Context, reg *collections.Registry, mem transportOption
 func newServer(reg *collections.Registry, mem transportOptions, opts ...mcpserver.ServerOption) *mcpserver.MCPServer {
 	opts = append([]mcpserver.ServerOption{mcpserver.WithToolCapabilities(true)}, opts...)
 	s := mcpserver.NewMCPServer(serverName, serverVersion, opts...)
+	if mem.Advice == nil {
+		mem.Advice = newAdvisories()
+	}
 	registerSearch(s, reg, mem)
 	registerShow(s, reg, mem)
 	registerList(s, reg, mem)
@@ -641,7 +644,8 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 		if err != nil {
 			return nil, fmt.Errorf("encode results: %w", err)
 		}
-		return mcp.NewToolResultText(body), nil
+		return withAdvisories(mcp.NewToolResultText(body),
+			mem.Advice.take(sessionKey(ctx, sessionID), searchedCollections(view, targetName))), nil
 	}
 }
 
@@ -850,7 +854,8 @@ func showHandler(reg *collections.Registry, mem transportOptions) mcpserver.Tool
 		if err != nil {
 			return nil, err
 		}
-		return mcp.NewToolResultText(body), nil
+		return withAdvisories(mcp.NewToolResultText(body),
+			mem.Advice.take(sessionKey(ctx, showSession), searchedCollections(view, ref.Collection))), nil
 	}
 }
 
@@ -1139,6 +1144,11 @@ type collectionSummary struct {
 	// generation would mint a series per publication. See
 	// docs/design/hot-reload.md.
 	Refresh []collections.ReloadStatus `json:"refresh,omitempty"`
+	// Freshness is how current a `type: local` collection with a
+	// refresh: block is: the tokens, the commits, the remote tip, the
+	// state and a fixed note (meerkat-mob#25). Absent for every other
+	// collection (MK-FRESH-09).
+	Freshness *collections.Freshness `json:"freshness,omitempty"`
 	// Tree fields (a `tree:` deployment only): where this knowledge
 	// base sits, what hangs below it, and whether this process serves
 	// it. A declared-but-unmounted child appears as its own entry with
@@ -1197,6 +1207,9 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry) (strin
 			Capabilities: g.Capabilities(c.Name).Strings(),
 			Description:  c.Description(),
 			Refresh:      c.ReloadStatuses(),
+		}
+		if f, ok := c.Freshness(); ok {
+			entry.Freshness = &f
 		}
 		// view.Pages, not c.Pages: a page count is a count, and a count
 		// that included other principals' personal memories would say how

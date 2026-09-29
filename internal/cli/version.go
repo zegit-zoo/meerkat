@@ -50,13 +50,22 @@ type collectionInfo struct {
 	Name   string `json:"name"`
 	Type   string `json:"type,omitempty"`
 	Source string `json:"source"`
+	// Commit is the git commit a `type: local` collection with a
+	// refresh: block is checked out at, read from git's own files when
+	// this process mounted it: no network, no git (meerkat-mob#25 part
+	// C). Empty for every other collection, and outside a git tree.
+	Commit string `json:"commit,omitempty"`
 }
 
 func currentVersion() versionInfo {
 	reg := registry()
 	cols := make([]collectionInfo, 0, reg.Len())
 	for _, c := range reg.All() {
-		cols = append(cols, collectionInfo{Name: c.Name, Type: c.Source.Type, Source: c.Provenance()})
+		info := collectionInfo{Name: c.Name, Type: c.Source.Type, Source: c.Provenance()}
+		if f, ok := c.Freshness(); ok {
+			info.Commit = f.OnDiskCommit
+		}
+		cols = append(cols, info)
 	}
 	return versionInfo{
 		Version:     version,
@@ -92,8 +101,14 @@ func newVersionCmd() *cobra.Command {
 			// noise for the deployment shape almost everyone runs.
 			if len(info.Collections) > 1 {
 				for _, c := range info.Collections {
+					if c.Commit != "" {
+						fmt.Fprintf(cmd.OutOrStdout(), "    %-20s %s @ %s\n", c.Name, c.Source, short(c.Commit))
+						continue
+					}
 					fmt.Fprintf(cmd.OutOrStdout(), "    %-20s %s\n", c.Name, c.Source)
 				}
+			} else if len(info.Collections) == 1 && info.Collections[0].Commit != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "  commit: %s\n", short(info.Collections[0].Commit))
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "  runtime: %s on %s/%s\n", info.GoVersion, info.OS, info.Arch)
 			return nil

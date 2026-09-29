@@ -96,6 +96,7 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).
 
 ### Operations
 
+- [`meerkat collections`](#meerkat-collections) — Inspect the mounted collections
 - [`meerkat ingest`](#meerkat-ingest) — Plan and execute ingestion of placeholder KB pages
 - [`meerkat update`](#meerkat-update) — Check for or install meerkat updates
 - [`meerkat version`](#meerkat-version) — Print version information
@@ -165,6 +166,7 @@ meerkat
 
 #### Subcommands
 
+- `collections` — Inspect the mounted collections
 - `http` — Run an HTTP/OpenAPI server
 - `ingest` — Plan and execute ingestion of placeholder KB pages
 - `lint` — Check related: links and pointer targets across the mounted collections
@@ -202,6 +204,74 @@ meerkat
   meerkat list --collections
   meerkat search "incident" --collection runbooks
   meerkat show runbooks/index --collection runbooks
+```
+
+---
+
+### `meerkat collections`
+
+Inspect the mounted collections
+
+#### Usage
+
+```text
+meerkat collections
+```
+
+#### Subcommands
+
+- `status` — Report how current each type: local collection with a refresh: block is
+
+#### Inherited flags
+
+```text
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
+```
+
+---
+
+### `meerkat collections status`
+
+Report how current each type: local collection with a refresh: block is
+
+```text
+Report the freshness of every type: local collection that has a
+"refresh:" block in content-source.yaml. For each one that also sets
+"remote_check", the upstream is asked once, now, with the same hardened
+git ls-remote the server uses. Nothing is ever pulled, whatever
+"on_divergence" says: this command reports, the server acts.
+
+States: current, behind-remote, dirty, diverged, unknown (see
+docs/design/hot-reload.md). In a freshly started process the on-disk
+half is always current. The index was just built.
+
+With --check, the exit status is 1 when any collection is behind-remote,
+dirty or diverged, or when a configured remote check could not run
+because of the checkout's own configuration (not a git working tree,
+a detached HEAD, no upstream, a refused name). It is 0 for current and
+unknown, including an unreachable remote: a CI job must not fail because
+a remote was briefly down. The output says which problem it was.
+```
+
+#### Usage
+
+```text
+meerkat collections status [flags]
+```
+
+#### Flags
+
+```text
+      --check   Exit 1 when any collection is behind-remote, dirty or diverged, or its remote check could not run because of its configuration
+      --json    Output as JSON
+```
+
+#### Inherited flags
+
+```text
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
 ---

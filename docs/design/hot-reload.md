@@ -297,6 +297,7 @@ meerkat_refresh_last_success_timestamp_seconds{collection,kind}
 meerkat_refresh_degraded{collection,kind}               # 0/1
 meerkat_collections_ready
 meerkat_collections_degraded
+meerkat_collection_freshness{state}                     # part C; see below
 ```
 
 Every series is published as a zero at startup, so a target that has
@@ -550,7 +551,8 @@ meerkat-mob#25 is delivered in three parts, landed in order:
 - **C**: the surfaces: `freshness` on `mk_list_collections`, one bounded
   advisory per session per collection in the `mk_search` / `mk_show`
   envelope, `mk collections status [--check]`, and a freshness gauge
-  whose only label is the state.
+  whose only label is the state; see
+  [Part C: the surfaces](#part-c-the-surfaces).
 
 ### Part B: the working tree and its remote
 
@@ -665,6 +667,79 @@ repository's own local `.git/config` applies (a checkout filter driver,
 for example). That file is written locally and never cloned, and pulling
 into a checkout is the operator's opt-in.
 
+### Part C: the surfaces
+
+Part C (meerkat-mob#25) shows the record to the people and agents who
+act on it. The design was agreed on meerkat-mob#25 before code, with
+three pins noted below. Every surface reads the same record, so none can
+disagree with another.
+
+**`mk_list_collections`** (MK-FRESH-06) carries the record as
+`freshness` on every collection that has one, and omits the key on every
+other collection. It is authenticated discovery, filtered to what the
+caller may read, so the commits, the remote tip and the fixed-phrase
+note are all there.
+
+**The advisory** is for an agent that never lists collections. When a
+collection that `mk_search` searched, or that `mk_show` read from, is
+`behind-disk`, `behind-remote`, `dirty` or `diverged`, the result carries
+one more line:
+
+```text
+freshness: collection "notes" is behind-remote (the remote has commits this server has not loaded)
+```
+
+- **It is a second text item, after the result** (pin 1). The first
+  item is the JSON it always was, so a client that parses the first
+  item keeps working. The advisory is never inside page text, so it
+  cannot be mistaken for knowledge-base content. A client that shows
+  every item shows two.
+- **It is sent once per (session, collection, state)** (pin 2). The
+  session is the key `mk_report_outcome` uses: an explicit
+  `session_id`, else the MCP session, else one bucket shared by every
+  sessionless call. A new state is a new advisory. A key suppresses for
+  30 minutes. At most 10,000 keys are kept (expired keys go first, then
+  the oldest), and at most five advisories go on one result.
+- **It is bounded.** One line, at most 240 bytes, naming the collection
+  and the state in a fixed phrase. It never carries a commit, token,
+  path or URL. `current` and `unknown` are never advised: `unknown` says
+  nothing a caller could act on.
+- **It follows the caller's view.** A search advises only on
+  collections the caller may read, the same set it searched.
+
+**`mk collections status [--json] [--check]`** (MK-FRESH-08) is the
+scripted check. A short-lived process builds its own index as it starts,
+so its on-disk half is always current. What it adds is the remote half.
+For each collection with `remote_check`, it runs one `ls-remote`, now,
+through `ProbeRemote`, which never pulls, whatever `on_divergence`
+says. The command reports, and the server acts. With `--check` (pin 3),
+it exits 1 when any collection is `behind-remote`, `dirty` or
+`diverged`, or when a check could not run because of the checkout's
+own configuration: not a git tree, a detached HEAD, no upstream, or a
+refused name. It exits 0 for `current` and `unknown`, including an
+unreachable remote, because a CI job must not fail when a remote is
+briefly down. The table says which problem it was (`config problem:` or
+`network problem:`).
+
+**`mk version`** names the commit each refreshed local collection is
+checked out at, read from git's files. It stays offline: no network, no
+git.
+
+**`meerkat_collection_freshness{state}`** (pin 4) counts collections in
+each state. It is computed at scrape time from the records, so it cannot
+drift from `mk_list_collections`. Its only label is the state, a closed
+set of six: no ordinal, because the gauge counts rather than
+identifies, and no name, path, commit or token (MK-FRESH-10). Only
+collections with a record are counted. With none, the collector emits
+nothing, and an unconfigured server's `/metrics` is what it was.
+
+**Not on `mk http serve`'s `GET /collections`.** That server loads its
+collections once and never reconciles: it runs no controller and no
+remote check. A freshness record there would be frozen at the moment of
+mount, and would read `current` for as long as the process lives. No
+answer is better than a wrong one. It gains the field when it gains a
+controller.
+
 ## Security and reliability properties
 
 - **ADC/WIF only.** The probe constructs the same credential-optionless
@@ -762,6 +837,23 @@ say so with `refresh:`.
   and the freshness detail those two omit does reach authenticated
   collection discovery, with `last_success` left untouched by the
   failure.
+- **Part C surfaces (`internal/collections`, `internal/mcp`,
+  `internal/cli`, against bare remotes on disk):** which states are
+  stale and advised; the config/network split of a failed remote check;
+  the advisory stays one valid UTF-8 line within 240 bytes whatever the
+  name; `ProbeRemote` never pulls under `on_divergence: pull`, with
+  `CheckRemote` on the same fixture as the control. On the MCP surface:
+  `freshness` is present where configured and absent (not `null`)
+  elsewhere; the advisory is the second item, the first still parses;
+  it is sent once per session, again for a new `session_id`, again for
+  a new state (behind-remote, then dirty) and after the TTL; the
+  tracker stays within its cap; the gauge is absent without records and
+  labelled by state only with them, on the hosted `/metrics` too. On
+  the CLI: `--check` fails on behind-remote and a config problem, and
+  passes on current and an unreachable remote; `--json`; the command
+  never pulls; `mk version` reports the commit with the remote gone.
+  Each protection's test was checked to fail with the protection
+  removed.
 
 ## Follow-ups
 
@@ -781,8 +873,10 @@ say so with `refresh:`.
 - **Scheduled, change-detecting refresh for `type: local`.** Part A is
   done: see
   [Scheduled refresh for `type: local`](#scheduled-refresh-for-type-local).
-  Parts B (git identity, remote check, divergence ladder) and C
-  (surfaces) follow, in that order.
+  Part B (git identity, remote check, divergence ladder) and part C
+  (surfaces) are done too. See
+  [Part B](#part-b-the-working-tree-and-its-remote) and
+  [Part C](#part-c-the-surfaces).
 - **systemd socket activation (`LISTEN_FDS`).** Done (#110):
   `serve-http` serves on a socket systemd passes in, so systemd holds the
   port across a restart. See the README's "Socket activation (systemd)".

@@ -936,6 +936,21 @@ with its remote:
 
 See [docs/design/hot-reload.md](docs/design/hot-reload.md#part-b-the-working-tree-and-its-remote).
 
+A running server reports what it knows. `mk_list_collections` carries
+each collection's `freshness` record. A search or show on a collection
+that is behind gains a one-line advisory as a second text item, once
+per session. `/metrics` counts collections per state in
+`meerkat_collection_freshness{state}`. From a script or CI job:
+
+```bash
+mk collections status            # asks each remote once; never pulls
+mk collections status --check    # exit 1 if behind-remote, dirty, diverged,
+                                 # or the remote check is misconfigured
+```
+
+An unreachable remote does not fail `--check`. See
+[docs/design/hot-reload.md](docs/design/hot-reload.md#part-c-the-surfaces).
+
 `generation:` and `refresh:` are **mutually exclusive** and refused together
 at load time: pinning means "serve exactly these bytes until the config
 changes", and a file that also asks to follow the object has two
