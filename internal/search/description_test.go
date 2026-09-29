@@ -248,18 +248,19 @@ func TestDescription_RespectsVisibility(t *testing.T) {
 
 // TestDescription_OneLineMentionVsDenseBody records the boost trade-off
 // the #85 review measured, so it is a decision rather than an accident.
-// Under TF-IDF a one-line field's length norm dwarfs a 300-word body's,
-// so a page that only MENTIONS a term in its description outranks a page
-// whose body is ABOUT it (five uses in 300 words). With description in
-// `_all` as well, that margin was about 40×. Kept out of `_all` it is
-// about 7×.
+// A one-line field's length norm is larger than a 300-word body's, so a
+// page that only MENTIONS a term in its description outranks a page
+// whose body is ABOUT it (five uses in 300 words). Under TF-IDF, with
+// description in `_all` as well, that margin was about 40×; kept out of
+// `_all` it was about 7×. Under BM25 (#101), which normalises each field
+// against its own average length, it is about 4×.
 //
 // The mk-mpe eval's dev split did not favour a lower weight: ×1 was
 // within noise and ×0.5 lost MRR. So the ordering stands, and the test
 // bounds the margin. If it fails because the margin grew, something put
-// the double count back. If a scoring change (BM25, #101) makes the dense
-// body win, re-derive the boost table in docs/SEARCH.md and update this
-// test to match.
+// the double count back, or scoring stopped being BM25. If a scoring or
+// boost change makes the dense body win, re-derive the boost table in
+// docs/SEARCH.md and update this test to match.
 func TestDescription_OneLineMentionVsDenseBody(t *testing.T) {
 	prose := func(n, seed int) string {
 		vocab := strings.Fields("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu apple banana cherry damson elder fig grape hazel iris jasmine kale lemon mango nutmeg olive pepper quince radish sage thyme")
@@ -284,7 +285,7 @@ func TestDescription_OneLineMentionVsDenseBody(t *testing.T) {
 	if res[0].Page.ID != "concepts/storage-notes" {
 		t.Fatalf("top = %s; the recorded trade-off is that a description mention outranks a dense body (see the comment)", res[0].Page.ID)
 	}
-	if ratio := res[0].Score / res[1].Score; ratio > 10 {
-		t.Errorf("description-only / dense-body score ratio = %.1f, want <= 10 (about 7 with description out of _all; about 40 with it in)", ratio)
+	if ratio := res[0].Score / res[1].Score; ratio > 6 {
+		t.Errorf("description-only / dense-body score ratio = %.1f, want <= 6 (about 4 under BM25; about 7 under TF-IDF, about 40 with description in _all)", ratio)
 	}
 }

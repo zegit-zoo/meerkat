@@ -1224,9 +1224,9 @@ Refreshing means rebuilding: `make build` re-resolves the source, and
 
 ## How search works
 
-Bleve full-text keyword index (TF-IDF scoring — see
+Bleve full-text keyword index (BM25 scoring — see
 [docs/SEARCH.md](docs/SEARCH.md)), built in-memory at startup from whichever
-content was resolved. Title gets ×5 boost, ID gets ×3, body baseline.
+content was resolved. Title and ID get a ×3 boost, body is the baseline.
 Reference measurement from an internal deployment: cold-start ~150 ms on
 ~700 pages. Your own cold-start time depends on the size of the knowledge
 base you point meerkat at.
