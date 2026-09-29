@@ -23,9 +23,11 @@ func typeBoostPages() []kb.Page {
 // the registry: a collection's `search.type_boosts` reaches ITS index and
 // nobody else's. The same two pages are mounted twice — once as a hub on
 // the defaults, once as a leaf with pointers unboosted — and the same
-// query ranks them in opposite orders.
+// query ranks them in opposite orders. The hub is a tree root, the role
+// that keeps the defaults (#95; see role_test.go).
 func TestSearch_TypeBoostsArePerCollection(t *testing.T) {
 	hub := FromPages("hub", typeBoostPages())
+	hub.Tree = &contentsource.TreeNode{Name: "hub", Path: "hub", Depth: 0}
 	leaf := FromPages("leaf", typeBoostPages())
 	leaf.Source.Search = &contentsource.SearchSpec{TypeBoosts: map[string]float64{kb.TypePointer: 1}}
 	off := FromPages("off", typeBoostPages())
@@ -40,7 +42,7 @@ func TestSearch_TypeBoostsArePerCollection(t *testing.T) {
 		collection string
 		wantTop    string
 	}{
-		{"hub", "hub/flux"},    // no search: block — DefaultTypeBoosts, the pointer wins
+		{"hub", "hub/flux"},    // a tree root with no search: block — DefaultTypeBoosts, the pointer wins
 		{"leaf", "notes/flux"}, // pointer: 1 — the page that matches best wins
 		{"off", "notes/flux"},  // type_boosts: {} — boosting disabled outright
 	} {

@@ -783,13 +783,47 @@ func (c *Collection) searchOptions() []search.Option {
 	if a := c.Source.Layout.Analyzer; a != "" {
 		opts = append(opts, search.WithTitleAnalyzer(a))
 	}
-	// A nil map means the key was absent: keep search.DefaultTypeBoosts.
-	// An empty, non-nil map is `type_boosts: {}` — boosting off — and
-	// must reach WithTypeBoosts as such, which maps.Clone preserves.
-	if s := c.Source.Search; s != nil && s.TypeBoosts != nil {
+	switch s := c.Source.Search; {
+	case s != nil && s.TypeBoosts != nil:
+		// An explicit `type_boosts:` always wins. An empty, non-nil map is
+		// `type_boosts: {}` — boosting off — and must reach WithTypeBoosts
+		// as such, which maps.Clone preserves.
 		opts = append(opts, search.WithTypeBoosts(maps.Clone(s.TypeBoosts)))
+	case c.IsHub():
+		// A routing tier keeps search.DefaultTypeBoosts: the option is
+		// left out, and the index applies them.
+	default:
+		// Anything else is a leaf, where a pointer is a citation and must
+		// not outrank the page that answers (#95).
+		opts = append(opts, search.WithTypeBoosts(map[string]float64{}))
 	}
 	return opts
+}
+
+// IsHub reports whether the collection is a ROUTING TIER, the one kind
+// whose pointers should outrank its own content, and so the one kind
+// that ranks with search.DefaultTypeBoosts (pointer × 4, skill × 2,
+// example × 1.5) when it sets no `search.type_boosts` (#95).
+//
+// It is decided by the collection's role, never by how many collections
+// are mounted. A collection is a hub when it is:
+//
+//   - the root of a `tree:` deployment (depth 0), which routes to its
+//     children, or
+//   - a collection that declares itself a hub tier with
+//     `layout.analyzer: ngram`.
+//
+// Every other collection is a leaf, and ranks with no type boost unless
+// it asks for one. That includes a single `content:` or `--kb-dir`
+// collection, and the children of a tree. A leaf that cites its sources
+// through pointers would otherwise let a citation outrank the page that
+// answers, and in a flat mount, crowd a sibling's answers out of the
+// merge (#88).
+func (c *Collection) IsHub() bool {
+	if c.Tree != nil && c.Tree.Depth == 0 {
+		return true
+	}
+	return c.Source.Layout.Analyzer == search.AnalyzerNgram
 }
 
 // New builds a registry over cols, which must be non-empty and
