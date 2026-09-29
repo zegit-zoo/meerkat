@@ -251,6 +251,9 @@ func (s *Spec) Validate(label string, contentIsEphemeral bool) error {
 			"reconciliation exists so replicas sharing one object store converge, and a local store has no other writer",
 			label, BackendGCS, BackendS3, s.Type)
 	}
+	if s.Refresh.HasLocalOnlyKeys() {
+		return fmt.Errorf("%s.refresh: remote_check and on_divergence apply to a type: local content source only, not to a memory store", label)
+	}
 	return s.Refresh.Validate(label + ".refresh")
 }
 

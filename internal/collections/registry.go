@@ -194,6 +194,13 @@ type Collection struct {
 	// before the collection is shared, and after that only under
 	// reloadMu or mountMu.
 	localUnsettled bool
+	// localDir is the working-tree directory of a `type: local`
+	// collection with a refresh: block, where git identity and the remote
+	// check look (part B of meerkat-mob#25). Empty for every other
+	// collection. Atomic because a lazy child's mount sets it while a
+	// remote check may be reading it, and taking mountMu there would
+	// invert the reloadMu → mountMu order ReloadLocal holds.
+	localDir atomic.Value // string
 
 	// status is the reconciliation state reported through readiness,
 	// metrics and `mk list --collections`.
@@ -900,12 +907,15 @@ func Open(ctx context.Context, resolved []contentsource.ResolvedCollection) (*Re
 			// can only be newer than its token, never older: a mismatch
 			// costs a spare rebuild, never a missed one. A failed stamp
 			// leaves the record unknown, and the first probe rebuilds.
-			if st, ok := stampLocal(fsys); ok {
+			if st, ok := stampLocal(fsys, rc.Dir); ok {
 				version, stamp = st.fp.Token, &st
 			}
 		}
 		c := newCollection(rc.Name, rc.Provenance, version, fsys)
 		c.Source = rc.Source
+		if rc.Source.Type == contentsource.TypeLocal && rc.Source.Refreshable() {
+			c.localDir.Store(rc.Dir)
+		}
 		c.status.configure(rc.Source)
 		if stamp != nil {
 			c.applyStamp(*stamp)

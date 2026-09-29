@@ -211,6 +211,16 @@ content:
   # block is `refresh: {}`. Both `mk mcp serve` and `mk mcp serve-http`
   # run it.
   #
+  # type: local only, when the directory is a git working tree:
+  #   remote_check: 15m      # OFF by default; >= 1m. Asks the upstream for
+  #                          # its tip (hardened `git ls-remote`, run OUTSIDE
+  #                          # the repo, no prompts). Behind = "behind-remote";
+  #                          # unreachable = "unknown", never degraded.
+  #   on_divergence: flag    # flag (DEFAULT): report only, never touch the
+  #                          # tree. pull: fast-forward a CLEAN tree and
+  #                          # rebuild; dirty or diverged trees are reported
+  #                          # and left alone. Needs remote_check.
+  #
   # A running `mk mcp serve-http` also reloads every configured target
   # immediately on SIGHUP, through the same code path. There is deliberately
   # no HTTP reload endpoint: a signal is authorized by the OS, and needs no

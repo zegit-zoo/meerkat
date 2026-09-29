@@ -1,9 +1,11 @@
 package collections
 
 import (
+	"errors"
 	"io/fs"
 	"time"
 
+	"github.com/zegit-zoo/meerkat/internal/gitinfo"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 )
 
@@ -78,30 +80,94 @@ type Freshness struct {
 	// CheckedAt is when the last probe ran, successful or not; zero until
 	// the first.
 	CheckedAt time.Time `json:"checked_at,omitzero"`
+
+	// LoadedCommit and OnDiskCommit are the working tree's commit when
+	// the serving index was built and at the last probe (part B). They
+	// are for DISPLAY: equality is decided by the tokens above. They are
+	// read from git's own files (internal/gitinfo), and are empty when the
+	// directory is not a git working tree.
+	LoadedCommit string `json:"loaded_commit,omitempty"`
+	OnDiskCommit string `json:"on_disk_commit,omitempty"`
+	// RemoteCheckedAt is when the last remote check ran. Zero without
+	// `remote_check`.
+	RemoteCheckedAt time.Time `json:"remote_checked_at,omitzero"`
+	// Note is one fixed phrase explaining the remote half, such as
+	// "local ahead of remote". It never carries a URL, a path or an error
+	// text; those go to the log.
+	Note string `json:"note,omitempty"`
+
+	// remote is the remote check's verdict, the input to the remote half
+	// of the ladder.
+	remote remoteVerdict
 }
 
-// settle recomputes State and Behind from the tokens. Part A knows only
-// the on-disk half of the ladder.
+// remoteVerdict is what the last remote check concluded.
+type remoteVerdict int
+
+const (
+	remoteNone     remoteVerdict = iota // no check, or it could not tell
+	remoteCurrent                       // the remote has nothing the tree lacks
+	remoteBehind                        // the remote is ahead (or diverged; flag cannot tell)
+	remoteDirty                         // pull refused: uncommitted changes
+	remoteDiverged                      // pull refused: not a fast-forward
+)
+
+// Fixed notes. A Note is one of these, never free text.
+const (
+	noteLocalAhead    = "local ahead of remote"
+	noteNotGit        = "not a git working tree"
+	noteDetached      = "HEAD is detached"
+	noteNoUpstream    = "the branch tracks no remote branch"
+	noteRemoteFailed  = "the remote could not be reached"
+	noteCapped        = "cannot tell whether local is behind: object lookup capped"
+	notePullDeferred  = "pull deferred: a rebuild was in flight"
+	notePullFailed    = "pull failed"
+	noteDirty         = "not pulled: the working tree has uncommitted changes"
+	noteDiverged      = "not pulled: local and remote have diverged"
+	notePullRebuildKO = "pulled, but the rebuild failed"
+)
+
+// settle recomputes State and Behind, in the documented precedence:
+// the on-disk half first (unknown, behind-disk), then the remote half.
 func (f *Freshness) settle() {
 	switch {
 	case f.OnDisk == "" || f.Loaded == "":
 		f.State = FreshUnknown
 	case f.OnDisk != f.Loaded:
 		f.State = FreshBehindDisk
+	case f.remote == remoteDiverged:
+		f.State = FreshDiverged
+	case f.remote == remoteDirty:
+		f.State = FreshDirty
+	case f.remote == remoteBehind:
+		f.State = FreshBehindRemote
 	default:
 		f.State = FreshCurrent
 	}
 	f.Behind = f.State != FreshCurrent && f.State != FreshUnknown
 }
 
-// probed records a successful probe that saw onDisk.
-func (r *reloadState) probed(onDisk string, at time.Time) {
+// probed records a successful probe that saw onDisk, and the working
+// tree's commit at that moment ("" when unknown).
+func (r *reloadState) probed(onDisk, commit string, at time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.fresh == nil {
 		return
 	}
-	r.fresh.OnDisk, r.fresh.CheckedAt = onDisk, at
+	r.fresh.OnDisk, r.fresh.OnDiskCommit, r.fresh.CheckedAt = onDisk, commit, at
+	r.fresh.settle()
+}
+
+// remoteChecked records a remote check: the remote tip (or
+// RemoteUnknown), what it means, and the fixed note explaining it.
+func (r *reloadState) remoteChecked(tip string, v remoteVerdict, note string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fresh == nil {
+		return
+	}
+	r.fresh.Remote, r.fresh.remote, r.fresh.Note, r.fresh.RemoteCheckedAt = tip, v, note, at
 	r.fresh.settle()
 }
 
@@ -116,14 +182,15 @@ func (r *reloadState) probeFailed(at time.Time) {
 	r.fresh.settle()
 }
 
-// loaded records the token a newly installed snapshot was built from.
-func (r *reloadState) loaded(token string) {
+// loaded records the token (and the commit, "" when unknown) a newly
+// installed snapshot was built from.
+func (r *reloadState) loaded(token, commit string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.fresh == nil {
 		return
 	}
-	r.fresh.Loaded = token
+	r.fresh.Loaded, r.fresh.LoadedCommit = token, commit
 	r.fresh.settle()
 }
 
@@ -182,18 +249,46 @@ func unsettled(fp kb.Fingerprint, probeStart time.Time) bool {
 
 // localStamp is a mount-time fingerprint and when it was taken.
 type localStamp struct {
-	fp kb.Fingerprint
-	at time.Time
+	fp     kb.Fingerprint
+	commit string
+	at     time.Time
 }
 
-// stampLocal fingerprints fsys for a mount, reporting false on failure.
-func stampLocal(fsys fs.FS) (localStamp, bool) {
+// stampLocal fingerprints fsys for a mount, and reads the commit of the
+// working tree holding dir. It reports false when the fingerprint fails;
+// a missing commit is only a missing display field.
+func stampLocal(fsys fs.FS, dir string) (localStamp, bool) {
 	at := time.Now()
 	fp, err := localFingerprint(fsys)
 	if err != nil {
 		return localStamp{}, false
 	}
-	return localStamp{fp: fp, at: at}, true
+	return localStamp{fp: fp, commit: headCommit(dir), at: at}, true
+}
+
+// workDir returns localDir, or "" when it was never set.
+func (c *Collection) workDir() string {
+	s, _ := c.localDir.Load().(string)
+	return s
+}
+
+// headCommit is the commit the working tree holding dir is at, read from
+// git's own files (never by running git, MK-SEC-12), or "" when dir is
+// not in a git working tree or its HEAD cannot be read. A detached HEAD
+// still has a commit.
+func headCommit(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	repo, err := gitinfo.Find(dir)
+	if err != nil {
+		return ""
+	}
+	commit, _, err := repo.Head()
+	if err != nil && !errors.Is(err, gitinfo.ErrDetached) {
+		return ""
+	}
+	return commit
 }
 
 // applyStamp records a mount-time stamp in the freshness record and the
@@ -201,6 +296,6 @@ func stampLocal(fsys fs.FS) (localStamp, bool) {
 // installs the snapshot.
 func (c *Collection) applyStamp(st localStamp) {
 	c.localUnsettled = unsettled(st.fp, st.at)
-	c.status.loaded(st.fp.Token)
-	c.status.probed(st.fp.Token, st.at)
+	c.status.loaded(st.fp.Token, st.commit)
+	c.status.probed(st.fp.Token, st.commit, st.at)
 }

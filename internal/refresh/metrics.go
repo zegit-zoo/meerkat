@@ -52,7 +52,7 @@ func newMetrics(reg *prometheus.Registry) *metrics {
 	m := &metrics{
 		attemptsVec: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "meerkat_refresh_attempts_total",
-			Help: "Reconciliation cycles started, by collection ordinal and target kind (content, memory).",
+			Help: "Reconciliation cycles started, by collection ordinal and target kind (content, memory, remote).",
 		}, refreshLabels),
 		changesVec: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "meerkat_refresh_changes_total",

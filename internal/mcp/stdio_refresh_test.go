@@ -105,3 +105,27 @@ func TestStdioRefresh_ObjectAndMemoryBlocksStayUnpolled(t *testing.T) {
 		t.Fatalf("stdio controller over %d target(s), want only the local one", ctl.Targets())
 	}
 }
+
+// A local collection's remote check (remote_check, meerkat-mob#25 part B)
+// is scheduled under stdio too: it is part of that collection's opt-in.
+func TestStdioRefresh_ARemoteCheckIsScheduledToo(t *testing.T) {
+	dir := t.TempDir()
+	page := filepath.Join(dir, "wiki", "p.md")
+	if err := os.MkdirAll(filepath.Dir(page), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(page, []byte("---\nid: p\ntitle: P\n---\n# P\n\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := contentsource.Source{Type: contentsource.TypeLocal, Path: dir, Layout: contentsource.Layout{Wiki: "wiki"},
+		Refresh: &refresh.Spec{Interval: refresh.Duration(time.Minute), RemoteCheck: refresh.Duration(15 * time.Minute)}}
+	reg, err := collections.Open(context.Background(), []contentsource.ResolvedCollection{{Name: "a", Dir: dir, Provenance: "disk:" + dir, Source: src}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reg.Close() })
+	ctl := stdioRefresh(reg, nil)
+	if ctl == nil || ctl.Targets() != 2 {
+		t.Fatalf("stdio controller over %d target(s), want the probe and the remote check", ctl.Targets())
+	}
+}

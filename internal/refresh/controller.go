@@ -30,12 +30,16 @@ import (
 // without importing each other, and internal/telemetry imports nothing
 // from meerkat, so it cannot close a cycle with either of them.
 
-// Target kinds. A closed set of two, so it is safe as a metric label.
+// Target kinds. A closed set of three, so it is safe as a metric label.
 const (
 	// KindContent is a collection's content source.
 	KindContent = "content"
 	// KindMemory is a collection's writable memory store.
 	KindMemory = "memory"
+	// KindRemote is a `type: local` collection's git upstream, checked on
+	// its own `remote_check` cadence (meerkat-mob#25). Its cycles never
+	// fail: an unreachable remote is reported, not degraded.
+	KindRemote = "remote"
 )
 
 // ErrBusy is what a Target returns when a refresh for the same
@@ -59,7 +63,7 @@ type Key struct {
 	// unauthenticated, and which collections a deployment mounts is not
 	// public information (see internal/mcp/metrics.go's label discipline).
 	Ordinal int
-	// Kind is KindContent or KindMemory.
+	// Kind is KindContent, KindMemory or KindRemote.
 	Kind string
 	// Name is the collection name. LOGS ONLY — never a metric label.
 	Name string
@@ -89,6 +93,11 @@ type Outcome struct {
 	// (meerkat-mob#25). The design keeps that token to structured status
 	// and the log (MK-FRESH-10).
 	LogVersion string
+	// Note is a sentence for the LOG ONLY, logged at info whenever it is
+	// set, changed or not: why a remote check could not answer, why a pull
+	// was not attempted. It may name a URL or a path, so it never reaches
+	// a span or a metric.
+	Note string
 }
 
 // Target is one thing that can be reconciled against its source of
@@ -350,6 +359,10 @@ func (c *Controller) runOnce(ctx context.Context, t Target) error {
 		}
 		c.log.Info("collection refreshed",
 			"collection", key.Name, "kind", key.Kind, "version", version)
+	}
+	if out.Note != "" {
+		c.log.Info("collection refresh note",
+			"collection", key.Name, "kind", key.Kind, "note", out.Note)
 	}
 	span.SetAttributes(
 		telemetry.Outcome(outcome),

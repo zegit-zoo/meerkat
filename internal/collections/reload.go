@@ -376,7 +376,7 @@ func (c *Collection) hasFilesystem() bool {
 // as a metric label — a generation increments forever, and labelling a
 // series with one mints a new time series per publication.
 type ReloadStatus struct {
-	// Kind is refresh.KindContent or refresh.KindMemory.
+	// Kind is refresh.KindContent, refresh.KindMemory or refresh.KindRemote.
 	Kind string `json:"kind"`
 	// Interval is the configured probe interval.
 	Interval string `json:"interval"`
@@ -697,7 +697,13 @@ func (c *Collection) ReloadLocal(ctx context.Context) (refresh.Outcome, error) {
 		return refresh.Outcome{}, refresh.ErrBusy
 	}
 	defer c.reloadMu.Unlock()
+	return c.reloadLocalLocked(ctx)
+}
 
+// reloadLocalLocked is ReloadLocal for a caller that already holds the
+// reload slot: the pull path (remote.go), which rebuilds right after it
+// fast-forwards, under the slot it took before touching the tree.
+func (c *Collection) reloadLocalLocked(ctx context.Context) (refresh.Outcome, error) {
 	if c.Source.Type != contentsource.TypeLocal {
 		return refresh.Outcome{}, fmt.Errorf("collection %q is not a type: local collection", c.Name)
 	}
@@ -727,6 +733,7 @@ func (c *Collection) ReloadLocal(ctx context.Context) (refresh.Outcome, error) {
 
 	probeStart := time.Now()
 	var fp kb.Fingerprint
+	var commit string
 	if refreshable {
 		var err error
 		fp, err = phase(ctx, telemetry.PhaseProbe, func(context.Context) (kb.Fingerprint, error) {
@@ -736,12 +743,15 @@ func (c *Collection) ReloadLocal(ctx context.Context) (refresh.Outcome, error) {
 			c.status.probeFailed(time.Now())
 			return refresh.Outcome{}, c.contentFailed(fmt.Errorf("probe: %w", err))
 		}
-		c.status.probed(fp.Token, time.Now())
+		// The commit is display only (part B): read from git's files after
+		// the fingerprint, and never used to decide anything.
+		commit = headCommit(c.workDir())
+		c.status.probed(fp.Token, commit, time.Now())
 		if fp.Token == c.currentVersion() && !c.localUnsettled {
 			// The serving snapshot carries this token, so it is what the
 			// index was built from. Recording it here as well covers a
 			// record created after the snapshot was stamped.
-			c.status.loaded(fp.Token)
+			c.status.loaded(fp.Token, commit)
 			c.status.succeeded(refresh.KindContent, fp.Token)
 			return refresh.Outcome{Changed: false, LogVersion: fp.Token}, nil
 		}
@@ -780,7 +790,7 @@ func (c *Collection) ReloadLocal(ctx context.Context) (refresh.Outcome, error) {
 	}
 	committed = true
 	c.localUnsettled = unsettled(fp, probeStart)
-	c.status.loaded(fp.Token)
+	c.status.loaded(fp.Token, commit)
 	c.status.succeeded(refresh.KindContent, fp.Token)
 	// LogVersion, not Version: a local token stays in status and the log
 	// and never reaches the cycle span (MK-FRESH-10).
@@ -975,6 +985,9 @@ func (r *Registry) RefreshTargets() []refresh.Target {
 			if c.Source.Type == contentsource.TypeLocal && c.Source.Refreshable() {
 				c.status.configure(c.Source)
 				out = append(out, &localTarget{c: c, ordinal: i})
+				if rt := newRemoteTarget(c, i); rt != nil {
+					out = append(out, rt)
+				}
 			}
 			continue
 		}
@@ -986,6 +999,9 @@ func (r *Registry) RefreshTargets() []refresh.Target {
 		case c.Source.Type == contentsource.TypeLocal:
 			if c.byID == nil {
 				out = append(out, &localTarget{c: c, ordinal: i})
+				if rt := newRemoteTarget(c, i); rt != nil {
+					out = append(out, rt)
+				}
 			}
 		case c.Source.Refreshable():
 			out = append(out, &contentTarget{c: c, ordinal: i})

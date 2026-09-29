@@ -919,8 +919,22 @@ rebuilds the index only when the fingerprint moved, or when a page was
 modified within two seconds of the last check, which the timestamp may
 not yet show. `mk mcp serve` runs this for `type: local` collections as
 well as `mk mcp serve-http`. A collection without the block behaves as
-before. The block accepts `interval`, `jitter` and `failure_policy`
-only; any other key is refused at load.
+before. On `type: local`, the block also accepts `remote_check` and
+`on_divergence`; any other key is refused at load.
+
+When the directory is a git working tree, two opt-in keys compare it
+with its remote:
+
+- **`remote_check: 15m`** asks the upstream for its tip with a hardened
+  `git ls-remote`, which runs outside the repository and cannot prompt.
+  A remote that is ahead reads as `behind-remote`. An unreachable one
+  reads as `unknown`, and never marks the collection degraded.
+- **`on_divergence: pull`** fast-forwards a clean tree, and then rebuilds
+  the index. A tree with uncommitted changes, or one that has diverged, is
+  reported and left untouched. There is never a merge, rebase, stash or
+  reset.
+
+See [docs/design/hot-reload.md](docs/design/hot-reload.md#part-b-the-working-tree-and-its-remote).
 
 `generation:` and `refresh:` are **mutually exclusive** and refused together
 at load time: pinning means "serve exactly these bytes until the config

@@ -134,6 +134,19 @@ type Spec struct {
 	// serve-last-good (the default) or unready. See the constants.
 	FailurePolicy string `yaml:"failure_policy,omitempty"`
 
+	// RemoteCheck (type: local only, meerkat-mob#25) is how often the
+	// working tree's upstream is asked for its tip with `git ls-remote`.
+	// Zero, the default, never asks: no network, no git. It is separate
+	// from Interval because it costs a network round-trip and
+	// credentials, where the on-disk probe costs a stat per page.
+	RemoteCheck Duration `yaml:"remote_check,omitempty"`
+
+	// OnDivergence (type: local only) says who acts when the remote is
+	// ahead: DivergenceFlag (the default) reports it and never touches
+	// the working tree; DivergencePull fast-forwards a clean tree. It
+	// needs RemoteCheck.
+	OnDivergence string `yaml:"on_divergence,omitempty"`
+
 	// jitterSet records that the block wrote a jitter: key at all, so an
 	// explicit `jitter: 0s` can be told apart from an omitted one when a
 	// default is filled in (JitterGiven).
@@ -144,7 +157,10 @@ type Spec struct {
 // error, not a silently ignored line: a typo such as `intreval:` or a key
 // that belongs to a later release would otherwise load as the defaults
 // with nothing said (meerkat-mob#25).
-var specKeys = map[string]bool{"interval": true, "jitter": true, "failure_policy": true}
+var specKeys = map[string]bool{
+	"interval": true, "jitter": true, "failure_policy": true,
+	"remote_check": true, "on_divergence": true,
+}
 
 // UnmarshalYAML decodes a refresh: block, refusing unknown keys.
 func (s *Spec) UnmarshalYAML(node *yaml.Node) error {
@@ -184,7 +200,7 @@ func (s *Spec) checkKeys(node *yaml.Node) error {
 				continue
 			}
 			if !specKeys[key.Value] {
-				return fmt.Errorf("line %d: refresh: has no key %q (accepted: interval, jitter, failure_policy)", key.Line, key.Value)
+				return fmt.Errorf("line %d: refresh: has no key %q (accepted: interval, jitter, failure_policy, remote_check, on_divergence)", key.Line, key.Value)
 			}
 			if key.Value == "jitter" {
 				s.jitterSet = true
@@ -193,6 +209,30 @@ func (s *Spec) checkKeys(node *yaml.Node) error {
 	}
 	return nil
 }
+
+// Divergence policies for OnDivergence.
+const (
+	// DivergenceFlag reports a remote that is ahead, and never touches
+	// the working tree.
+	DivergenceFlag = "flag"
+	// DivergencePull fast-forwards a clean tree to the remote's tip, and
+	// reports anything else (dirty, diverged, detached) as DivergenceFlag
+	// would.
+	DivergencePull = "pull"
+)
+
+// MinRemoteCheck is the shortest remote_check a block may ask for: each
+// check is a network round-trip to somebody else's server.
+const MinRemoteCheck = time.Minute
+
+// HasLocalOnlyKeys reports whether the block sets a key that only a
+// `type: local` source accepts.
+func (s *Spec) HasLocalOnlyKeys() bool {
+	return s != nil && (s.RemoteCheck != 0 || s.OnDivergence != "")
+}
+
+// Pulls reports whether the block opts into fast-forwarding.
+func (s *Spec) Pulls() bool { return s != nil && s.OnDivergence == DivergencePull }
 
 // JitterGiven reports whether the block wrote a jitter: key, including
 // an explicit zero.
@@ -268,6 +308,17 @@ func (s *Spec) Validate(label string) error {
 	}
 	if s.Jitter < 0 {
 		return fmt.Errorf("%s.jitter must not be negative, got %s", label, s.Jitter)
+	}
+	switch s.OnDivergence {
+	case "", DivergenceFlag, DivergencePull:
+	default:
+		return fmt.Errorf("%s.on_divergence must be %s or %s, got %q", label, DivergenceFlag, DivergencePull, s.OnDivergence)
+	}
+	if s.RemoteCheck < 0 || (s.RemoteCheck > 0 && s.RemoteCheck.Duration() < MinRemoteCheck) {
+		return fmt.Errorf("%s.remote_check is %s; it must be 0 (off) or at least %s, since each check is a network call to the remote", label, s.RemoteCheck, MinRemoteCheck)
+	}
+	if s.Pulls() && s.RemoteCheck == 0 {
+		return fmt.Errorf("%s.on_divergence: %s needs remote_check: without a remote check nothing ever learns the remote is ahead", label, DivergencePull)
 	}
 	if s.Jitter.Duration() >= s.Interval.Duration() {
 		return fmt.Errorf("%s.jitter (%s) must be smaller than %s.interval (%s) — jitter spreads an interval across replicas, it does not replace it",
