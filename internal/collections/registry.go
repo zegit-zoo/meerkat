@@ -188,6 +188,12 @@ type Collection struct {
 	// of one reconciliation cycle — content or memory — so two cycles can
 	// never stage against the same collection at once.
 	reloadMu sync.Mutex
+	// localUnsettled makes the next local probe rebuild even if the token
+	// is unchanged: the serving snapshot's token was taken while a page
+	// was younger than settleWindow (freshness.go). Written at mount,
+	// before the collection is shared, and after that only under
+	// reloadMu or mountMu.
+	localUnsettled bool
 
 	// status is the reconciliation state reported through readiness,
 	// metrics and `mk list --collections`.
@@ -884,9 +890,26 @@ func Open(ctx context.Context, resolved []contentsource.ResolvedCollection) (*Re
 			}
 			fsys = mounted
 		}
-		c := newCollection(rc.Name, rc.Provenance, rc.Version, fsys)
+		version := rc.Version
+		var stamp *localStamp
+		if rc.Source.Type == contentsource.TypeLocal && rc.Source.Refreshable() {
+			// A refreshable local collection is stamped with the token of
+			// what it is about to serve, so the first probe, one interval
+			// from now, compares against it instead of rebuilding
+			// unconditionally. The index is built lazily AFTER this, so it
+			// can only be newer than its token, never older: a mismatch
+			// costs a spare rebuild, never a missed one. A failed stamp
+			// leaves the record unknown, and the first probe rebuilds.
+			if st, ok := stampLocal(fsys); ok {
+				version, stamp = st.fp.Token, &st
+			}
+		}
+		c := newCollection(rc.Name, rc.Provenance, version, fsys)
 		c.Source = rc.Source
 		c.status.configure(rc.Source)
+		if stamp != nil {
+			c.applyStamp(*stamp)
+		}
 		// Personal-read visibility is set even when there is no memory:
 		// block (Spec.Visibility answers private for a nil Spec), because
 		// the reserved page-ID prefix means the same thing in every

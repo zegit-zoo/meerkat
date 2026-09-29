@@ -125,6 +125,12 @@ func newColdCollection(node *contentsource.TreeNode) *Collection {
 	}
 	c.install(&snapshot{provenance: "cold"})
 	c.cold.Store(true)
+	// A local child with a refresh: block gets its freshness record now,
+	// not when the targets are enumerated: warm start mounts children
+	// BEFORE that, and a mount's stamp needs the record to land in.
+	if c.Source.Type == contentsource.TypeLocal && c.Source.Refreshable() {
+		c.status.configure(c.Source)
+	}
 	return c
 }
 
@@ -205,11 +211,20 @@ func (r *Registry) mount(ctx context.Context, c *Collection, trigger string, cul
 	if err != nil {
 		return fmt.Errorf("mount %q: %w", c.Name, err)
 	}
+	// A local child with a refresh: block is stamped before it is read,
+	// exactly as Open stamps an eager one (see Open for why the order).
+	version := rc.Version
+	var stamp *localStamp
+	if src.Type == contentsource.TypeLocal && src.Refreshable() {
+		if st, ok := stampLocal(fsys); ok {
+			version, stamp = st.fp.Token, &st
+		}
+	}
 	pages, err := kb.ListFS(fsys)
 	if err != nil {
 		return fmt.Errorf("mount %q: enumerate pages: %w", c.Name, err)
 	}
-	snap, err := newBuiltSnapshot(ctx, fsys, rc.Provenance, rc.Version, c.mergeOverlay(pages, kb.Unfiltered()), c.searchOptions()...)
+	snap, err := newBuiltSnapshot(ctx, fsys, rc.Provenance, version, c.mergeOverlay(pages, kb.Unfiltered()), c.searchOptions()...)
 	if err != nil {
 		return fmt.Errorf("mount %q: %w", c.Name, err)
 	}
@@ -219,6 +234,9 @@ func (r *Registry) mount(ctx context.Context, c *Collection, trigger string, cul
 	}
 	c.residentBytes.Store(size)
 	c.install(snap)
+	if stamp != nil {
+		c.applyStamp(*stamp)
+	}
 	c.cold.Store(false)
 	if c.Tree != nil {
 		c.Tree.Mounted = true
@@ -315,6 +333,7 @@ func (r *Registry) unmount(ctx context.Context, c *Collection, reason string) {
 		c.Tree.Mounted = false
 	}
 	c.install(&snapshot{provenance: "cold"})
+	c.status.loaded("") // nothing loaded: a freshness record reads unknown
 	cs := r.cacheState()
 	cs.mu.Lock()
 	cs.bytes -= size

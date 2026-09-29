@@ -144,7 +144,7 @@ content:
   # s3:GetObject (and s3:ListBucket for prefix mode). Provider differences
   # (what Garage does and does not enforce) are in docs/design/object-stores.md.
 
-  # --- refresh: follow the bucket while running (runtime, gcs and s3) --------
+  # --- refresh: follow the source while running (runtime, gcs, s3, local) ----
   #
   # ABSENT (the default, and what every configuration written before this
   # existed gets): the source is resolved ONCE at startup and never
@@ -160,7 +160,8 @@ content:
   # one is complete, never from a half-built one. See docs/design/hot-reload.md.
   #
   # refresh:
-  #   interval: 60s                # REQUIRED. Minimum 5s. Must carry a UNIT:
+  #   interval: 60s                # REQUIRED (type: local: defaults to 60s).
+  #                                # Minimum 5s. Must carry a UNIT:
   #                                # `60` is refused rather than guessed at.
   #                                # The floor is about the bucket's metadata
   #                                # quota, not meerkat's cost; for "live now",
@@ -197,8 +198,18 @@ content:
   # changes"; a file carrying both has two contradictory readings, and one of
   # them silently revokes that guarantee.
   #
-  # Only type: gcs and type: s3 take a refresh block. type: local is already
-  # re-read per request, and type: url is pinned by its mandatory sha256.
+  # type: gcs, type: s3 and type: local take a refresh block. type: url is
+  # pinned by its mandatory sha256; git and submodule are build time only.
+  #
+  # On type: local the probe is a fingerprint of the pages on disk (each
+  # page's path, size and modification time; nothing is read, and no git
+  # command runs), and a moved fingerprint rebuilds the search index. A
+  # local directory's pages are already read live, but its index is built
+  # once, so without this a page added, edited or deleted after startup is
+  # missing from, stale in, or left behind in search results. interval
+  # defaults to 60s and jitter to a tenth of the interval, so the smallest
+  # block is `refresh: {}`. Both `mk mcp serve` and `mk mcp serve-http`
+  # run it.
   #
   # A running `mk mcp serve-http` also reloads every configured target
   # immediately on SIGHUP, through the same code path. There is deliberately

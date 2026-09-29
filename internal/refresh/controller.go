@@ -80,8 +80,15 @@ type Outcome struct {
 	//
 	// It travels in the STRUCTURED status and the log, never as a metric
 	// label: a generation increments forever, so labelling a metric with
-	// one would mint a new time series on every publication.
+	// one would mint a new time series on every publication. It does go
+	// on the cycle span (see runOnce).
 	Version string
+	// LogVersion is a version token for the LOG ONLY: never a span
+	// attribute, never a metric label. A target sets it instead of
+	// Version when its token is a fingerprint of a local directory
+	// (meerkat-mob#25). The design keeps that token to structured status
+	// and the log (MK-FRESH-10).
+	LogVersion string
 }
 
 // Target is one thing that can be reconciled against its source of
@@ -337,8 +344,12 @@ func (c *Controller) runOnce(ctx context.Context, t Target) error {
 	if out.Changed {
 		outcome = telemetry.OutcomeOK
 		c.metrics.changes(key).Inc()
+		version := out.Version
+		if version == "" {
+			version = out.LogVersion
+		}
 		c.log.Info("collection refreshed",
-			"collection", key.Name, "kind", key.Kind, "version", out.Version)
+			"collection", key.Name, "kind", key.Kind, "version", version)
 	}
 	span.SetAttributes(
 		telemetry.Outcome(outcome),

@@ -539,6 +539,11 @@ stdio is unauthenticated by construction — the process was started by
 the one user it serves — so personal memories saved here land in a fixed
 "local" namespace rather than one derived from a token.
 
+A type: local collection with a "refresh:" block in content-source.yaml
+is re-checked on its interval while the server runs, and its search index
+is rebuilt when its pages change on disk. Without one, nothing polls.
+(Object-store and memory refresh: blocks are followed by serve-http.)
+
 Designed to be spawned by an MCP client (OpenCode, Claude Desktop, etc.).
 The server runs until stdin closes or it receives SIGINT/SIGTERM.
 ```

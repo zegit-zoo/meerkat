@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -243,8 +244,11 @@ type Source struct {
 	// the default because "what is this replica serving?" should have a
 	// boring answer unless an operator asked for a moving one.
 	//
-	// It applies to type: gcs only, and never together with a pinned
-	// Generation — see validateRefresh, and docs/design/hot-reload.md.
+	// It applies to the object stores (type: gcs, type: s3), never
+	// together with a pinned version, and to type: local, where the probe
+	// is a (path, size, mtime) fingerprint of the pages on disk and
+	// interval and jitter default to 60s and a tenth of the interval —
+	// see validateRefresh, defaultRefresh and docs/design/hot-reload.md.
 	Refresh *refresh.Spec `yaml:"refresh,omitempty"`
 
 	// Layout maps artifacts to their location WITHIN the resolved source.
@@ -351,6 +355,7 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 	}
 	cfg.Content.Layout = MergeLayout(cfg.Content.Layout)
 	cfg.Content.Update.Normalize()
+	cfg.Content.defaultRefresh()
 	// Validate auth: at load time so a policy mistake fails the process
 	// rather than the first request that would have been affected by it
 	// — an unknown capability or a rule with no collections silently
@@ -394,6 +399,7 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 		}
 		cfg.Tree.Layout = MergeLayout(cfg.Tree.Layout)
 		cfg.Tree.Update.Normalize()
+		cfg.Tree.defaultRefresh()
 		if err := cfg.Tree.validate("tree"); err != nil {
 			return Config{}, err
 		}
@@ -413,6 +419,7 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 		for i := range cfg.Collections {
 			cfg.Collections[i].Layout = MergeLayout(cfg.Collections[i].Layout)
 			cfg.Collections[i].Update.Normalize()
+			cfg.Collections[i].defaultRefresh()
 		}
 		// Re-validate now that layouts are defaulted (validateCollections
 		// checked names + type-specific fields; layout.wiki is only
@@ -576,12 +583,14 @@ func (s Source) validate(p string) error {
 // validateRefresh checks a `refresh:` block against the source it sits
 // on. Two rules, both of them refusals rather than warnings.
 //
-// 1. Refresh applies to type: gcs ONLY. type: local is already live (its
-// pages are enumerated per request), type: url is content-addressed by a
-// mandatory digest that cannot change without the config changing, and
-// watching arbitrary local filesystems is an explicit non-goal. A
-// refresh: block on any of them is a misunderstanding worth naming, not
-// a line to ignore.
+// 1. Refresh applies to the object stores and to type: local ONLY. A
+// local collection reads its pages live but builds its search index
+// once, so a refresh: block there polls a cheap on-disk fingerprint and
+// rebuilds the index when it moves (meerkat-mob#25, MK-FRESH-03). type:
+// url is content-addressed by a mandatory digest that cannot change
+// without the config changing, and git, submodule and embedded content
+// is resolved at build time. A refresh: block on any of those is a
+// misunderstanding worth naming, not a line to ignore.
 //
 // 2. A pinned `generation:` and a `refresh:` block are MUTUALLY
 // EXCLUSIVE, and this is the security-relevant half. Pinning means
@@ -597,9 +606,13 @@ func (s Source) validateRefresh(p string) error {
 	if s.Refresh == nil {
 		return nil
 	}
+	if s.Type == TypeLocal {
+		return s.Refresh.Validate(p + ".refresh")
+	}
 	if !s.IsObjectStore() {
-		return fmt.Errorf("%s.refresh applies to type: %s or type: %s only, but this source is type: %s — "+
-			"a local source is already re-read per request, and a url source is pinned by its mandatory sha256", p, TypeGCS, TypeS3, s.Type)
+		return fmt.Errorf("%s.refresh applies to type: %s, type: %s or type: %s only, but this source is type: %s — "+
+			"a url source is pinned by its mandatory sha256, and git, submodule and embedded content is resolved at build time",
+			p, TypeGCS, TypeS3, TypeLocal, s.Type)
 	}
 	if s.Generation != 0 {
 		return fmt.Errorf("%s: generation: %d pins this source to one immutable object generation, so refresh: can never do anything — "+
@@ -612,6 +625,35 @@ func (s Source) validateRefresh(p string) error {
 			p, s.ETag)
 	}
 	return s.Refresh.Validate(p + ".refresh")
+}
+
+// DefaultLocalRefreshInterval is the probe interval a `type: local`
+// refresh: block gets when it names none. A local probe is one stat per
+// page and no network, so the block can be as short as `refresh: {}`.
+const DefaultLocalRefreshInterval = 60 * time.Second
+
+// defaultRefresh fills an omitted interval (DefaultLocalRefreshInterval)
+// and an omitted jitter (a tenth of the interval) on a `type: local`
+// refresh: block. An explicit `jitter: 0s` is kept: it turns the spread
+// off. An object store's refresh: block keeps its required interval:
+// there the interval is a charge against somebody else's metadata quota
+// and should be written down.
+//
+// It replaces s.Refresh with a defaulted copy rather than writing
+// through the pointer, so a Source copied before this ran (tree.go
+// validates a copy) never sees its block change underneath it.
+func (s *Source) defaultRefresh() {
+	if s.Type != TypeLocal || s.Refresh == nil {
+		return
+	}
+	spec := *s.Refresh
+	if spec.Interval == 0 {
+		spec.Interval = refresh.Duration(DefaultLocalRefreshInterval)
+	}
+	if spec.Jitter == 0 && !spec.JitterGiven() {
+		spec.Jitter = spec.Interval / 10
+	}
+	s.Refresh = &spec
 }
 
 // validateGCS checks the type: gcs fields. Exactly one of object (a

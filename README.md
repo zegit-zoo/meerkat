@@ -852,7 +852,7 @@ recorded in [docs/design/object-stores.md](docs/design/object-stores.md).
 
 By default a GCS or S3 source is resolved **once**, at startup: publishing a new
 generation needs a restart or a rollout. Add a `refresh:` block and a running
-`mk mcp serve-http` follows the bucket instead.
+server follows the bucket instead.
 
 ```yaml
 collections:
@@ -900,6 +900,27 @@ but the index is built once, so without a SIGHUP (or a restart) a page
 added after startup is not searchable. A path unit or a git hook can send
 it; see
 [docs/design/hot-reload.md](docs/design/hot-reload.md#sighup-and-type-local).
+
+A `type: local` collection takes a `refresh:` block too, so a long-running
+server keeps its index in step with a directory that moves, such as a git
+checkout that a merge updates:
+
+```yaml
+collections:
+  - name: notes
+    type: local
+    path: /srv/kb/notes
+    refresh: {}                   # interval 60s, jitter 6s by default
+```
+
+Each interval, meerkat fingerprints the pages on disk (each page's path,
+size and modification time; no page is read and no git command runs) and
+rebuilds the index only when the fingerprint moved, or when a page was
+modified within two seconds of the last check, which the timestamp may
+not yet show. `mk mcp serve` runs this for `type: local` collections as
+well as `mk mcp serve-http`. A collection without the block behaves as
+before. The block accepts `interval`, `jitter` and `failure_policy`
+only; any other key is refused at load.
 
 `generation:` and `refresh:` are **mutually exclusive** and refused together
 at load time: pinning means "serve exactly these bytes until the config

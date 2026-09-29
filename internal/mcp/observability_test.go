@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kb"
+	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
@@ -87,6 +89,9 @@ type tracedOptions struct {
 	// withMemory mounts a single collection with a local memory store
 	// instead of the three read-only ones.
 	withMemory bool
+	// registry, when set, is served instead of the three read-only
+	// collections.
+	registry *collections.Registry
 }
 
 func newTracedFixture(t *testing.T, opts tracedOptions) *tracedFixture {
@@ -141,6 +146,9 @@ func newTracedFixture(t *testing.T, opts tracedOptions) *tracedFixture {
 	}
 
 	reg := threeCollectionRegistry(t)
+	if opts.registry != nil {
+		reg = opts.registry
+	}
 	if opts.withMemory {
 		reg, err = collections.New(
 			withMemoryStore(t, collections.FromPages("notes", []kb.Page{
@@ -1015,4 +1023,75 @@ func counterTotal(t *testing.T, reg *prometheus.Registry, name string) float64 {
 		}
 	}
 	return total
+}
+
+// A local refresh cycle keeps its version token off every span
+// (MK-FRESH-10, meerkat-mob#25 review M1): the token is a fingerprint of a
+// directory, and it travels in structured status and the log only. A
+// collection WITHOUT a refresh: block emits exactly the spans it did
+// before: its rebuild has no probe phase (MK-FRESH-09).
+func TestObservability_LocalRefreshCycleCarriesNoToken(t *testing.T) {
+	reg := openLocalCollections(t, true, false) // "a" has a block, "b" none
+	f := newTracedFixture(t, tracedOptions{registry: reg})
+	var dirs []string
+	for _, name := range []string{"a", "b"} {
+		c, err := reg.Get(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dirs = append(dirs, c.Source.Path)
+		if err := os.WriteFile(filepath.Join(c.Source.Path, "wiki", "q.md"), []byte("---\nid: q\ntitle: Q\n---\n# Q\n\nnew\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.flush() // drop the startup spans
+
+	if err := f.srv.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	a, _ := reg.Get("a")
+	fresh, ok := a.Freshness()
+	if !ok || fresh.Loaded == "" {
+		t.Fatalf("precondition: a's freshness = %+v, %v", fresh, ok)
+	}
+	b, _ := reg.Get("b")
+	bfs, err := kbdir.FSLayout(b.Source.Path, b.Source.Layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bfp, err := kb.FingerprintFS(bfs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forbidden := map[string]string{
+		fresh.Loaded: "a's version token",
+		bfp.Token:    "b's version token",
+		dirs[0]:      "a's directory",
+		dirs[1]:      "b's directory",
+	}
+
+	probes := 0
+	spans := f.flush()
+	for _, s := range spans {
+		if s.Name == telemetry.PhaseProbe {
+			probes++
+		}
+		haystack := []string{s.Name, s.Status.Description}
+		for _, at := range s.Attributes {
+			haystack = append(haystack, string(at.Key), at.Value.String())
+		}
+		for _, text := range haystack {
+			for needle, what := range forbidden {
+				if strings.Contains(text, needle) {
+					t.Errorf("span %q carries %s in %q", s.Name, what, text)
+				}
+			}
+		}
+	}
+	if probes != 1 {
+		t.Errorf("probe spans = %d, want 1: only the collection with a refresh: block probes", probes)
+	}
+	if !strings.Contains(f.logs.String(), fresh.Loaded) {
+		t.Error("the token is missing from the log, where it belongs")
+	}
 }

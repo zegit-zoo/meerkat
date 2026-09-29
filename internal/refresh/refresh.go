@@ -133,7 +133,70 @@ type Spec struct {
 	// FailurePolicy selects what a failed refresh does to readiness:
 	// serve-last-good (the default) or unready. See the constants.
 	FailurePolicy string `yaml:"failure_policy,omitempty"`
+
+	// jitterSet records that the block wrote a jitter: key at all, so an
+	// explicit `jitter: 0s` can be told apart from an omitted one when a
+	// default is filled in (JitterGiven).
+	jitterSet bool
 }
+
+// specKeys are the keys a refresh: block accepts. Anything else is an
+// error, not a silently ignored line: a typo such as `intreval:` or a key
+// that belongs to a later release would otherwise load as the defaults
+// with nothing said (meerkat-mob#25).
+var specKeys = map[string]bool{"interval": true, "jitter": true, "failure_policy": true}
+
+// UnmarshalYAML decodes a refresh: block, refusing unknown keys.
+func (s *Spec) UnmarshalYAML(node *yaml.Node) error {
+	if err := s.checkKeys(node); err != nil {
+		return err
+	}
+	type plain Spec
+	p := plain{jitterSet: s.jitterSet}
+	if err := node.Decode(&p); err != nil {
+		return err
+	}
+	*s = Spec(p)
+	return nil
+}
+
+// checkKeys refuses any key outside specKeys, and records whether a
+// jitter: key was written. A YAML merge key (`<<: *defaults`) is allowed,
+// as it always was, and the mapping it merges in is held to the same
+// keys.
+func (s *Spec) checkKeys(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.AliasNode:
+		return s.checkKeys(node.Alias)
+	case yaml.SequenceNode: // `<<: [*a, *b]`
+		for _, n := range node.Content {
+			if err := s.checkKeys(n); err != nil {
+				return err
+			}
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key := node.Content[i]
+			if key.Tag == "!!merge" {
+				if err := s.checkKeys(node.Content[i+1]); err != nil {
+					return err
+				}
+				continue
+			}
+			if !specKeys[key.Value] {
+				return fmt.Errorf("line %d: refresh: has no key %q (accepted: interval, jitter, failure_policy)", key.Line, key.Value)
+			}
+			if key.Value == "jitter" {
+				s.jitterSet = true
+			}
+		}
+	}
+	return nil
+}
+
+// JitterGiven reports whether the block wrote a jitter: key, including
+// an explicit zero.
+func (s *Spec) JitterGiven() bool { return s != nil && s.jitterSet }
 
 // Every returns the configured interval.
 func (s *Spec) Every() time.Duration {
@@ -200,7 +263,7 @@ func (s *Spec) Validate(label string) error {
 		return fmt.Errorf("%s.interval is required and must be positive (e.g. 60s) — a refresh block with no interval says how to fail but never when to look", label)
 	}
 	if s.Interval.Duration() < MinInterval {
-		return fmt.Errorf("%s.interval is %s, below the %s minimum — polling faster than that spends a bucket's metadata quota rather than meerkat's; use the admin reload trigger for an immediate refresh",
+		return fmt.Errorf("%s.interval is %s, below the %s minimum — polling faster than that spends a bucket's metadata quota (an object store) or a stat of every page (type: local) on every tick; use the admin reload trigger (SIGHUP) for an immediate refresh",
 			label, s.Interval, MinInterval)
 	}
 	if s.Jitter < 0 {

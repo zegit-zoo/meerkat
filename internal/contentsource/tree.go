@@ -325,6 +325,7 @@ func (m Manifest) Validate() error {
 		}
 		src.Layout = MergeLayout(src.Layout)
 		src.Update.Normalize()
+		src.defaultRefresh()
 		if err := src.validate(p + ".source"); err != nil {
 			return err
 		}
@@ -463,6 +464,7 @@ func resolveTreeNode(ctx context.Context, src Source, cfgPath, parent, parentPat
 		csrc := c.Source
 		csrc.Layout = MergeLayout(csrc.Layout)
 		csrc.Update.Normalize()
+		csrc.defaultRefresh()
 		ref := ChildRef{Name: c.Name, Mount: cm, SourceType: c.Source.Type}
 		if cm == MountLazy {
 			// Declared, not mounted: recorded so the tree is complete and
