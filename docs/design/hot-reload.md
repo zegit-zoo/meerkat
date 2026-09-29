@@ -572,7 +572,9 @@ collections:
 tree holding the collection's directory (a `.git` directory, or a
 `gitdir:` file for a linked worktree, with `commondir`). Like git, it
 walks up from the directory, so a collection that is a subdirectory of a
-repository, or sits inside one by accident, reports that repository. It reads `HEAD`,
+repository, or sits inside one by accident, reports that repository.
+With `on_divergence: pull`, that enclosing repository is also what gets
+pulled. It reads `HEAD`,
 the loose ref or `packed-refs`, and the tracking branch and remote URL
 from `config`, with a size cap on every read. The commit goes into the
 freshness record as `loaded_commit` and `on_disk_commit`, for display.
@@ -622,6 +624,9 @@ remote tip (a hand pull and a rebuild), without waiting for the next
 remote check. A remote or branch name that starts with `-`, or is not a
 plain name, is refused before any git call sees it. `git pull` forwards
 both to `fetch` without a `--`, where such a name would be an option.
+That includes an upstream configured as a URL rather than a remote name
+(`branch.<b>.remote = https://…`): it is refused too, and the remote
+reads as `unknown`, failing closed.
 When `remote.<name>.url` is set more than once, the first value is used,
 as git fetches from it.
 

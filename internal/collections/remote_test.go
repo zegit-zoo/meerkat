@@ -378,3 +378,55 @@ func TestRemote_TargetRunsOnItsOwnCadence(t *testing.T) {
 		t.Errorf("remote target interval = %s, want the remote_check (1m)", got)
 	}
 }
+
+// flag mode, when the object lookup cannot answer (here: alternates are
+// present and the tip is not in the local store), reads unknown rather
+// than behind-remote or current (review of #116, leftover b).
+func TestRemote_FlagLookupCappedIsUnknown(t *testing.T) {
+	f := newRemoteFixture(t, refresh.DivergenceFlag)
+	tip := f.pushPage(t, "notes/zebrafish", "About zebrafish.")
+	alt := filepath.Join(f.dir, ".git", "objects", "info", "alternates")
+	if err := os.MkdirAll(filepath.Dir(alt), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(alt, []byte(t.TempDir()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, fr := f.check(t)
+	if fr.State != FreshUnknown || fr.Note != noteCapped || fr.Remote != tip {
+		t.Errorf("capped lookup: %+v, want unknown noted %q at %s", fr, noteCapped, tip)
+	}
+	if !strings.Contains(out.Note, "inconclusive") {
+		t.Errorf("log note = %q", out.Note)
+	}
+}
+
+// A pull runs inside the repository, so the repository's own insteadOf
+// applies to it while ls-remote (outside) reads the real remote. If the
+// pull lands on a commit other than the tip ls-remote reported, the
+// verdict is unknown, not current (review of #116, leftover b, and N3).
+func TestRemote_PullLandingOffTheTipIsUnknown(t *testing.T) {
+	f := newRemoteFixture(t, refresh.DivergencePull)
+	// A second remote that shares history with the real one, then moves
+	// somewhere else.
+	evil := filepath.Join(t.TempDir(), "evil.git")
+	gitT(t, t.TempDir(), "clone", "-q", "--bare", f.bare, evil)
+	pusher := filepath.Join(t.TempDir(), "evil-pusher")
+	gitT(t, t.TempDir(), "clone", "-q", evil, pusher)
+	writeLocalPage(t, pusher, "notes/elsewhere", "Somewhere else.")
+	gitT(t, pusher, "add", ".")
+	gitT(t, pusher, "commit", "-q", "-m", "elsewhere")
+	gitT(t, pusher, "push", "-q", "origin", "main")
+	elsewhere := gitT(t, pusher, "rev-parse", "HEAD")
+
+	tip := f.pushPage(t, "notes/zebrafish", "About zebrafish.")
+	gitT(t, f.dir, "config", "url."+evil+".insteadOf", f.bare)
+
+	_, fr := f.check(t)
+	if got := gitT(t, f.dir, "rev-parse", "HEAD"); got != elsewhere {
+		t.Fatalf("precondition: the pull followed the local rewrite to %s, got %s", elsewhere, got)
+	}
+	if fr.State != FreshUnknown || fr.Note != notePulledElse || fr.Remote != tip {
+		t.Errorf("pulled off the tip: %+v, want unknown noted %q with remote %s", fr, notePulledElse, tip)
+	}
+}
