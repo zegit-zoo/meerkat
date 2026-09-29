@@ -239,7 +239,8 @@ func ServeStdioWith(ctx context.Context, reg *collections.Registry, outcome Outc
 
 // stdioRefresh returns the refresh controller a stdio server runs: one
 // over the SCHEDULED targets of `type: local` collections, those that
-// carry a refresh: block. It returns nil when there are none, and a nil
+// carry a refresh: block (the on-disk probe, and the remote check when
+// `remote_check` asks for one). It returns nil when there are none, and a nil
 // controller's Start and Close do nothing, so a configuration with no
 // local refresh: block gets no controller, no goroutine and no timer
 // (MK-FRESH-09, meerkat-mob#25).
@@ -255,7 +256,7 @@ func ServeStdioWith(ctx context.Context, reg *collections.Registry, outcome Outc
 func stdioRefresh(reg *collections.Registry, log *slog.Logger) *refresh.Controller {
 	var scheduled []refresh.Target
 	for _, t := range reg.RefreshTargets() {
-		if t.Spec() == nil || t.Key().Kind != refresh.KindContent {
+		if t.Spec() == nil || (t.Key().Kind != refresh.KindContent && t.Key().Kind != refresh.KindRemote) {
 			continue
 		}
 		if c, err := reg.Get(t.Key().Name); err != nil || c.Source.Type != contentsource.TypeLocal {

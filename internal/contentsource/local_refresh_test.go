@@ -112,11 +112,12 @@ func TestConfig_LocalRefreshRejections(t *testing.T) {
 		{"negative interval", "{interval: -10s}", "must be positive"},
 		{"unknown failure policy", "{failure_policy: explode}", "failure_policy must be one of"},
 		{"interval without a unit", "{interval: 60}", "with a unit"},
-		// Keys of a later part of meerkat-mob#25, and a typo: all refused,
-		// never loaded as the defaults with nothing said.
-		{"on_divergence before it exists", "{on_divergence: pull}", `has no key "on_divergence"`},
-		{"remote_check before it exists", "{interval: 60s, remote_check: 15m}", `has no key "remote_check"`},
+		// A typo is refused, never loaded as the defaults with nothing said.
 		{"a typo", "{intreval: 5m}", `has no key "intreval"`},
+		// Part B's keys (meerkat-mob#25) have bounds of their own.
+		{"pull without a remote check", "{on_divergence: pull}", "needs remote_check"},
+		{"an unknown divergence policy", "{remote_check: 15m, on_divergence: merge}", "must be flag or pull"},
+		{"a remote check under a minute", "{remote_check: 30s}", "at least 1m0s"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -197,5 +198,40 @@ func TestConfig_RefreshMergeKeys(t *testing.T) {
 	_, err = loadYAML(t, "collections:\n  - name: docs\n    type: local\n    path: /srv/kb\n    refresh: {<<: {intreval: 5m}}\n")
 	if err == nil || !strings.Contains(err.Error(), `has no key "intreval"`) {
 		t.Fatalf("err = %v, want the typo inside the merge refused", err)
+	}
+}
+
+// Part B's keys load on type: local, with flag as the default.
+func TestConfig_LocalRemoteCheckAccepted(t *testing.T) {
+	cfg, err := loadYAML(t, "collections:\n  - name: docs\n    type: local\n    path: /srv/kb\n    refresh: {remote_check: 15m, on_divergence: pull}\n")
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	r := cfg.Collections[0].Refresh
+	if r.RemoteCheck.Duration() != 15*time.Minute || !r.Pulls() {
+		t.Errorf("refresh = %+v, want remote_check 15m and pull", r)
+	}
+	cfg, err = loadYAML(t, "collections:\n  - name: docs\n    type: local\n    path: /srv/kb\n    refresh: {remote_check: 15m}\n")
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if cfg.Collections[0].Refresh.Pulls() {
+		t.Error("on_divergence defaulted to pull; flag is the default")
+	}
+}
+
+// remote_check and on_divergence are for a git working tree: an object
+// store's block, or a memory store's, refuses them.
+func TestConfig_RemoteCheckIsLocalOnly(t *testing.T) {
+	for name, body := range map[string]string{
+		"object store": "collections:\n  - name: docs\n    type: gcs\n    bucket: b\n    prefix: p/\n    refresh: {interval: 60s, remote_check: 15m}\n",
+		"memory store": "collections:\n  - name: docs\n    type: gcs\n    bucket: b\n    prefix: p/\n    memory:\n      type: gcs\n      bucket: b\n      prefix: m/\n      refresh: {interval: 60s, on_divergence: flag}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadYAML(t, body)
+			if err == nil || !strings.Contains(err.Error(), "remote_check and on_divergence apply to") {
+				t.Fatalf("err = %v, want the local-only keys refused", err)
+			}
+		})
 	}
 }

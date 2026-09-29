@@ -169,8 +169,8 @@ const (
 
 	// --- refresh / reconciliation ---------------------------------------
 
-	// KeyRefreshKind is content | memory (refresh.KindContent /
-	// KindMemory).
+	// KeyRefreshKind is content | memory | remote (refresh.KindContent /
+	// KindMemory / KindRemote).
 	KeyRefreshKind = attribute.Key("meerkat.refresh.kind")
 	// KeyRefreshChanged reports whether a cycle actually swapped a new
 	// snapshot in.

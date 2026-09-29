@@ -216,7 +216,7 @@ func (r *Registry) mount(ctx context.Context, c *Collection, trigger string, cul
 	version := rc.Version
 	var stamp *localStamp
 	if src.Type == contentsource.TypeLocal && src.Refreshable() {
-		if st, ok := stampLocal(fsys); ok {
+		if st, ok := stampLocal(fsys, rc.Dir); ok {
 			version, stamp = st.fp.Token, &st
 		}
 	}
@@ -234,6 +234,9 @@ func (r *Registry) mount(ctx context.Context, c *Collection, trigger string, cul
 	}
 	c.residentBytes.Store(size)
 	c.install(snap)
+	if src.Type == contentsource.TypeLocal && src.Refreshable() {
+		c.localDir.Store(rc.Dir)
+	}
 	if stamp != nil {
 		c.applyStamp(*stamp)
 	}
@@ -333,7 +336,7 @@ func (r *Registry) unmount(ctx context.Context, c *Collection, reason string) {
 		c.Tree.Mounted = false
 	}
 	c.install(&snapshot{provenance: "cold"})
-	c.status.loaded("") // nothing loaded: a freshness record reads unknown
+	c.status.loaded("", "") // nothing loaded: a freshness record reads unknown
 	cs := r.cacheState()
 	cs.mu.Lock()
 	cs.bytes -= size

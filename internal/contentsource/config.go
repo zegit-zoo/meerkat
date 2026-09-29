@@ -609,6 +609,9 @@ func (s Source) validateRefresh(p string) error {
 	if s.Type == TypeLocal {
 		return s.Refresh.Validate(p + ".refresh")
 	}
+	if s.Refresh.HasLocalOnlyKeys() {
+		return fmt.Errorf("%s.refresh: remote_check and on_divergence apply to type: %s only (a git working tree), but this source is type: %s", p, TypeLocal, s.Type)
+	}
 	if !s.IsObjectStore() {
 		return fmt.Errorf("%s.refresh applies to type: %s, type: %s or type: %s only, but this source is type: %s — "+
 			"a url source is pinned by its mandatory sha256, and git, submodule and embedded content is resolved at build time",
