@@ -44,6 +44,10 @@ func newHTTPServeCmd() *cobra.Command {
 /search, /show and /list take an optional "collection" field; omitted,
 they span every mounted collection.
 
+This server loads its collections once and never runs a "refresh:"
+block, so GET /collections reports no freshness. For a server that
+follows its sources, use "mk mcp serve-http".
+
 Authentication: all data endpoints require an Authorization: Bearer
 header carrying the configured API key. The key is supplied via
 --api-key or the MEERKAT_API_KEY env var (env wins if both set).

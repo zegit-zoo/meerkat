@@ -2,7 +2,9 @@ package collections
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
+	"strings"
 	"time"
 
 	"github.com/zegit-zoo/meerkat/internal/gitinfo"
@@ -158,6 +160,61 @@ func (f *Freshness) settle() {
 		f.State = FreshCurrent
 	}
 	f.Behind = f.State != FreshCurrent && f.State != FreshUnknown
+}
+
+// Stale reports whether the record says the served index is behind what
+// the source holds: the states an advisory is sent for (part C of
+// meerkat-mob#25). current and unknown are not stale: unknown says
+// nothing a caller could act on.
+func (f Freshness) Stale() bool {
+	switch f.State {
+	case FreshBehindDisk, FreshBehindRemote, FreshDirty, FreshDiverged:
+		return true
+	}
+	return false
+}
+
+// RemoteProblem classifies why the last remote check could not answer:
+// "config" when the working tree itself stops it (not a git tree, a
+// detached HEAD, no upstream, a refused name), "network" when the
+// remote could not be reached, and "" when it answered or never ran.
+// `mk collections status --check` fails on "config" and not on
+// "network": a CI job must not fail because a remote was briefly down.
+func (f Freshness) RemoteProblem() string {
+	switch f.Note {
+	case noteNotGit, noteDetached, noteNoUpstream, noteUnsafeName:
+		return "config"
+	case noteRemoteFailed:
+		return "network"
+	}
+	return ""
+}
+
+// MaxAdvisory bounds an advisory line, in bytes.
+const MaxAdvisory = 240
+
+// advisoryReasons explains each stale state in a fixed phrase.
+var advisoryReasons = map[string]string{
+	FreshBehindDisk:   "its pages changed on disk and the index has not been rebuilt yet",
+	FreshBehindRemote: "the remote has commits this server has not loaded",
+	FreshDirty:        "the checkout has uncommitted changes, so it was not updated",
+	FreshDiverged:     "the checkout and its remote have diverged, so it was not updated",
+}
+
+// Advisory is the one-line notice a search or show carries for a stale
+// collection, or "" when the collection is not stale. It names the
+// collection and the state, never a commit, token, path or URL, and is
+// at most MaxAdvisory bytes.
+func (f Freshness) Advisory(collection string) string {
+	reason, ok := advisoryReasons[f.State]
+	if !ok {
+		return ""
+	}
+	line := fmt.Sprintf("freshness: collection %q is %s (%s)", collection, f.State, reason)
+	if len(line) > MaxAdvisory {
+		line = strings.ToValidUTF8(line[:MaxAdvisory-3], "") + "..."
+	}
+	return line
 }
 
 // probed records a successful probe that saw onDisk, and the working

@@ -218,6 +218,9 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		auth: cfg.Auth,
 	}
 	s.metrics = newMetrics(cfg.Metrics, cfg.Version, reg.Len())
+	// Freshness counts (meerkat-mob#25 part C). Emits nothing unless a
+	// collection has a record, so an unconfigured /metrics is unchanged.
+	s.metrics.reg.MustRegister(newFreshnessCollector(reg))
 
 	// Telemetry is constructed BEFORE the startup index build, so the
 	// build is the first thing traced: a slow start on a large collection

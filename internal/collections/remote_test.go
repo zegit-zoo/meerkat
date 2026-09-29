@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
-	"github.com/zegit-zoo/meerkat/internal/gitinfo"
 	"github.com/zegit-zoo/meerkat/internal/refresh"
 )
 
@@ -46,11 +45,7 @@ func gitT(t *testing.T, dir string, args ...string) string {
 // disk for the duration of a test; production pins https, ssh and git.
 func useFileRemotes(t *testing.T) {
 	t.Helper()
-	r := gitinfo.DefaultRunner
-	r.AllowProtocols = "file"
-	prev := remoteGit
-	remoteGit = r
-	t.Cleanup(func() { remoteGit = prev })
+	t.Cleanup(UseFileRemotesForTest())
 }
 
 // remoteFixture is a bare remote holding one page, and a working-tree

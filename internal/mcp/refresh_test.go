@@ -103,6 +103,9 @@ func TestHosted_RefreshIsOptInAndOff(t *testing.T) {
 	if strings.Contains(body, "meerkat_refresh_") {
 		t.Error("a deployment that configured no refresh is publishing refresh metrics")
 	}
+	if strings.Contains(body, "meerkat_collection_freshness") {
+		t.Error("a deployment that configured no refresh is publishing freshness metrics")
+	}
 	// The readiness counts are still reported, and nothing is degraded.
 	code, ready := get(t, f.http, ReadinessPath)
 	if code != http.StatusOK {

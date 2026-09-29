@@ -191,7 +191,7 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 	}
 	addToGroup(groupKB, newSearchCmd(), newShowCmd(), newListCmd(), newLintCmd())
 	addToGroup(groupServer, newMCPCmd(), newHTTPCmd())
-	addToGroup(groupOps, newIngestCmd(), newUpdateCmd(), newVersionCmd())
+	addToGroup(groupOps, newIngestCmd(), newCollectionsCmd(), newUpdateCmd(), newVersionCmd())
 	return root
 }
 

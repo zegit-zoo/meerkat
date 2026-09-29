@@ -67,6 +67,10 @@ type transportOptions struct {
 
 	// Outcome configures mk_report_outcome's sinks. See outcome.go.
 	Outcome OutcomeOptions
+
+	// Advice remembers which freshness advisories each session has seen
+	// (advisory.go). newServer creates it; nil sends none.
+	Advice *advisories
 }
 
 // viewer derives the per-page read viewer for the caller behind g. It is

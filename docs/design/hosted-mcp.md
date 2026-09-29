@@ -505,7 +505,10 @@ bounded by making them say nothing worth having:
   generation or fingerprint*, for a second reason: it increments forever,
   so one series per publication would be an unbounded cardinality leak.
   The refresh series are keyed by the collection's configuration ordinal
-  instead.
+  instead. `meerkat_collection_freshness{state}` is keyed by less: it
+  counts collections per freshness state, and names none of them
+  (meerkat-mob#25 part C; see
+  [hot-reload.md](hot-reload.md#part-c-the-surfaces)).
 
 ### What readiness actually checks
 
@@ -566,6 +569,10 @@ meerkat_refresh_skipped_total{collection,kind}
 meerkat_refresh_duration_seconds{collection,kind}
 meerkat_refresh_last_success_timestamp_seconds{collection,kind}
 meerkat_refresh_degraded{collection,kind}
+
+# only when a type: local collection has a refresh: block
+# (meerkat-mob#25 part C). `state` is one of six; no ordinal, no name.
+meerkat_collection_freshness{state}
 ```
 
 Since #30 an opt-in `observability:` block adds bounded domain series
@@ -609,6 +616,30 @@ stays in the log and never reaches a span, because a span is exported
 out of the process and the log is not. See
 [observability.md](observability.md).
 
+### Freshness advisory: a second text item
+
+When a collection that `mk_search` searched, or that `mk_show` read
+from, is behind its source (`behind-disk`, `behind-remote`, `dirty`,
+`diverged`), the tool result carries **two text items**. The first is
+the result, exactly as before, and the second is one line naming the
+collection and its state:
+
+```text
+freshness: collection "notes" is behind-remote (the remote has commits this server has not loaded)
+```
+
+A client that reads the first item keeps working. A client that renders
+every item shows the line. It is sent once per (session, collection,
+state), at most 240 bytes, and never names a commit, path or URL. It only
+covers collections the caller may read. The session is the explicit
+`session_id`, else the MCP session. Calls with neither share one bucket
+across every caller, so one principal's session-less call can use up
+another's advisory. That costs a missed line, never a disclosure, and a
+caller that wants its own passes `session_id`. Only a `type: local` collection
+with a `refresh:` block has a state at all, so a deployment without one
+never sees a second item. See
+[hot-reload.md](hot-reload.md#part-c-the-surfaces).
+
 ## Back-compat
 
 | deployment | after this change |
@@ -618,6 +649,7 @@ out of the process and the log is not. See
 | `content-source.yaml` with no `auth:` | unchanged everywhere; `mk mcp serve-http` serves every collection to any caller and says so in its banner |
 | an `auth:` block with no `anonymous:` rule | unchanged: 401 for a token-less request, challenge included; the new counter reads 0 and the access log gains no field (#36) |
 | `--kb-dir` | suppresses `auth:` discovery, exactly as it suppresses content discovery |
+| a `type: local` collection with a `refresh:` block, behind its source | `mk_search` / `mk_show` gain a second text item after the unchanged first (the [freshness advisory](#freshness-advisory-a-second-text-item)); `mk_list_collections` gains `freshness`; without the block, nothing changes |
 
 `Grants.Can` on a **nil** `*Grants` returns true — "no policy in force"
 is unrestricted. That is the back-compat path and it is the reason a nil

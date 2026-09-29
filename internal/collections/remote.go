@@ -45,6 +45,19 @@ type gitRunner interface {
 
 var remoteGit gitRunner = gitinfo.DefaultRunner
 
+// UseFileRemotesForTest lets the remote check reach bare repositories on
+// disk (the file transport), which production refuses. It is for tests
+// in OTHER packages (internal/mcp, internal/cli) that need a genuinely
+// stale collection. It returns the function that restores production.
+// Nothing outside a _test.go file calls it.
+func UseFileRemotesForTest() (restore func()) {
+	r := gitinfo.DefaultRunner
+	r.AllowProtocols = "file"
+	prev := remoteGit
+	remoteGit = r
+	return func() { remoteGit = prev }
+}
+
 // remoteTarget runs one collection's remote check on its own cadence.
 type remoteTarget struct {
 	c       *Collection
@@ -82,6 +95,18 @@ func (t *remoteTarget) Reconcile(ctx context.Context) (refresh.Outcome, error) {
 // upstream, an unreachable remote, a refused pull — is a verdict, not a
 // failure.
 func (c *Collection) CheckRemote(ctx context.Context) (refresh.Outcome, error) {
+	return c.checkRemote(ctx, true)
+}
+
+// ProbeRemote is CheckRemote that never pulls, whatever `on_divergence`
+// says: the verdict flag mode would give, recorded on the freshness
+// record. It is what `mk collections status` runs. A short-lived CLI
+// reports, the long-running server acts.
+func (c *Collection) ProbeRemote(ctx context.Context) (refresh.Outcome, error) {
+	return c.checkRemote(ctx, false)
+}
+
+func (c *Collection) checkRemote(ctx context.Context, allowPull bool) (refresh.Outcome, error) {
 	spec := c.Source.Refresh
 	if c.Source.Type != contentsource.TypeLocal || spec == nil || spec.RemoteCheck <= 0 {
 		return refresh.Outcome{}, fmt.Errorf("collection %q has no remote_check configured", c.Name)
@@ -121,7 +146,7 @@ func (c *Collection) CheckRemote(ctx context.Context) (refresh.Outcome, error) {
 	if tip == local {
 		return report(tip, remoteCurrent, "", "")
 	}
-	if spec.Pulls() {
+	if allowPull && spec.Pulls() {
 		// Let git decide: it knows the ancestry, this package only reads
 		// files. A branch that is ahead fast-forwards to nothing, a behind
 		// one to the tip, and a diverged one is refused.

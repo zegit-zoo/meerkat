@@ -29,6 +29,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
+	"github.com/zegit-zoo/meerkat/internal/refresh"
 	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
@@ -1093,5 +1094,97 @@ func TestObservability_LocalRefreshCycleCarriesNoToken(t *testing.T) {
 	}
 	if !strings.Contains(f.logs.String(), fresh.Loaded) {
 		t.Error("the token is missing from the log, where it belongs")
+	}
+}
+
+// The freshness surfaces add nothing identifying to a span or a label
+// (MK-FRESH-10; meerkat-mob#25 part C, design note §4, #118 review M1).
+// One Reload runs every target with tracing on: the content cycles, the
+// remote check, and the pull it triggers under `on_divergence: pull`.
+// Then /metrics is gathered with the freshness gauge registered. No span
+// attribute, event, status or label may carry a collection name, a
+// directory, the remote's path, either commit (full or short) or a
+// version token.
+func TestObservability_FreshnessCarriesNoNamePathCommitOrToken(t *testing.T) {
+	fx := newStaleFixture(t, refresh.DivergencePull, "zanzibar-notes", "quokka-plain")
+	kb, err := fx.reg.Get(fx.kbName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := kb.Freshness()
+	f := newTracedFixture(t, tracedOptions{registry: fx.reg})
+	f.flush() // drop the startup spans
+
+	if err := f.srv.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	after, _ := kb.Freshness()
+	if after.State != collections.FreshCurrent || after.LoadedCommit != fx.tip {
+		t.Fatalf("precondition: the pull did not land: %+v", after)
+	}
+
+	forbidden := map[string]string{
+		fx.kbName:             "a collection name",
+		fx.plainName:          "a collection name",
+		fx.dir:                "a directory",
+		fx.plainDir:           "a directory",
+		fx.bare:               "the remote's path",
+		fx.head:               "the old commit",
+		fx.head[:12]:          "the old commit, short",
+		fx.tip:                "the remote tip",
+		fx.tip[:12]:           "the remote tip, short",
+		before.Loaded:         "a version token",
+		after.Loaded:          "a version token",
+		after.OnDisk:          "a version token",
+		filepath.Base(fx.dir): "the working tree's name",
+	}
+	delete(forbidden, "")
+
+	remoteCycles := 0
+	for _, s := range f.flush() {
+		if kind, _ := attrValue(s, string(telemetry.KeyRefreshKind)); s.Name == telemetry.SpanRefreshCycle && kind == refresh.KindRemote {
+			remoteCycles++
+		}
+		haystack := []string{s.Name, s.Status.Description}
+		for _, a := range s.Attributes {
+			haystack = append(haystack, string(a.Key), a.Value.String())
+		}
+		for _, e := range s.Events {
+			haystack = append(haystack, e.Name)
+			for _, a := range e.Attributes {
+				haystack = append(haystack, string(a.Key), a.Value.String())
+			}
+		}
+		for _, text := range haystack {
+			for needle, what := range forbidden {
+				if strings.Contains(text, needle) {
+					t.Errorf("span %q carries %s in %q", s.Name, what, text)
+				}
+			}
+		}
+	}
+	if remoteCycles != 1 {
+		t.Errorf("remote cycle spans = %d, want 1: the remote check must be inside what this test inspects", remoteCycles)
+	}
+
+	families, err := f.reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gauge := false
+	for _, fam := range families {
+		gauge = gauge || fam.GetName() == "meerkat_collection_freshness"
+		for _, m := range fam.GetMetric() {
+			for _, label := range m.GetLabel() {
+				for needle, what := range forbidden {
+					if strings.Contains(label.GetValue(), needle) {
+						t.Errorf("metric %s label %s=%q carries %s", fam.GetName(), label.GetName(), label.GetValue(), what)
+					}
+				}
+			}
+		}
+	}
+	if !gauge {
+		t.Error("meerkat_collection_freshness is not on the scraped registry, so its labels went unchecked")
 	}
 }
