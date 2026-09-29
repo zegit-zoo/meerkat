@@ -145,13 +145,18 @@ with, not a transport failure.
 ### Cross-collection ranking
 
 Each collection is queried independently with the same `limit`, and the
-union is re-sorted by score. Scores are BM25 values from independent
-indexes, so they are comparable only approximately. The alternative — one
-shared index over every collection — would rank better but forfeits the
-per-collection isolation this abstraction exists to provide: it could not
-be filtered per caller without rebuilding, which is precisely what
-per-collection authorization needs. Ties break on configuration order,
-then page ID, so output is deterministic.
+union is re-sorted by final score. Scores are BM25 values from
+independent indexes, so they are comparable only approximately. The
+alternative — one shared index over every collection — would rank better
+but forfeits the per-collection isolation this abstraction exists to
+provide: it could not be filtered per caller without rebuilding, which is
+precisely what per-collection authorization needs. Ties break on
+configuration order, then page ID, so output is deterministic.
+
+Per-query score normalisation is not the fix either: measured on the
+mk-mpe eval, it lost answers that the raw merge keeps (#94). The rule
+and the measurements are in
+[SEARCH.md](../SEARCH.md#searching-several-collections-the-merge-rule).
 
 Since #27 each per-collection query also carries a per-caller
 **visibility clause** (see [memory.md](memory.md#private-personal-reads-27)),
