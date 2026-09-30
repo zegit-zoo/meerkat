@@ -71,6 +71,14 @@ type transportOptions struct {
 	// Advice remembers which freshness advisories each session has seen
 	// (advisory.go). newServer creates it; nil sends none.
 	Advice *advisories
+
+	// Refreshing is the set of refresh slots this process's controller
+	// runs: every target on the hosted transport, only the scheduled
+	// `type: local` ones on stdio. mk_list_collections reports a refresh
+	// status for these and no others. A slot nobody runs is built from
+	// configuration alone, and would read as a live cycle that never ran
+	// (#120). nil reports none.
+	Refreshing refreshSlots
 }
 
 // viewer derives the per-page read viewer for the caller behind g. It is

@@ -890,8 +890,10 @@ readiness probe, for a collection where stale content is a correctness
 problem rather than an inconvenience. The detail behind it (which
 generation is applied, when the last cycle succeeded, what failed) is on the
 authenticated discovery surface, `mk_list_collections`, not on the
-unauthenticated probes. `mk http serve` runs no cycle, and its
-`GET /collections` reports no refresh status.
+unauthenticated probes. `mk_list_collections` reports only the cycles the
+serving process runs: every one under `mk mcp serve-http`, only the
+`type: local` ones under stdio `mk mcp serve`. `mk http serve` runs no
+cycle, and its `GET /collections` reports no refresh status.
 
 `refresh:` under a `memory:` block is what makes **several replicas sharing
 one GCS memory store converge**: without it, a memory saved through one

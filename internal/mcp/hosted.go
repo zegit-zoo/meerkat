@@ -182,6 +182,9 @@ type HostedServer struct {
 	// every deployment that has not written a `refresh:` block; every
 	// call site tolerates a nil controller.
 	refresh *refresh.Controller
+	// refreshing is the set of slots s.refresh runs: mk_list_collections
+	// reports refresh status for these (#120).
+	refreshing refreshSlots
 	// tel is the OpenTelemetry layer. nil when no `observability:` block
 	// opted in — which is every deployment that has not written one —
 	// and every call site tolerates a nil, exactly as the refresh
@@ -273,11 +276,13 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	// is no server-level switch that could turn it on for a deployment
 	// that did not ask, and none that could turn it off for one that did.
 	// The loops do not start here — see ListenAndServe.
+	targets := reg.RefreshTargets()
 	s.refresh = refresh.New(refresh.Options{
-		Targets:  reg.RefreshTargets(),
+		Targets:  targets,
 		Logger:   s.log,
 		Registry: s.metrics.reg,
 	})
+	s.refreshing = runningSlots(targets)
 
 	// The OIDC client is wrapped so discovery and JWKS fetches carry this
 	// process's trace context outbound and appear as client spans. That
@@ -325,7 +330,7 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	// line and cannot: ownership is a property of who the caller is, and
 	// an anonymous caller is still nobody. Their grants are read-only by
 	// validation, so they are not offered the memory tool at all.
-	mcpSrv := newServer(reg, transportOptions{Outcome: cfg.Outcome},
+	mcpSrv := newServer(reg, transportOptions{Outcome: cfg.Outcome, Refreshing: s.refreshing},
 		mcpserver.WithHooks(hooks),
 		// The per-request tool filter is what keeps tools/list from
 		// naming collections the caller may not read — see toolFilter.

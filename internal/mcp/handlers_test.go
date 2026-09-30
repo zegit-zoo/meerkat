@@ -443,7 +443,7 @@ func TestListCollectionsHandler_Shape(t *testing.T) {
 func TestListCollectionsJSON_EmptyViewIsArrayNotNull(t *testing.T) {
 	reg := testRegistry(t, testPage("a/b", "A", "body", "concepts", "reviewed", "team-a"))
 	empty := reg.Restrict(func(string) bool { return false })
-	out, err := listCollectionsJSON(context.Background(), empty)
+	out, err := listCollectionsJSON(context.Background(), empty, nil)
 	if err != nil {
 		t.Fatalf("listCollectionsJSON: %v", err)
 	}

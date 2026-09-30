@@ -320,8 +320,11 @@ already has, and the log line already carries the name.
 
 The detail the probes and the metrics deliberately omit lives on the
 **authenticated collection-discovery surface**, `mk_list_collections`,
-as a `refresh` array, one entry per configured target, absent entirely
-for a collection that is resolved once. One entry:
+as a `refresh` array. It has one entry per target that this process's
+controller runs, and is absent for a collection that is resolved once.
+Under `mk mcp serve-http` that is every configured target. Under stdio
+`mk mcp serve` it is only the scheduled `type: local` ones (#120; see
+"stdio follows `type: local` blocks only" below). One entry:
 
 ```json
 {
@@ -535,6 +538,16 @@ as the MCP client keeps the process alive. That would be new credentialed
 traffic on upgrade, opted into only by a block written for `serve-http`.
 If someone does run stdio against a bucket, the route is a per-transport
 opt-in (`mk mcp serve --refresh`), which is not built.
+
+The same rule governs what stdio reports (#120). Mounting gives every
+`refresh:` block a status slot, and `mk_list_collections` used to
+report all of them. Under stdio, an object store's or memory store's
+slot never moves: no attempt, no success, never degraded, which reads
+as a healthy cycle that never ran. `mk_list_collections` now reports a
+slot only when this process's controller runs its target, keyed by
+collection and kind. A bucket-backed collection under stdio has no
+`refresh` array, while the same configuration under `serve-http` still
+reports it.
 
 **The freshness record** (`collections.Freshness`, MK-FRESH-06) is what a
 refreshable local collection knows about itself: `loaded` (the token the
