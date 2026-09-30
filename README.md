@@ -549,9 +549,8 @@ The search/show/list tools are available as `POST /search`, `POST /show`,
 and `/openapi.json` are exempt from auth; everything else needs the bearer
 token, and the server refuses to start without one. `mk http serve` loads
 its collections once and never runs a `refresh:` block, so `GET /collections`
-reports no freshness (its `refresh` array describes configuration only; see
-[#119](https://github.com/zegit-zoo/meerkat/issues/119)). For a server that
-follows its sources, use `mk mcp serve-http`.
+reports no refresh status and no freshness. For a server that follows its
+sources, use `mk mcp serve-http`.
 
 If OpenWebUI runs on another host, don't just add `--host 0.0.0.0` —
 meerkat has no TLS of its own, so that puts the bearer token on the
@@ -891,9 +890,8 @@ readiness probe, for a collection where stale content is a correctness
 problem rather than an inconvenience. The detail behind it (which
 generation is applied, when the last cycle succeeded, what failed) is on the
 authenticated discovery surface, `mk_list_collections`, not on the
-unauthenticated probes. (`mk http serve`'s `GET /collections` shows the same
-array, but that server never runs a cycle; see
-[#119](https://github.com/zegit-zoo/meerkat/issues/119).)
+unauthenticated probes. `mk http serve` runs no cycle, and its
+`GET /collections` reports no refresh status.
 
 `refresh:` under a `memory:` block is what makes **several replicas sharing
 one GCS memory store converge**: without it, a memory saved through one
