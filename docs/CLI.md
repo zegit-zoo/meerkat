@@ -334,8 +334,9 @@ Run an HTTP/OpenAPI server. Endpoints:
 they span every mounted collection.
 
 This server loads its collections once and never runs a "refresh:"
-block, so GET /collections reports no freshness. For a server that
-follows its sources, use "mk mcp serve-http".
+block, so GET /collections reports no refresh status and no
+freshness. For a server that follows its sources, use
+"mk mcp serve-http".
 
 Authentication: all data endpoints require an Authorization: Bearer
 header carrying the configured API key. The key is supplied via

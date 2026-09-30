@@ -313,13 +313,11 @@ type collectionEntry struct {
 	Type   string `json:"type"`
 	Source string `json:"source"`
 	Pages  int    `json:"pages"`
-	// Refresh reports runtime reconciliation for this collection, one
-	// entry per configured target, and is absent for a collection
-	// resolved once at startup. This endpoint is auth-gated (which
-	// collections a deployment mounts is not public information), which
-	// is why the detailed freshness provenance belongs here rather than
-	// in the unauthenticated probes. See docs/design/hot-reload.md.
-	Refresh []collections.ReloadStatus `json:"refresh,omitempty"`
+	// No refresh status and no freshness record (#119): this server
+	// loads its collections once and runs no refresh controller, so a
+	// status would be built from configuration alone and read as a live
+	// cycle that never ran. `mk mcp serve-http` reports both, on
+	// mk_list_collections. See docs/design/hot-reload.md.
 	// Tree fields, present in a `tree:` deployment. See docs/design/tree.md.
 	Path     string                   `json:"path,omitempty"`
 	Tier     *int                     `json:"tier,omitempty"`
@@ -542,7 +540,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
 	out := make([]collectionEntry, 0, s.reg.Len())
 	for _, c := range s.reg.All() {
-		e := collectionEntry{Name: c.Name, Type: c.Type(), Source: c.Provenance(), Refresh: c.ReloadStatuses()}
+		e := collectionEntry{Name: c.Name, Type: c.Type(), Source: c.Provenance()}
 		if pages, err := c.Pages(); err == nil {
 			e.Pages = len(pages)
 		}

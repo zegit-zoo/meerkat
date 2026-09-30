@@ -319,9 +319,9 @@ already has, and the log line already carries the name.
 ### Structured status
 
 The detail the probes and the metrics deliberately omit lives on the
-**authenticated collection-discovery surfaces** — `mk_list_collections`
-and `GET /collections` — as a `refresh` array, one entry per configured
-target, absent entirely for a collection that is resolved once:
+**authenticated collection-discovery surface**, `mk_list_collections`,
+as a `refresh` array, one entry per configured target, absent entirely
+for a collection that is resolved once. One entry:
 
 ```json
 {
@@ -336,8 +336,12 @@ target, absent entirely for a collection that is resolved once:
 }
 ```
 
-That is the right home for it: those surfaces are already gated, and
-already narrowed to the collections the caller may read, so a generation
+`mk http serve`'s `GET /collections` carries no such array (#119).
+That server runs no refresh cycle, so its entries would describe
+configuration alone, as a cycle that never ran.
+
+`mk_list_collections` is the right home for the array: it is already
+gated, and already narrowed to the collections the caller may read, so a generation
 and an error string disclose nothing the caller could not already see.
 `last_success` deliberately does **not** move on a failed cycle — "it
 last worked at T" is the number that says how stale the content actually
@@ -764,8 +768,8 @@ remote check. A freshness record there would be frozen at the moment of
 mount, and would read `current` for as long as the process lives. No
 answer is better than a wrong one. It gains the field when it gains a
 controller. Its help, the README and its OpenAPI description say so.
-The same endpoint's older `refresh` array has the same problem, and
-[#119](https://github.com/zegit-zoo/meerkat/issues/119) tracks it.
+The same endpoint's older `refresh` array had the same problem, and
+was removed for the same reason (#119).
 
 ## Security and reliability properties
 
