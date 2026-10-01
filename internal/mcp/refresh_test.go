@@ -217,7 +217,7 @@ func TestHosted_FreshnessDetailGoesToAuthenticatedDiscovery(t *testing.T) {
 		t.Fatal("Reload should have reported the unreachable source")
 	}
 
-	body, err := listCollectionsJSON(context.Background(), srv.reg)
+	body, err := listCollectionsJSON(context.Background(), srv.reg, srv.refreshing)
 	if err != nil {
 		t.Fatalf("listCollectionsJSON: %v", err)
 	}

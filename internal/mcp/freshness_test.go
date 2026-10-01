@@ -128,7 +128,7 @@ func newStaleFixture(t *testing.T, onDivergence, kbName, plainName string) *stal
 
 func TestListCollections_CarriesFreshnessOnlyWhereConfigured(t *testing.T) {
 	reg, tip, _ := staleRegistry(t, "")
-	body, err := listCollectionsJSON(context.Background(), reg)
+	body, err := listCollectionsJSON(context.Background(), reg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

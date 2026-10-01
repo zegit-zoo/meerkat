@@ -53,7 +53,7 @@ func treeRegistry(t *testing.T) *collections.Registry {
 
 func TestListCollectionsWire_RendersTheTree(t *testing.T) {
 	reg := treeRegistry(t)
-	body, err := listCollectionsJSON(context.Background(), reg)
+	body, err := listCollectionsJSON(context.Background(), reg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

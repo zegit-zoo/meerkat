@@ -233,11 +233,23 @@ func ServeStdioWith(ctx context.Context, reg *collections.Registry, outcome Outc
 	ctl.Start(ctx)
 	defer func() { _ = ctl.Close() }()
 
-	// AllowAnonymousPersonal is true here and nowhere else: a stdio
-	// server was spawned by the one user it serves, so a personal memory
-	// has an unambiguous owner even though no token established it. See
-	// transportOptions.
-	return mcpserver.ServeStdio(newServer(reg, transportOptions{AllowAnonymousPersonal: true, Outcome: outcome}))
+	return mcpserver.ServeStdio(newServer(reg, stdioOptions(reg, outcome)))
+}
+
+// stdioOptions is the transportOptions a `mk mcp serve` process serves
+// with.
+//
+// AllowAnonymousPersonal is true here and nowhere else: a stdio server
+// was spawned by the one user it serves, so a personal memory has an
+// unambiguous owner even though no token established it. Refreshing is
+// exactly what stdioRefresh schedules, so mk_list_collections reports
+// no refresh status for a target stdio never runs (#120).
+func stdioOptions(reg *collections.Registry, outcome OutcomeOptions) transportOptions {
+	return transportOptions{
+		AllowAnonymousPersonal: true,
+		Outcome:                outcome,
+		Refreshing:             runningSlots(stdioTargets(reg)),
+	}
 }
 
 // stdioRefresh returns the refresh controller a stdio server runs: one
@@ -258,6 +270,11 @@ func ServeStdioWith(ctx context.Context, reg *collections.Registry, outcome Outc
 //
 // No metrics registry: stdio exposes no /metrics.
 func stdioRefresh(reg *collections.Registry, log *slog.Logger) *refresh.Controller {
+	return refresh.New(refresh.Options{Targets: stdioTargets(reg), Logger: log})
+}
+
+// stdioTargets is what stdioRefresh schedules; see its comment.
+func stdioTargets(reg *collections.Registry) []refresh.Target {
 	var scheduled []refresh.Target
 	for _, t := range reg.RefreshTargets() {
 		if t.Spec() == nil || (t.Key().Kind != refresh.KindContent && t.Key().Kind != refresh.KindRemote) {
@@ -268,7 +285,36 @@ func stdioRefresh(reg *collections.Registry, log *slog.Logger) *refresh.Controll
 		}
 		scheduled = append(scheduled, t)
 	}
-	return refresh.New(refresh.Options{Targets: scheduled, Logger: log})
+	return scheduled
+}
+
+// refreshSlot names one refresh status slot: a collection and a target
+// kind (refresh.KindContent or refresh.KindMemory).
+type refreshSlot struct{ collection, kind string }
+
+// refreshSlots is the set of slots a process's refresh controller runs.
+type refreshSlots map[refreshSlot]bool
+
+// runningSlots is the set of slots targets update.
+func runningSlots(targets []refresh.Target) refreshSlots {
+	s := make(refreshSlots, len(targets))
+	for _, t := range targets {
+		k := t.Key()
+		s[refreshSlot{collection: k.Name, kind: k.Kind}] = true
+	}
+	return s
+}
+
+// of keeps the statuses of collection that this process runs, and drops
+// the rest (#120). A nil set keeps none.
+func (s refreshSlots) of(collection string, all []collections.ReloadStatus) []collections.ReloadStatus {
+	var out []collections.ReloadStatus
+	for _, st := range all {
+		if s[refreshSlot{collection: collection, kind: st.Kind}] {
+			out = append(out, st)
+		}
+	}
+	return out
 }
 
 // Tool names. Constants because the per-request tool filter
@@ -1098,7 +1144,7 @@ func listCollectionsHandler(reg *collections.Registry, mem transportOptions) mcp
 		_, span := telemetry.Span(ctx, telemetry.SpanListCollections,
 			telemetry.KeyCollectionCount.Int(view.Len()),
 			telemetry.KeyTreeDepth.Int(view.TreeDepth()))
-		body, err := listCollectionsJSON(ctx, view)
+		body, err := listCollectionsJSON(ctx, view, mem.Refreshing)
 		if err != nil {
 			telemetry.Fail(span, telemetry.OutcomeError)
 			return nil, fmt.Errorf("encode collections: %w", err)
@@ -1197,7 +1243,7 @@ type contractSummary struct {
 // no identity to restrict against, the same reasoning mk_save_memory's
 // AllowAnonymousPersonal applies to anonymous/local mode (see
 // memory.go).
-func listCollectionsJSON(ctx context.Context, view *collections.Registry) (string, error) {
+func listCollectionsJSON(ctx context.Context, view *collections.Registry, running refreshSlots) (string, error) {
 	g := authz.FromContext(ctx)
 	out := make([]collectionSummary, 0, view.Len())
 	for _, c := range view.All() {
@@ -1207,7 +1253,7 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry) (strin
 			Source:       c.Provenance(),
 			Capabilities: g.Capabilities(c.Name).Strings(),
 			Description:  c.Description(),
-			Refresh:      c.ReloadStatuses(),
+			Refresh:      running.of(c.Name, c.ReloadStatuses()),
 		}
 		if f, ok := c.Freshness(); ok {
 			entry.Freshness = &f
