@@ -107,7 +107,7 @@ func (r Runner) LsRemote(ctx context.Context, url, branch string) (string, error
 // hardened is the prefix every in-repository call gets: no hooks, no
 // fsmonitor (which executes a configured program), no optional index
 // writes. It does not neutralise the repository's own config otherwise;
-// that residual is the operator's opt-in (docs/SECURITY.md).
+// that residual is the operator's opt-in (docs/THREAT-MODEL.md).
 func (r Runner) hardened(args ...string) []string {
 	return append([]string{
 		"-c", "core.hooksPath=/dev/null",
