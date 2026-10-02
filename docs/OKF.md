@@ -154,7 +154,7 @@ $ mk show tables/orders --json
 
 `trust_tier` is advisory metadata the bundle's producer asserted, not
 something meerkat checks — see
-[SECURITY.md](SECURITY.md#okf-trust_tier-is-advisory-not-verified).
+[THREAT-MODEL.md](THREAT-MODEL.md#okf-trust_tier-is-advisory-not-verified).
 
 ## `type` as a filter
 

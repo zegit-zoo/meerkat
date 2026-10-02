@@ -372,7 +372,7 @@ endpoint keeps requiring one. Add an `anonymous: true` rule:
 A published collection is an **intentional disclosure surface**: its
 pages, IDs, frontmatter and its `update:` contract — including a
 `merge-request` repo URL — are readable by anyone who can reach the
-endpoint. See [docs/SECURITY.md](docs/SECURITY.md#published-collections-are-an-intentional-disclosure-surface).
+endpoint. See [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md#published-collections-are-an-intentional-disclosure-surface).
 
 Full schema: [content-source.example.yaml](content-source.example.yaml).
 Design and threat reasoning: [docs/design/hosted-mcp.md](docs/design/hosted-mcp.md).
@@ -749,7 +749,7 @@ the version in `url`) to match; nothing re-fetches on its own.
 
 See [content-source.example.yaml](content-source.example.yaml) for the full
 schema (including `layout:`), and
-[docs/SECURITY.md](docs/SECURITY.md#kb_commit-vs-kb_source-the-provenance-split)
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md#kb_commit-vs-kb_source-the-provenance-split)
 for exactly what the digest does and does not guarantee.
 
 ### `type: gcs`
@@ -1230,7 +1230,7 @@ with `kb_source` unchanged from what it always was.
 the commit of the content **embedded at build time**, never a runtime
 directory's or archive's. On a published release it is therefore `none` —
 the runtime source's provenance is `kb_source`. See
-[docs/SECURITY.md](docs/SECURITY.md#kb_commit-vs-kb_source-the-provenance-split)
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md#kb_commit-vs-kb_source-the-provenance-split)
 for what that split means.
 
 ### OKF bundles
@@ -1460,7 +1460,8 @@ content-source.yaml   optional, never shipped; tells meerkat at runtime —
   [docs/CONTAINER.md](docs/CONTAINER.md) — running the OCI image;
   [docs/RELEASE.md](docs/RELEASE.md) — tagging and the release gate
 - [docs/SEARCH.md](docs/SEARCH.md) — query syntax and the fallback stages;
-  [docs/SECURITY.md](docs/SECURITY.md) — threat model and scanners
+  [docs/SECURITY.md](docs/SECURITY.md) — scanners and findings;
+  [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) — trust boundaries, assets, threats and controls
 - [docs/OKF.md](docs/OKF.md) — serving an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) (Open Knowledge Format) bundle unmodified, and what meerkat does with its frontmatter
 
 Design notes, each linked from the section it explains:

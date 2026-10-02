@@ -122,7 +122,7 @@ func New(ctx context.Context, opts Options) (*Telemetry, error) {
 		// TraceContext ONLY, deliberately. W3C baggage is not propagated
 		// in either direction: meerkat never reads it (trace context is
 		// correlation data, never authorization data — see
-		// docs/SECURITY.md), and forwarding a caller's arbitrary baggage
+		// docs/THREAT-MODEL.md), and forwarding a caller's arbitrary baggage
 		// onto meerkat's outbound OIDC discovery/JWKS calls would push
 		// somebody else's key/value pairs to the identity provider. Not
 		// carrying it is a stronger statement than carrying it carefully.

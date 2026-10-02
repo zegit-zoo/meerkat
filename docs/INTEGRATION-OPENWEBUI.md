@@ -177,4 +177,4 @@ curl -sS -X POST $HOST/show \
 - `docs/SEARCH.md` — what `mk_search` actually does under the hood
 - `docs/INTEGRATION-OPENCODE.md` — same tools over MCP/stdio
 - `docs/INSTALL.md` — install + verify checksums + cosign
-- `docs/SECURITY.md` — full threat model
+- `docs/THREAT-MODEL.md` — full threat model
