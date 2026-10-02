@@ -403,7 +403,7 @@ meerkat ingest [flags]
 #### Flags
 
 ```text
-      --apply                          With --role librarian: file confirmed candidates through their collection's contract. Without it the librarian changes nothing.
+      --apply                          With --role librarian: file confirmed candidates through their collection's contract, file a forge issue for each parked item (contract token_env), and un-park items whose issue was closed as resolved. Without it the librarian changes nothing.
       --batch-file string              Plan-only: write the JSONL batch to this file instead of stdout.
       --branch string                  Push target branch. Overrides the branch derived from content-source.yaml.
       --days int                       With --role librarian: days of traversal log to read for missing-link findings. (default 7)

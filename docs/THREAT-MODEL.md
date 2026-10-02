@@ -43,6 +43,7 @@ flowchart LR
     idp["OIDC issuer"]
     forge["git upstream"]
     gh["GitHub releases and repos"]
+    issues["forge issue API: GitHub, Gitea"]
     otlp["OTLP collector"]
     agent["agent CLI"]
   end
@@ -67,6 +68,7 @@ flowchart LR
   hosted -.->|"spans, opt-in"| otlp
   cli -->|"update, ingest push"| gh
   cli -->|"ingest --execute"| agent
+  cli -->|"librarian --apply: file, read issues"| issues
 ```
 
 Each boundary below names who sits on either side and what authorizes a crossing.
@@ -102,6 +104,9 @@ Each boundary below names who sits on either side and what authorizes a crossing
   - `git ls-remote` and `git pull --ff-only` to a checkout's upstream, under `remote_check` and
     `on_divergence: pull`;
   - GitHub, for `mk update` and `mk ingest`;
+  - the issue API of a collection's forge (GitHub or Gitea), for `mk ingest --role librarian
+    --apply`, only when that collection's `merge-request` contract names a `token_env` and the
+    variable is set; the API host is derived from the contract's `repo`;
   - an OTLP collector, under `observability:`;
   - the agent CLI that `mk ingest --execute` spawns.
 
@@ -125,6 +130,8 @@ The classification uses the company taxonomy: `public`, `internal`, `confidentia
 | Traversal-log HMAC key | environment (`hmac_key_env`) | `restricted` | none | never in configuration |
 | GitHub token (`mk update`, `mk ingest`) | `gh` auth cache, then one env var per subprocess | `restricted` | none | never written |
 | Collector credentials | environment (`headers_env`) | `restricted` | none | never in configuration |
+| Forge issue token (librarian) | environment, the variable an update contract's `token_env` names | `restricted` | none | never in configuration; read per run |
+| Needs-human forge issues | the forge repo of the target collection's update contract | the repo's visibility | `identifier` (initial question) | the forge's; meerkat never deletes them |
 | Release binaries, checksums, signatures | GitHub releases, OCI registry | `public` | none | permanent |
 
 ## The disclosure rule
@@ -157,7 +164,7 @@ The rule is a control with a test behind it, not a convention.
 
 ## Where identifiable request data persists
 
-Request data that can identify a caller, or reveal what they asked, persists in four places.
+Request data that can identify a caller, or reveal what they asked, persists in five places.
 All other request data lives only in memory for the duration of the request.
 
 1. **The traversal log** (`observability.traversal_log`, opt-in). It stores one entry per
@@ -174,6 +181,11 @@ All other request data lives only in memory for the duration of the request.
    for authenticated requests. Retention is whatever the operator's log pipeline keeps.
 4. **Personal memories.** These are content the caller chose to save, stored under a namespace
    derived from their identity.
+5. **Forge issues for parked intake items** (meerkat-mob #19, opt-in per collection through
+   `token_env`). `mk ingest --role librarian --apply` files one issue per parked item on the
+   target collection's forge. Its body carries the initial question and the attempted path, which
+   names collections in plaintext, beside the parked reason and the validators' failure reasons.
+   It stays on the forge, outside meerkat's control, readable by whoever can read that repo.
 
 ## Threats and controls by surface
 
@@ -200,6 +212,7 @@ is small but worth being explicit about:
 | `mk mcp serve-http` access logs | Credential or membership disclosure via logging | The `Authorization` header, the raw token, group membership and request bodies are never logged. Logged: method, path, status, duration, bytes, peer, user agent, MCP session ID, and (authenticated only) `sub`/`issuer`/`tenant` — an audit trail without a directory dump. `X-Forwarded-For` is deliberately **not** consulted: it is client-controlled unless a trusted proxy rewrites it, and meerkat has no way to know that. **The server has no TLS of its own**; default bind is loopback. Exposed beyond one host without a TLS-terminating proxy, bearer tokens and every response body cross the network in plaintext. |
 | `mk mcp serve-http` **telemetry export** (`observability:`) | Request metadata leaving the process to a collector — frequently a shared one, frequently a third party's — and carrying more than the operator realised; a plaintext export across a cluster network; a collector credential ending up in a committed config file; an exporter outage becoming an availability incident | **Opt-in and off by default.** With no `observability:` block and no `OTEL_*` variable no SDK is constructed at all — no spans, no exporter, no goroutine, no socket — and `/metrics` and the JSON logs are byte-identical to what they were (pinned by `TestObservability_ZeroConfigurationChangesNothing`). **Data classification:** a span is exported OUT of the trust boundary, so it is held to a stricter rule than the access log beside it. Spans and the new metrics carry only counts, durations, booleans, outcomes from a closed set, the server's own matched route pattern, and a collection's configuration ORDINAL. Never: query text, page IDs, page or memory content, tags, memory keys, collection names, bucket/object/prefix names, bearer tokens, any OAuth claim, the OIDC subject/email/groups/tenant, MCP session IDs, or `r.URL.Path`. The access log deliberately still carries `sub`/`issuer`/`tenant` — it stays on the operator's stderr; identity is **not** on a default span, and correlating a trace to a principal is a separate decision that has not been made. Error TEXT is never recorded on a span either (meerkat's messages quote queries, collection names, buckets); spans get a classified outcome and the log gets the sentence. `TestObservability_NoSpanOrMetricCarriesAForbiddenValue` drives every read surface and walks every recorded span and metric label asserting each of those classes is absent. **TLS on by default:** a plaintext `http://` collector endpoint is refused at config load unless `otlp.insecure: true` is written out, and `OTEL_EXPORTER_OTLP_INSECURE` cannot revoke a posture the file stated. **No credentials in `content-source.yaml`:** there is no `headers:` field, only `headers_env:`, which names an environment variable read at startup — the same reasoning that gives `type: gcs` no key-file field, and a test asserts the schema marshals no `headers:`/`token:`/`api_key:`/`password:` key. **No inbound surface:** the collector endpoint comes from configuration/environment only; no MCP request, header or tool argument can name an endpoint or add a header. Trace context is correlation data, never authorization data, and W3C baggage is not propagated in either direction. **Never an availability dependency:** the span queue is bounded and drops rather than growing (`meerkat_otel_spans_dropped_total`), export failures are counted (`meerkat_otel_export_failures_total`) and log-rate-limited, and the shutdown flush is bounded, so a dead collector cannot fail `/readyz`, fail a search or hold a pod in Terminating. See [design/observability.md](design/observability.md). |
 | `mk http serve` API key, and the traffic it guards | Disclosure — in code/logs, or on the wire | Key comparison is constant-time (`subtle.ConstantTimeCompare`), the key is never echoed, and the server refuses to start without one. **The server has no TLS of its own** (`ListenAndServe`, never `ListenAndServeTLS`) — default bind is loopback (`127.0.0.1`). Exposed beyond one host without a TLS-terminating reverse proxy in front, the bearer token and every response body cross the network in plaintext. See `docs/INTEGRATION-OPENWEBUI.md` for the reverse-proxy pattern. |
+| `mk ingest --role librarian --apply` files and reads forge issues (meerkat-mob #19) | The forge token sent to a host the operator did not choose; the token leaking through config, logs or errors; content forging an un-park; request data published beyond the deployment | **The operator chooses both the credential and the host.** `token_env` names an environment variable; a value not shaped like a variable name is refused at load, so a pasted token fails before it is committed. Only `content-source.yaml` may set it: a `manifest.yaml` naming `token_env`, in its contract or a child's source, is refused at load (`TestManifest_RefusesTokenEnv`, `TestResolveRuntimeCollections_TreeTokenEnvOnlyFromOperator`), since a manifest is written by the KB maintainer and would otherwise pick a variable from the librarian's environment and, through `repo`, the host it goes to. The API endpoint is derived from that `repo` only (`forge.Resolve`), always https; nothing a page or issue supplies is followed. `Resolve` accepts only a host name (no `/`, so an scp-style `git@evil/x:o/r` is refused) and path segments of `[A-Za-z0-9._-]`, and refuses `?`, `#` and `%` anywhere in the address, so nothing in it can move the token to another API path (`TestResolve_Rejects`). **The token** is never logged or put in an error (`TestCall_ErrorsNeverCarryTheToken`); requests use one 30 s timeout and a 1 MiB response cap, and every listing is capped at ten pages. **Un-parking** follows only an issue on the forge the contract names now, compared by host kind, API root and repo, so a contract moved from `github.com/org/x` to a GitHub Enterprise `org/x` does not follow the old issue (`TestEscalate_ForeignIssueReferenceIsNotFollowed`, `TestEscalate_SameSlugOnAnotherServerIsNotFollowed`). A parked reason cannot forge the marker's `## forge issue` section (`TestPark_ReasonCannotForgeTheIssueSection`), and a marker written before forge issues existed, whose reason was not quoted, is never read as an issue reference (`TestParkedDetail_LegacyMarkerIsNeverAnIssueReference`). **Issue text** fences agent- and validator-written text, and renders the one-line fields (the attempted path an agent sent to `mk_report_outcome`, the collection derived from it) as code spans with backticks and control characters replaced, so a mention or link in them neither pings anyone nor renders (`TestIssueBody_AgentTextCannotLeaveItsCodeSpan`); `mk_report_outcome` refuses list entries with backticks or control characters in the first place. **Duplicates:** a filing is claimed in the marker before the forge call, and an unrecorded earlier claim makes the next run adopt the issue it finds by the marker's first line instead of filing again; a duplicate that still slips through is reported by URL (`TestEscalate_AdoptsTheIssueAnInterruptedRunFiled`, `TestEscalate_ConcurrentFilingReportsTheDuplicate`). **Telemetry:** `meerkat_librarian_filed_issues_total` is labelled by forge kind from a closed set; no URL, repo or title is a label. What the issue discloses is in [Where identifiable request data persists](#where-identifiable-request-data-persists). |
 | `mk ingest --execute` spawns an agent CLI (`opencode` or `claude`) | Prompt injection: `Task.Prompt` is rendered from `ingestion/prompts/*.md` in the ingested content source, so a malicious prompt file in any source repo in `sources.yaml` is an arbitrary-action path, running with `cmd.Dir`/`--dir` set to a working copy that holds push credentials, at the operator's full privilege. The generated instruction itself includes a `git push` recipe. | Ingested content is treated as **trusted input** to the agent — meerkat does not sandbox or vet it. The real control is permission prompts: by default the agent CLI runs *with* its normal permission prompts, so an injected instruction still has to get past those before it acts. `--trust-sources` disables the prompts (passes `--dangerously-skip-permissions` to the agent CLI) for unattended/CI runs; it prints a stderr warning before executing. Operators who enable `--trust-sources` must trust every source repo listed in `sources.yaml` — as much as they trust code they'd merge unreviewed. |
 | Templates / prompts / sources.yaml | Tampering at build time | Embedded at build time; `make security` includes them in the gosec walk. **When served from a runtime content source instead** (`--kb-dir`/`MEERKAT_KB_DIR`, or a `content-source.yaml` `type: local`/`type: url`/`type: gcs`/`type: s3` source), the rows above apply here too: unverified for `disk:<path>`, digest-verified (with the same caveats) for `url:<url>@...`, version-pinned for `gcs://...` (generation) and `s3://...` (ETag) — either way, outside the gosec walk and the cosign-signed release. |
 
@@ -493,6 +506,7 @@ same PR that closes it.
 | Disclosure channel is the advisory form only, with a 7-day target and no embargo or timeline | No policy document existed | #125 (MK-A-2), #126 (MK-A-3) |
 | `master` requires signatures but no review and no green CI | The ruleset predates the compliance programme | MK-A-1 under #68 |
 | No asset catalogue and no per-operation declarations | Waits on the company catalogue format (CO-F) | MK-A-4, MK-A-5 under #68 |
+| A needs-human issue on a public repo publishes the initial question and collection names | The issue exists so the people who own the collection see the disagreement where they work. meerkat cannot tell a public repo from a private one with an issue-write token, and does not redact the question | accepted; opt-in per collection via `token_env`, documented in [intake.md](design/intake.md#forge-issues-for-parked-items) |
 | Session-less MCP callers share one freshness-advisory bucket | One principal's session-less call can use up another's advisory: a missed line, never a disclosure | accepted ([hosted-mcp.md](design/hosted-mcp.md)) |
 
 ## Keeping this current

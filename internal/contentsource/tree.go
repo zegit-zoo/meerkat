@@ -303,6 +303,9 @@ func (m Manifest) Validate() error {
 		if err := m.Contract.Validate("manifest.contract"); err != nil {
 			return err
 		}
+		if err := refuseManifestTokenEnv(ManifestFile+": contract", m.Contract); err != nil {
+			return err
+		}
 	}
 	seen := make(map[string]bool, len(m.Children))
 	for i, c := range m.Children {
@@ -329,8 +332,27 @@ func (m Manifest) Validate() error {
 		if err := src.validate(p + ".source"); err != nil {
 			return err
 		}
+		if err := refuseManifestTokenEnv(p+".source.update", src.Update); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// refuseManifestTokenEnv keeps token_env out of a manifest. token_env
+// names an environment variable whose value the librarian sends, as a
+// bearer token, to the host the same contract's repo names
+// (meerkat-mob #19). A manifest is written by whoever maintains the
+// knowledge base, not by the operator, so a token_env there would let
+// content pick any variable in the librarian's environment and the host
+// it is sent to. Only content-source.yaml, the operator's file, may name
+// one.
+func refuseManifestTokenEnv(label string, u *UpdateSpec) error {
+	if u == nil || u.TokenEnv == "" {
+		return nil
+	}
+	return fmt.Errorf("%s.token_env is refused in %s: it names a credential the librarian sends to the contract's repo host, "+
+		"so only the operator's content-source.yaml may set it", label, ManifestFile)
 }
 
 // effectiveLimits fills zero fields from DefaultLimits.

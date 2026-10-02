@@ -342,6 +342,17 @@ func (s *S3Store) Put(ctx context.Context, key string, body []byte, pre Precondi
 	return etagVersion(etag), nil
 }
 
+// Delete implements Deleter; a missing key is not an error.
+func (s *S3Store) Delete(ctx context.Context, key string) error {
+	if err := checkKey(key); err != nil {
+		return err
+	}
+	if err := s.api.Delete(ctx, s.bucket, s.object(key)); err != nil {
+		return fmt.Errorf("delete %s: %w", s.Location(key), err)
+	}
+	return nil
+}
+
 // Stage implements Store: an unconditional write under the staging
 // prefix, where nothing is ever updated in place.
 func (s *S3Store) Stage(ctx context.Context, key string, body []byte) (string, error) {

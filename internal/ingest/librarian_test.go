@@ -104,7 +104,9 @@ func TestLibrarian_ReportsWithoutModifying(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(applied) != 1 || applied[0].Action != "filed" {
+	// it1 is filed; parked it3 has no candidate and so no forge.
+	if len(applied) != 2 || applied[0].Action != "filed" || applied[1].IntakeID != "it3" ||
+		applied[1].Detail != "no forge for unrouted; a human must look at parked/it3.md" {
 		t.Fatalf("applied = %+v", applied)
 	}
 	recs, _ = flux.Memory().Load(ctx)

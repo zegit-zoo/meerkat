@@ -1092,7 +1092,7 @@ collections:
     update:                      # …but maintained in git, so contributions
       method: merge-request      # go there: direct | merge-request | none
       repo: https://github.com/example-org/handbook.git
-      host: github               # github | gitlab | other — which CLI to use
+      host: github               # github | gitlab | gitea | other — which CLI to use
       branch: main
       path: wiki                 # where pages live in the CONTRIBUTION repo
       instructions: |

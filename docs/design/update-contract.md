@@ -40,9 +40,12 @@ Two properties carry the design:
 ## Non-goals
 
 - **meerkat opening merge requests.** The contract is *instructions*.
-  meerkat never clones, never pushes, never talks to a forge. The agent
-  does that with its own credentials, which is also why the
-  merge-request path needs no meerkat capability at all.
+  meerkat never clones, never pushes, never opens a merge request. The
+  agent does that with its own credentials, which is also why the
+  merge-request path needs no meerkat capability at all. The one forge
+  call meerkat makes is the librarian's needs-human issue for a parked
+  intake item, and only when the contract names a `token_env`
+  ([below](#token_env-the-librarians-forge-issues)).
 - **Performing direct writes.** `method: direct` describes an existing
   capability (the memory toolset, a mounted volume, a bucket the agent
   can reach); it does not add a write surface. The only writes meerkat
@@ -78,10 +81,10 @@ worse at it. So the contract's job is to hand an agent the four facts it
 cannot derive — **repo**, **host**, **branch**, **path** — plus the
 operator's own prose, and then get out of the way.
 
-`host:` (`github` | `gitlab` | `other`) exists for exactly one reason: it
-tells an agent which CLI mechanics to reach for (`gh pr create`,
-`glab mr create`, or neither). It is not a network endpoint; meerkat
-never contacts it.
+`host:` (`github` | `gitlab` | `gitea` | `other`) tells an agent which CLI
+mechanics to reach for (`gh pr create`, `glab mr create`, `tea`, or
+neither). meerkat contacts it only to file a needs-human issue, when the
+contract also names a `token_env`.
 
 ## Declared, not inferred
 
@@ -135,13 +138,14 @@ collections:
     update:
       method: merge-request
       repo: https://github.com/example-org/handbook.git   # or git@…:…, ssh://…
-      host: github               # github | gitlab | other   (default: other)
+      host: github               # github | gitlab | gitea | other   (default: other)
       branch: main               # default: main
       path: wiki                 # where pages live in the CONTRIBUTION repo
       instructions: |
         Fork example-org/handbook to your own account; we do not take
         branches on the upstream repo. One page per pull request.
         …
+      token_env: HANDBOOK_ISSUES_TOKEN   # optional: the librarian's forge issues
 
   - name: scratch
     type: local                  # a writable directory this deployment owns
@@ -160,10 +164,11 @@ any other.
 | `description` | no | ≤ 500 characters. It is rendered into an agent's context every time collections are listed; long-form guidance belongs in `instructions`. |
 | `update.method` | **yes, if the block is present** | `direct` \| `merge-request` \| `none`. Not defaulted: a block whose method could be inferred would let a typo'd key silently mean "none". |
 | `update.repo` | for `merge-request` | `https://`, `ssh://`, or `git@host:owner/repo`. An `owner/repo` slug is refused — it names no host, and the contribution repo need not be on the host the content is served from. |
-| `update.host` | no | `github` \| `gitlab` \| `other`. Defaults to `other`. |
+| `update.host` | no | `github` \| `gitlab` \| `gitea` \| `other`. Defaults to `other`. |
 | `update.branch` | no | Defaults to `main`. |
 | `update.path` | no | Repo-relative. Deliberately *not* defaulted from `layout.wiki`: that describes the serving mirror. |
 | `update.instructions` | no | Free-text, multiline. Allowed for `direct` too (a directly-writable collection still has a page format), refused for `none` (there is no path to describe). |
+| `update.token_env` | no | `merge-request` only. The NAME of an environment variable holding a forge token with issue-write on `repo`; see below. A value not shaped like a variable name (upper-case letters, digits, `_`, at most 64) is refused, so a pasted token fails at load. |
 
 **Misplaced fields are errors, not ignored lines.** `repo:` under
 `method: direct` is refused, as is `instructions:` under `method: none`.
@@ -177,6 +182,41 @@ refused at load. The contract is rendered to *every caller who can see
 the collection*, so a token in that URL is a token handed to all of them.
 Refusing it at startup beats redacting it on one surface and forgetting
 the next. (An `ssh://git@host/…` login name is not a secret and is fine.)
+
+### `token_env`: the librarian's forge issues
+
+When an intake item is parked for a human (validators disagreed, or one
+answered `needs-human:`), `mk ingest --role librarian --apply` files one
+issue about it on the target collection's forge — the `repo` of its
+`merge-request` contract, through the `host` API (`github`, including
+GitHub Enterprise Server at `https://<host>/api/v3`, or `gitea`; `gitlab`
+and `other` are reported as not supported yet). The token is read at run
+time from the environment variable `token_env` names, and nowhere else:
+never from config, never from a page. Without `token_env`, or with the
+variable unset, nothing is filed and the run says why; it does not fail.
+Give the identity behind the token issue-write on that repo and nothing
+more. The API address is derived from `repo` alone, and only from a plain
+one: a host name (with an optional port for `https://`) and `owner/repo`
+segments (plus a Gitea sub-path) of letters, digits, `.`, `_` and `-`,
+with no query, fragment or percent-escape. Any other address is reported
+as `skipped` and nothing is sent. The flow, the issue body and the `resolved` rule are in
+[intake.md](intake.md#forge-issues-for-parked-items).
+
+`token_env` is not part of the rendered contract (`Contract` /
+`EffectiveContract`): an agent has no use for the librarian's variable
+name.
+
+**Only `content-source.yaml` may set it.** A `manifest.yaml` that names
+`token_env`, in its `contract:` or in a child's `source.update`, is
+refused at load. A manifest is written by whoever maintains the knowledge
+base, not by the operator, and `token_env` chooses both a credential from
+the librarian's environment and, through the same contract's `repo`, the
+host it is sent to. In a tree, the operator sets it on the `tree:`
+source's own `update:` block, which takes precedence over the root
+manifest's `contract:`. A tree's other members come only from manifests,
+so their parked items are reported as `skipped` (no `token_env`) and
+stay with a human; per-member tokens in operator configuration are a
+later change.
 
 ## Effective rendering
 

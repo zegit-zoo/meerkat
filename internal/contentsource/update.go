@@ -42,13 +42,16 @@ const (
 	UpdateMergeRequest = "merge-request"
 )
 
-// Contribution host values for a merge-request contract. The host does
-// not change what meerkat does — meerkat never talks to a forge — it
-// tells an AGENT which CLI mechanics to reach for (`gh pr create`,
-// `glab mr create`, or neither).
+// Contribution host values for a merge-request contract. For an agent
+// the host selects the CLI mechanics to reach for (`gh pr create`,
+// `glab mr create`, `tea`, or neither). meerkat itself talks to the
+// forge in exactly one place: the librarian files a needs-human issue
+// for a parked intake item when the contract also names a token_env
+// (internal/forge, meerkat-mob #19).
 const (
 	UpdateHostGitHub = "github"
 	UpdateHostGitLab = "gitlab"
+	UpdateHostGitea  = "gitea"
 	// UpdateHostOther is the default: a forge meerkat has no opinion
 	// about. An agent should follow `instructions:` and plain git.
 	UpdateHostOther = "other"
@@ -74,11 +77,12 @@ const maxDescriptionLen = 500
 //	update:
 //	  method: merge-request
 //	  repo: https://github.com/example-org/handbook.git
-//	  host: github              # github | gitlab | other
+//	  host: github              # github | gitlab | gitea | other
 //	  branch: main              # default "main"
 //	  path: wiki                # where pages live in the CONTRIBUTION repo
 //	  instructions: |
 //	    Fork, branch, open a PR. …
+//	  token_env: HANDBOOK_ISSUES_TOKEN  # optional; see TokenEnv
 //
 // Absent (the default), the collection declares no contribution path and
 // agents are told so rather than left to guess.
@@ -100,7 +104,9 @@ type UpdateSpec struct {
 	Repo string `yaml:"repo,omitempty"`
 
 	// Host selects the CLI mechanics an agent should reach for:
-	// github | gitlab | other. Defaults to other.
+	// github | gitlab | gitea | other. Defaults to other. It is also the
+	// forge API the librarian files needs-human issues through when
+	// TokenEnv is set.
 	Host string `yaml:"host,omitempty"`
 
 	// Branch is the merge request's target branch. Defaults to
@@ -118,6 +124,14 @@ type UpdateSpec struct {
 	// Think of it as the skill an operator would otherwise have to
 	// explain to every contributor by hand.
 	Instructions string `yaml:"instructions,omitempty"`
+
+	// TokenEnv NAMES the environment variable that holds a forge token
+	// with issue-write on Repo. The librarian reads it at run time to
+	// file an issue for a parked (needs-human) intake item; without it
+	// no issue is filed and the run says why. It is the variable's name,
+	// never the token: credentials come from the environment, and the
+	// contract is rendered to callers.
+	TokenEnv string `yaml:"token_env,omitempty"`
 }
 
 // DeclaredMethod returns the method the operator declared, nil-safe: an
@@ -149,6 +163,7 @@ func (u *UpdateSpec) Normalize() {
 	// plausible-looking path instead of the error it gets.
 	u.Path = strings.TrimRight(strings.TrimSpace(u.Path), "/")
 	u.Instructions = strings.TrimSpace(u.Instructions)
+	u.TokenEnv = strings.TrimSpace(u.TokenEnv)
 	if u.Method != UpdateMergeRequest {
 		return
 	}
@@ -201,12 +216,15 @@ func (u *UpdateSpec) Validate(label string) error {
 			return err
 		}
 		switch u.Host {
-		case UpdateHostGitHub, UpdateHostGitLab, UpdateHostOther, "":
+		case UpdateHostGitHub, UpdateHostGitLab, UpdateHostGitea, UpdateHostOther, "":
 		default:
-			return fmt.Errorf("%s.host must be one of %s|%s|%s, got %q — it selects the CLI mechanics an agent reaches for, not a network endpoint",
-				label, UpdateHostGitHub, UpdateHostGitLab, UpdateHostOther, u.Host)
+			return fmt.Errorf("%s.host must be one of %s|%s|%s|%s, got %q — it selects the CLI mechanics an agent reaches for, not a network endpoint",
+				label, UpdateHostGitHub, UpdateHostGitLab, UpdateHostGitea, UpdateHostOther, u.Host)
 		}
 		if err := validateContributionPath(label, u.Path); err != nil {
+			return err
+		}
+		if err := validateTokenEnv(label, u.TokenEnv); err != nil {
 			return err
 		}
 	default:
@@ -219,7 +237,7 @@ func (u *UpdateSpec) Validate(label string) error {
 // merge-request contract, so a rejection can list exactly what was
 // misplaced.
 func (u *UpdateSpec) mergeRequestFields() []string {
-	fields := make([]string, 0, 4)
+	fields := make([]string, 0, 5)
 	if u.Repo != "" {
 		fields = append(fields, "repo")
 	}
@@ -232,7 +250,35 @@ func (u *UpdateSpec) mergeRequestFields() []string {
 	if u.Path != "" {
 		fields = append(fields, "path")
 	}
+	if u.TokenEnv != "" {
+		fields = append(fields, "token_env")
+	}
 	return fields
+}
+
+// validateTokenEnv checks that token_env is shaped like an environment
+// variable NAME. The check exists to catch the one mistake that matters:
+// pasting the token itself into the config, where it would be committed
+// and rendered. A token has lowercase letters, dashes or is far longer
+// than any variable name an operator would write.
+func validateTokenEnv(label, name string) error {
+	if name == "" {
+		return nil
+	}
+	ok := len(name) <= 64
+	for i, r := range name {
+		switch {
+		case r == '_', r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			ok = false
+		}
+	}
+	if !ok {
+		return fmt.Errorf("%s.token_env must NAME an environment variable (upper-case letters, digits, underscores; at most 64), not hold the token — "+
+			"a credential in content-source.yaml is committed and rendered; export the token and put the variable's name here", label)
+	}
+	return nil
 }
 
 // validateContributionRepo checks that repo names a host and carries no

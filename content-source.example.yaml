@@ -411,10 +411,10 @@ content:
   #                                  # rendered to every caller who can see this
   #                                  # collection, so a token here is a token
   #                                  # handed to them. Refused at load time.
-  #   host: github                   # github | gitlab | other (default: other).
-  #                                  # Selects the CLI mechanics an AGENT reaches
-  #                                  # for (gh / glab / plain git); meerkat never
-  #                                  # contacts it.
+  #   host: github                   # github | gitlab | gitea | other (default:
+  #                                  # other). Selects the CLI mechanics an AGENT
+  #                                  # reaches for (gh / glab / tea / plain git).
+  #                                  # meerkat contacts it only with token_env.
   #   branch: main                   # the merge request's target (default: main)
   #   path: wiki                     # where pages live in the CONTRIBUTION repo.
   #                                  # NOT derived from layout.wiki above, which
@@ -427,6 +427,14 @@ content:
   #     Fork example-org/handbook to your own account and open the pull
   #     request from that fork; the upstream repo does not take branches.
   #     One page per pull request.
+  #   token_env: HANDBOOK_ISSUES_TOKEN # optional. The NAME of an environment
+  #                                  # variable holding a token with issue-write
+  #                                  # on repo (never the token itself). With it,
+  #                                  # `mk ingest --role librarian --apply` files
+  #                                  # one needs-human issue per parked intake
+  #                                  # item (github or gitea) and un-parks the
+  #                                  # item when the issue is closed with the
+  #                                  # `resolved` label. docs/design/intake.md.
   #
   #   # (b) method: direct — this collection's own backend IS the source of
   #   #     truth and may be written to. Valid ONLY for type: local (a
