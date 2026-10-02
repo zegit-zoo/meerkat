@@ -486,6 +486,7 @@ into `admin` (folding it in would have retroactively widened every
 | `/readyz` | none | can it serve requests right now |
 | `/metrics` | none | Prometheus |
 | `/.well-known/oauth-protected-resource[/…]` | none, by definition | where to get a token |
+| `/.well-known/security.txt` | none, by definition | who to tell about a vulnerability in meerkat (RFC 9116; `--security-txt=false` turns it off, #126) |
 | `/mcp` | OIDC | the MCP transport |
 
 The probes and metrics are unauthenticated because an orchestrator and a
