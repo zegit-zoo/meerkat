@@ -25,7 +25,14 @@ type outcomeFixture struct {
 	intake string
 }
 
+// newOutcomeFixture's traversal log keeps queries, as a librarian's
+// deployment does; newOutcomeFixtureWith takes the query mode.
 func newOutcomeFixture(t *testing.T) outcomeFixture {
+	t.Helper()
+	return newOutcomeFixtureWith(t, traversal.QueryPlaintext)
+}
+
+func newOutcomeFixtureWith(t *testing.T, query string) outcomeFixture {
 	t.Helper()
 	reg, err := collections.New(collections.FromPages("flux", []kb.Page{{ID: "concepts/drift", Title: "Drift", Body: "flux helmrelease drift"}}))
 	if err != nil {
@@ -33,7 +40,7 @@ func newOutcomeFixture(t *testing.T) outcomeFixture {
 	}
 	logDir := t.TempDir()
 	t.Setenv("MEERKAT_TEST_PATH_KEY", "not a secret, a test key long enough")
-	log, err := traversal.Open(context.Background(), &traversal.Config{Backend: "local", Path: logDir, HMACKeyEnv: "MEERKAT_TEST_PATH_KEY"}, nil)
+	log, err := traversal.Open(context.Background(), &traversal.Config{Backend: "local", Path: logDir, HMACKeyEnv: "MEERKAT_TEST_PATH_KEY", Query: query}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +132,28 @@ func TestReportOutcome_GaveUpWithFallbackWritesIntakeAndLog(t *testing.T) {
 	}
 	if !strings.Contains(line, "how do I rotate the datadog api key") || !strings.Contains(line, `"outcome":"gave_up"`) || !strings.Contains(line, `"intake_id":"raw/`) || !strings.Contains(line, `"hops":2`) {
 		t.Errorf("log line lacks the query, outcome, intake id or hops: %s", line)
+	}
+}
+
+// With no `query:` in the traversal-log block, the report is still
+// logged and the intake page still carries the question, but the log
+// line has no query (#124, MK-A-6).
+func TestReportOutcome_LogOmitsTheQueryByDefault(t *testing.T) {
+	f := newOutcomeFixtureWith(t, "")
+	out := callOutcome(t, context.Background(), f, map[string]any{
+		"session_id": "sess-7", "outcome": "gave_up", "initial_query": "rotate the payroll api key",
+		"attempted": []any{"flux"},
+		"fallback":  map[string]any{"kind": "web", "summary": "Rotate it in the console.", "sources": []any{"https://example.com/doc"}},
+	})
+	if out["recorded"] != true || out["logged"] != true {
+		t.Fatalf("response = %v", out)
+	}
+	lines := logLines(t, f.logDir)
+	if len(lines) != 1 || strings.Contains(lines[0], "payroll") || strings.Contains(lines[0], "initial_query") {
+		t.Errorf("the default traversal log stored the query: %v", lines)
+	}
+	if pages := intakeFiles(t, f.intake); len(pages) != 1 || !strings.Contains(pages[0], `"question":"rotate the payroll api key"`) {
+		t.Errorf("the intake page lost its question: %v", pages)
 	}
 }
 

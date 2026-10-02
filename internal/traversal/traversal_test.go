@@ -26,7 +26,7 @@ func TestConfigValidate(t *testing.T) {
 		{"s3 no bucket", &Config{Backend: "s3", HMACKeyEnv: "K"}, "bucket is required"},
 		{"s3 bad endpoint", &Config{Backend: "s3", Bucket: "b", Endpoint: "s3.example.net", HMACKeyEnv: "K"}, "http(s)://"},
 		{"no key env", &Config{Backend: "local", Path: "/x"}, "hmac_key_env is required"},
-		{"negative retention", &Config{Backend: "local", Path: "/x", HMACKeyEnv: "K", RetentionDays: -1}, "retention_days"},
+		{"negative retention", &Config{Backend: "local", Path: "/x", HMACKeyEnv: "K", RetentionDays: intPtr(-1)}, "retention_days"},
 	}
 	for _, c := range cases {
 		err := c.cfg.Validate("observability.traversal_log")
@@ -71,6 +71,7 @@ func TestRecord_HashesIdentityKeepsShapeAndQuery(t *testing.T) {
 	dir := t.TempDir()
 	sink := &localSink{dir: filepath.Join(dir, "telemetry", "paths")}
 	l := NewLog(sink, []byte("not a secret, a test key long enough"), 0)
+	l.queries = true // as Open sets it for `query: plaintext`
 	fixed := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
 	l.now = func() time.Time { return fixed }
 
@@ -150,3 +151,5 @@ func TestPrune_RetentionIsAnApplicationJob(t *testing.T) {
 		t.Error("DeleteDay must refuse a non-day argument")
 	}
 }
+
+func intPtr(n int) *int { return &n }

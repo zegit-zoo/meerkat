@@ -1160,7 +1160,9 @@ At the end of a retrieval an agent reports how it went: the outcome,
 its first query verbatim, the pages that answered, the collections it
 tried, quality scores, and what it did instead when meerkat did not
 have it. Every report is counted; with `observability.traversal_log`
-configured it is also written as an HMAC-hashed path record, and with an
+configured it is also written as an HMAC-hashed path record, kept 90 days
+by default. The first query is stored only with `query: plaintext` in that
+block, which a librarian deployment needs. With an
 `intake:` store and the `intake-write` capability a fallback summary
 becomes a draft page for review. See
 [docs/design/observability.md](docs/design/observability.md#retrieval-outcomes-and-the-traversal-log).
