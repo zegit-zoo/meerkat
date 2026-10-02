@@ -161,3 +161,7 @@ listing), `meerkat_librarian_findings_total{kind}`,
 - Attachments under `raw/<…>/<id>/attachments/`; the layout leaves
   room for them.
 - A mongoose executor; the executor seam is unchanged.
+- The copied-authority refactor (replacing pages copied from an
+  authority with pointers to the tools it exposes, such as its MCP
+  server) is designed, not built, in
+  [copied-authority-refactor.md](copied-authority-refactor.md).
