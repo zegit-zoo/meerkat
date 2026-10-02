@@ -40,6 +40,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/search"
+	"github.com/zegit-zoo/meerkat/internal/wellknown"
 )
 
 // Config controls how the HTTP server is constructed. Zero values
@@ -68,6 +69,11 @@ type Config struct {
 	// Version is the meerkat version surfaced in /openapi.json and
 	// the root banner. Empty falls back to "dev".
 	Version string
+	// NoSecurityTxt stops the server publishing
+	// /.well-known/security.txt (#126). The zero value publishes it: an
+	// operator who serves a security.txt of their own for the host
+	// turns this one off.
+	NoSecurityTxt bool
 	// Collections is the set of knowledge-base collections this server
 	// serves. Nil falls back to a single collection over the
 	// process-global KB filesystem (internal/collections.Global), which
@@ -197,7 +203,7 @@ type route struct {
 // routes' and authGate's behaviour (and TestAuth_DenyByDefault's
 // coverage) automatically.
 func (s *Server) routeTable() []route {
-	return []route{
+	routes := []route{
 		{pattern: "POST /search", handler: s.handleSearch},
 		{pattern: "POST /show", handler: s.handleShow},
 		{pattern: "POST /list", handler: s.handleList},
@@ -210,6 +216,12 @@ func (s *Server) routeTable() []route {
 		{pattern: "GET /healthz", public: true, handler: s.handleHealthz},
 		{pattern: "GET /", public: true, handler: s.handleRoot},
 	}
+	if !s.cfg.NoSecurityTxt {
+		// Public by definition: RFC 9116's reader has no credentials.
+		routes = append(routes, route{pattern: "GET " + wellknown.SecurityTxtPath, public: true,
+			handler: wellknown.SecurityTxtHandler(time.Now).ServeHTTP})
+	}
+	return routes
 }
 
 func (s *Server) routes() {

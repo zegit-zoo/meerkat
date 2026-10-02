@@ -25,9 +25,10 @@ similar clients. The endpoint surface mirrors MCP 1:1.`,
 
 func newHTTPServeCmd() *cobra.Command {
 	var (
-		host   string
-		port   int
-		apiKey string
+		host        string
+		port        int
+		apiKey      string
+		securityTxt bool
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -40,6 +41,9 @@ func newHTTPServeCmd() *cobra.Command {
   GET  /collections   enumerate the mounted collections
   GET  /openapi.json  schema (no auth)
   GET  /healthz       liveness (no auth)
+  GET  /.well-known/security.txt
+                      meerkat's security contact, RFC 9116 (no auth;
+                      --security-txt=false turns it off)
 
 /search, /show and /list take an optional "collection" field; omitted,
 they span every mounted collection.
@@ -72,10 +76,11 @@ Server.`,
 			}
 
 			cfg := mhttp.Config{
-				Addr:        mhttp.ResolveListenAddr(host, port),
-				APIKey:      apiKey,
-				Version:     version,
-				Collections: registry(),
+				Addr:          mhttp.ResolveListenAddr(host, port),
+				APIKey:        apiKey,
+				Version:       version,
+				Collections:   registry(),
+				NoSecurityTxt: !securityTxt,
 			}
 			srv, err := mhttp.New(cfg)
 			if err != nil {
@@ -96,6 +101,9 @@ Server.`,
 	}
 	cmd.Flags().StringVar(&host, "host", "127.0.0.1", "Bind host (use 0.0.0.0 to listen on all interfaces)")
 	cmd.Flags().IntVar(&port, "port", 4004, "Bind port")
+	cmd.Flags().BoolVar(&securityTxt, "security-txt", true,
+		"Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. "+
+			"Turn it off when the host serves a security.txt of its own")
 	cmd.Flags().StringVar(&apiKey, "api-key", "",
 		"Static bearer token. Required (or set MEERKAT_API_KEY).")
 	return cmd

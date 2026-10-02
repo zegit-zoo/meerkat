@@ -24,6 +24,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/refresh"
 	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
+	"github.com/zegit-zoo/meerkat/internal/wellknown"
 )
 
 // hosted.go is the Streamable HTTP transport: `mk mcp serve-http`.
@@ -161,6 +162,9 @@ type HostedConfig struct {
 	// a global. `mk mcp serve-http` sets it, because there it is the only
 	// server there is.
 	SetOTelGlobals bool
+	// NoSecurityTxt stops the server publishing
+	// /.well-known/security.txt (#126). The zero value publishes it.
+	NoSecurityTxt bool
 }
 
 // HostedServer is a running (or runnable) Streamable HTTP MCP server.
@@ -495,6 +499,11 @@ func (s *HostedServer) routes() http.Handler {
 		}
 	}
 
+	if !s.cfg.NoSecurityTxt {
+		// Outside the gate, like the RFC 9728 metadata above: RFC 9116's
+		// reader has no token. It names the software's contact only.
+		mux.Handle("GET "+wellknown.SecurityTxtPath, wellknown.SecurityTxtHandler(time.Now))
+	}
 	mux.HandleFunc("GET "+LivenessPath, s.handleLivez)
 	mux.HandleFunc("GET "+ReadinessPath, s.handleReadyz)
 	mux.Handle("GET "+MetricsPath, promhttp.HandlerFor(s.metrics.reg, promhttp.HandlerOpts{}))
