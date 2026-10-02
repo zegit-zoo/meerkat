@@ -377,8 +377,9 @@ func runLibrarian(cmd *cobra.Command, ctx context.Context, store *intake.Store) 
 		for _, a := range applied {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %s  %s\n", a.Action, a.IntakeID, a.Detail)
 		}
-	} else if len(rep.Fileable) > 0 || len(rep.Promotions) > 0 {
-		fmt.Fprintln(cmd.ErrOrStderr(), "nothing filed; add --apply to file the confirmed candidates and root pointers through their contracts")
+	} else if len(rep.Fileable) > 0 || len(rep.Promotions) > 0 || len(rep.Parked) > 0 {
+		fmt.Fprintln(cmd.ErrOrStderr(), "nothing filed; add --apply to file the confirmed candidates and root pointers through their contracts, "+
+			"and a forge issue for each parked item whose collection's contract names a token_env")
 	}
 	if len(rep.PromptQuality) == 0 {
 		return nil

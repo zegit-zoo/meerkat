@@ -188,6 +188,11 @@ func TestReportOutcome_ValidationAndGating(t *testing.T) {
 		{"outcome": "gave_up", "fallback": map[string]any{"kind": "web"}},
 		{"outcome": "gave_up", "fallback": map[string]any{"kind": "web", "summary": "x", "sources": []any{"ftp://nope"}}},
 		{"outcome": "found", "pages": "not-a-list"},
+		// Review of #132: attempted reaches a forge issue; no markup shapes.
+		{"outcome": "found", "attempted": []any{"x`\n\n@org/team"}},
+		{"outcome": "found", "attempted": []any{"a\nb"}},
+		{"outcome": "found", "pages": []any{"p`q"}},
+		{"outcome": "found", "attempted": []any{strings.Repeat("a", maxListItemBytes+1)}},
 		{"outcome": "found", "initial_query": strings.Repeat("q", maxInitialQueryBytes+1)},
 	}
 	for i, args := range bad {

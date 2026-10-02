@@ -75,6 +75,8 @@ type gcsMemoryAPI interface {
 	// WriteUnconditional stores body at object with no precondition. Used
 	// only for staging artifacts, which supersede rather than collide.
 	WriteUnconditional(ctx context.Context, bucket, object string, body []byte) error
+	// Delete removes object; a missing object is not an error.
+	Delete(ctx context.Context, bucket, object string) error
 	io.Closer
 }
 
@@ -307,6 +309,17 @@ func (s *GCSStore) Stage(ctx context.Context, key string, body []byte) (string, 
 	return s.Location(key), nil
 }
 
+// Delete implements Deleter; a missing object is not an error.
+func (s *GCSStore) Delete(ctx context.Context, key string) error {
+	if err := checkKey(key); err != nil {
+		return err
+	}
+	if err := s.api.Delete(ctx, s.bucket, s.object(key)); err != nil {
+		return fmt.Errorf("delete %s: %w", s.Location(key), err)
+	}
+	return nil
+}
+
 // currentVersion re-reads key's generation after a precondition
 // failure, best effort: an object deleted in the meantime yields an
 // empty version, which ConflictError renders as "changed by someone
@@ -401,6 +414,13 @@ func (s *storageMemoryAPI) WriteUnconditional(ctx context.Context, bucket, objec
 		return err
 	}
 	return w.Close()
+}
+
+func (s *storageMemoryAPI) Delete(ctx context.Context, bucket, object string) error {
+	if err := s.c.Bucket(bucket).Object(object).Delete(ctx); err != nil && !isNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (s *storageMemoryAPI) Close() error { return s.c.Close() }

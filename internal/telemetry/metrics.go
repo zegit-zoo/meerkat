@@ -74,6 +74,7 @@ type Metrics struct {
 	intakeOldest      prometheus.Gauge
 	librarianFindings *prometheus.CounterVec
 	librarianRewrites *prometheus.CounterVec
+	librarianIssues   *prometheus.CounterVec
 	sourceResolves    *prometheus.CounterVec
 	sourceDuration    *prometheus.HistogramVec
 	sourceCache       *prometheus.CounterVec
@@ -236,6 +237,10 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 			Name: "meerkat_librarian_rewrites_total",
 			Help: "Prompt-quality rewrites executed by the librarian, by result (rewritten, unchanged, rejected, failed).",
 		}, []string{"action"}),
+		librarianIssues: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "meerkat_librarian_filed_issues_total",
+			Help: "Forge issues the librarian filed for parked (needs-human) intake items, by forge kind (github, gitea, gitlab, other).",
+		}, []string{"host"}),
 		treeDepth: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "meerkat_tree_depth",
 			Help: "Deepest knowledge base declared in the tree this process serves (root = 0; 0 for a flat deployment; the hard cap is 5).",
@@ -309,7 +314,7 @@ func newMetrics(reg *prometheus.Registry) *Metrics {
 			m.retrievalFirstContext, m.retrievalFirstRelevant, m.retrievalGiveUp, m.retrievalHops, m.retrievalSteps,
 			m.retrievalWrongTurns, m.retrievalSessions, m.retrievalAccuracy, m.retrievalCompleteness,
 			m.retrievalAnswerQuality, m.retrievalLimitReached,
-			m.intakeItems, m.intakeOldest, m.librarianFindings, m.librarianRewrites,
+			m.intakeItems, m.intakeOldest, m.librarianFindings, m.librarianRewrites, m.librarianIssues,
 			m.sourceResolves, m.sourceDuration, m.sourceCache, m.sourceBytes,
 			m.searches, m.searchDuration, m.searchResults, m.ambiguous,
 			m.memorySaves, m.memoryDuration, m.memoryErrors,
@@ -512,6 +517,21 @@ func (m *Metrics) LibrarianRewrite(action string) {
 		action = "other"
 	}
 	m.librarianRewrites.WithLabelValues(action).Inc()
+}
+
+// LibrarianFiledIssue counts one forge issue filed for a parked intake
+// item. host is bounded to the forge KIND; the repo, the issue URL and
+// its title never become a label (the disclosure rule).
+func (m *Metrics) LibrarianFiledIssue(host string) {
+	if m == nil {
+		return
+	}
+	switch host {
+	case "github", "gitea", "gitlab":
+	default:
+		host = "other"
+	}
+	m.librarianIssues.WithLabelValues(host).Inc()
 }
 
 // RetrievalOutcome counts one mk_report_outcome call. outcome and
