@@ -1480,7 +1480,8 @@ Design notes, each linked from the section it explains:
 [cache](docs/design/cache.md),
 [links](docs/design/links.md),
 [object-stores](docs/design/object-stores.md),
-[index-filtering](docs/design/index-filtering.md).
+[index-filtering](docs/design/index-filtering.md),
+[copied-authority-refactor](docs/design/copied-authority-refactor.md).
 
 Your own content repo holds the KB pages and `ingestion/sources.yaml` —
 meerkat only needs to be pointed at it.
