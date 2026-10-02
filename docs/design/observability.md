@@ -545,7 +545,7 @@ response (`{recorded, logged, intake, intake_id?}`):
 | Sink | Configured by | Carries |
 |---|---|---|
 | telemetry (always) | — | `meerkat.outcome.report` span with `result`, `fallback` (kinds), `pages`, `hops`, `tier_reached`, `has_quality`; `meerkat_retrieval_outcomes_total{outcome,fallback,recorded}` |
-| traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality; fallback; **the initial query in plaintext** |
+| traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality; fallback; **the initial query in plaintext only with `query: plaintext`** |
 | intake store | `intake:` + the `intake-write` capability | the fallback summary as a raw page: `type: research-raw`, `status: unverified`, `source: agent-fallback`, with the question and the attempted path in its frontmatter |
 
 The disclosure rule holds exactly as before: the span and the metric
@@ -568,15 +568,36 @@ and joins the log against the manifest; nobody else can.
 
 What the log keeps in plaintext, by decision (2026-09-17): the outcome,
 timings, path shape, quality scores, the fallback kind, summary and
-sources, the retrieval session's wrong-turn count and its searches by
-planner stage (`wrong_turns`, `stages{exact,fuzzy,prefix}` — counts
-only, present when the report closed a tracked session), and the
-**initial query**. The query is what a librarian reads
-to judge how well the client asked and how well meerkat routed weak
-prompting; it is the primary input for improving tool descriptions and
-link wording. It is therefore data an operator must treat as
-sensitive: the log lives beside the intake store, not beside the
-exported telemetry.
+sources, and the retrieval session's wrong-turn count and its searches
+by planner stage (`wrong_turns`, `stages{exact,fuzzy,prefix}`, counts
+only, present when the report closed a tracked session).
+
+**The initial query is opt-in** (#124, MK-A-6; operator decision
+2026-10-02). It is what a librarian reads to judge how well the client
+asked and how well meerkat routed weak prompting, and the primary input
+for improving tool descriptions and link wording. It is also the one
+field here that can identify a person or reveal what they were working
+on. So `traversal.Log.Record` drops it unless the block says
+`query: plaintext`, in the same place it hashes the identifiers, so no
+caller can store it by skipping a step. A log that keeps queries is
+data an operator must treat as sensitive: it lives beside the intake
+store, not beside the exported telemetry. The librarian's prompt-quality
+pass skips entries without a query, so without the opt-in it simply
+finds nothing to rewrite.
+
+```yaml
+observability:
+  traversal_log:
+    backend: local
+    path: /var/lib/meerkat
+    hmac_key_env: MEERKAT_TRAVERSAL_KEY
+    query: plaintext       # omit (default) | plaintext
+    retention_days: 90     # the default; 0 keeps everything
+```
+
+**Data classification** (the company taxonomy, provisional until the
+asset catalogue, MK-A-4): a traversal-log entry is `internal`; with
+`query: plaintext` it also carries `personal-data: identifier`.
 
 Threat model:
 
@@ -584,11 +605,12 @@ Threat model:
   this feature: hashing is done inside `traversal.Log.Record`, which
   takes plaintext and never writes it; spans get only what the
   telemetry table above lists.
-- *The log itself leaks.* It contains hashes and queries. Without the
-  key the hashes are opaque; the queries are what an agent typed and
-  should be handled like a query log anywhere: keep the bucket private,
-  rotate the key when a librarian leaves (old entries become
-  unjoinable, which is the intended effect).
+- *The log itself leaks.* It contains hashes and, with
+  `query: plaintext`, queries. Without the key the hashes are opaque;
+  the queries are what an agent typed and should be handled like a
+  query log anywhere: keep the bucket private, rotate the key when a
+  librarian leaves (old entries become unjoinable, which is the
+  intended effect).
 - *A caller floods the log.* Every field is bounded (query 2 KiB,
   summary 16 KiB, 50 list items, 20 sources), each report is one object
   with a unique key (single-writer-per-key, so any provider is safe),
@@ -596,8 +618,11 @@ Threat model:
 - *Retention.* An application job, not bucket lifecycle (Garage has
   none): `retention_days` deletes day prefixes older than the window,
   on startup and at most hourly on the write path. The default is
-  **unbounded** — this log is the training data for the self-improving
-  loop, and we deliberately produce a lot of it.
+  **90 days** (#124). It was unbounded before, because this log is the
+  self-improving loop's training data; `retention_days: 0` still keeps
+  everything, for an operator who wants that. The window covers every
+  object under the prefix, the cache's temperature records included;
+  warm start reads only the last `cache.warm_start_days`.
 
 Not in this change: a session span that parents the per-call spans and
 the SLI histograms (issue F), the warm-start feed that pre-mounts the

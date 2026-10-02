@@ -31,7 +31,9 @@ func promptFixture(t *testing.T) (*collections.Registry, *traversal.Log) {
 		t.Fatal(err)
 	}
 	t.Setenv("MEERKAT_TEST_PATH_KEY", "not a secret, a test key long enough")
-	log, err := traversal.Open(ctx, &traversal.Config{Backend: "local", Path: t.TempDir(), HMACKeyEnv: "MEERKAT_TEST_PATH_KEY"}, nil)
+	// The prompt-quality pass reads initial queries, so its log opts in
+	// to keeping them (#124).
+	log, err := traversal.Open(ctx, &traversal.Config{Backend: "local", Path: t.TempDir(), HMACKeyEnv: "MEERKAT_TEST_PATH_KEY", Query: traversal.QueryPlaintext}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

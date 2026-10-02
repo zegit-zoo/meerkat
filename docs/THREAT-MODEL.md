@@ -116,7 +116,7 @@ The classification uses the company taxonomy: `public`, `internal`, `confidentia
 | KB content (pages, frontmatter) | content source, extraction cache, in-memory index | operator's choice; `internal` default | none, unless the content carries it | the source's |
 | Personal memories | memory store, `personal/<sha256(iss, sub)>/` | `confidential` | `identifier` (owner hash) | until deleted |
 | Team and global memories, staged proposals | memory store | `internal` | none | until deleted |
-| Traversal log entries | `observability.traversal_log` (local or S3) | `internal` | `identifier` (plaintext initial query) | **unbounded by default** (`retention_days: 0`) |
+| Traversal log entries | `observability.traversal_log` (local or S3) | `internal` | none by default; `identifier` with `query: plaintext` | 90 days by default; `retention_days: 0` keeps everything |
 | Intake raw pages | intake store | `internal` | `identifier` (question, session ID, submitter namespace) | until the librarian processes them |
 | Access log | process stderr | `internal` | `identifier` (`sub`, `issuer`, `tenant`, peer IP) | the operator's log pipeline |
 | Spans and metrics | OTLP collector, `/metrics` | `internal` | none (the disclosure rule) | the collector's |
@@ -162,9 +162,9 @@ All other request data lives only in memory for the duration of the request.
 
 1. **The traversal log** (`observability.traversal_log`, opt-in). It stores one entry per
    `mk_report_outcome`. Collection names and page IDs are HMAC-hashed and the session ID is hashed.
-   The caller's **initial query is stored in plaintext**: it is the librarian's training signal.
-   Retention is unbounded by default. #124 makes the plaintext query opt-in and sets a 90-day
-   default retention.
+   The caller's initial query is stored only with `query: plaintext`. A librarian deployment
+   needs it, because it is the training signal. Entries expire after 90 days unless
+   `retention_days` says otherwise (#124).
 2. **Intake raw pages** (an intake store, opt-in). Each fallback research report is written as one
    page. Its frontmatter carries the initial query as `question`, the `session_id` as sent, and the
    submitter's namespace hash; its body carries the agent's summary and sources. The pages wait for
@@ -489,8 +489,7 @@ same PR that closes it.
 | Runtime content is trusted by configuration | A `disk:` source is not verified at all; a `url` digest pins bytes, not the choice of bytes | accepted; `kb_source` says which case applies |
 | `mk ingest --trust-sources` turns prompt injection into action | Prompts come from ingested content; the agent CLI's own permission prompts are the control, and the flag removes them | accepted; operator opt-in with a warning |
 | `git pull` reads the checkout's own `.git/config` | Pull runs inside the repository, so a local filter driver or `insteadOf` applies. That file is written locally, never cloned | accepted; `on_divergence: pull` is opt-in |
-| Traversal log keeps the initial query in plaintext, with unbounded retention by default | It is the librarian's training signal | #124 (MK-A-6) |
-| Intake raw pages carry the question and the session ID in plaintext | The librarian reads them to judge the research | #124 (MK-A-6), as part of the handling rules |
+| Intake raw pages carry the question and the session ID in plaintext | The page exists so the librarian can review and promote the research with its context. Hashing the session ID would need the traversal log's key, which the intake writer does not hold. The intake store is opt-in, and the `intake-write` capability gates writing to it | accepted (#124) |
 | Disclosure channel is the advisory form only, with a 7-day target and no embargo or timeline | No policy document existed | #125 (MK-A-2), #126 (MK-A-3) |
 | `master` requires signatures but no review and no green CI | The ruleset predates the compliance programme | MK-A-1 under #68 |
 | No asset catalogue and no per-operation declarations | Waits on the company catalogue format (CO-F) | MK-A-4, MK-A-5 under #68 |

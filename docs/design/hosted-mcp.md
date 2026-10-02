@@ -616,6 +616,17 @@ stays in the log and never reaches a span, because a span is exported
 out of the process and the log is not. See
 [observability.md](observability.md).
 
+**Data classification** (#124, MK-A-6; provisional until the asset
+catalogue, MK-A-4). An access-log line is `internal`. Its `sub`,
+`issuer`, `tenant`, peer address and MCP session ID carry
+`personal-data: identifier`. meerkat writes the line to stderr and keeps
+nothing itself, so retention is the operator's log pipeline. Matching the
+traversal log's default of 90 days is the recommended setting. The access
+log is one of the places where identifiable request data persists. The
+others are the traversal log with `query: plaintext`, intake raw pages
+(`question`, `session_id`) and personal memories; see the
+[threat model](../THREAT-MODEL.md#where-identifiable-request-data-persists).
+
 ### Freshness advisory: a second text item
 
 When a collection that `mk_search` searched, or that `mk_show` read

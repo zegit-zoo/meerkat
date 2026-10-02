@@ -10,13 +10,16 @@
 // to know which collection and which page a hop landed on. Hashing
 // squares the two: the log carries path identity, but only the holder
 // of the key — the librarian agent — can join it back to the manifest.
-// The initial query is stored in plaintext by decision (2026-09-17): it
-// is what the librarian reads to judge how well the client asked and
-// how well meerkat routed weak prompting.
+// The caller's initial query is what the librarian reads to judge how
+// well the client asked and how well meerkat routed weak prompting. It
+// is also the one field here that can identify a person or reveal what
+// they were working on. So it is stored only when the operator opts in
+// with `query: plaintext`, and dropped inside Record otherwise (#124,
+// MK-A-6; operator decision 2026-10-02).
 //
-// Retention is an application job (Garage has no lifecycle rules) and
-// defaults to unbounded: this log is the training data for the
-// self-improving loop. Every object has a unique key, so the
+// Retention is an application job (Garage has no lifecycle rules). It
+// defaults to DefaultRetentionDays, and `retention_days: 0` keeps
+// everything. Every object has a unique key, so the
 // single-writer-per-key rule (docs/design/object-stores.md) holds on
 // every provider.
 package traversal
@@ -49,6 +52,18 @@ const (
 // or a bucket prefix).
 const Prefix = "telemetry/paths/"
 
+// What an entry keeps of the caller's initial query (Config.Query).
+const (
+	// QueryOmit stores nothing of it. The default.
+	QueryOmit = "omit"
+	// QueryPlaintext stores it verbatim, for the librarian.
+	QueryPlaintext = "plaintext"
+)
+
+// DefaultRetentionDays is how long the log is kept when the
+// configuration does not say (#124).
+const DefaultRetentionDays = 90
+
 // Config is the `observability.traversal_log:` block.
 type Config struct {
 	// Backend is local or s3.
@@ -66,9 +81,21 @@ type Config struct {
 	// HMACKeyEnv names the environment variable holding the hashing
 	// key. The key itself never appears in configuration. Required.
 	HMACKeyEnv string `yaml:"hmac_key_env"`
-	// RetentionDays deletes day prefixes older than this many days; 0
-	// (the default) keeps everything.
-	RetentionDays int `yaml:"retention_days,omitempty"`
+	// Query says what an entry keeps of the caller's initial query:
+	// QueryOmit (the default when empty) or QueryPlaintext.
+	Query string `yaml:"query,omitempty"`
+	// RetentionDays deletes day prefixes older than this many days.
+	// Unset means DefaultRetentionDays; 0 keeps everything. A pointer,
+	// so that an explicit 0 is told apart from an absent key.
+	RetentionDays *int `yaml:"retention_days,omitempty"`
+}
+
+// Retention is the window Open applies, in days; 0 keeps everything.
+func (c *Config) Retention() int {
+	if c == nil || c.RetentionDays == nil {
+		return DefaultRetentionDays
+	}
+	return *c.RetentionDays
 }
 
 // Validate checks the block's shape. It does not read the key: that
@@ -107,15 +134,20 @@ func (c *Config) Validate(label string) error {
 	if strings.TrimSpace(c.HMACKeyEnv) == "" {
 		return fmt.Errorf("%s.hmac_key_env is required: the name of the environment variable holding the HMAC key (never the key itself)", label)
 	}
-	if c.RetentionDays < 0 {
-		return fmt.Errorf("%s.retention_days must be >= 0 (0 keeps everything)", label)
+	if c.RetentionDays != nil && *c.RetentionDays < 0 {
+		return fmt.Errorf("%s.retention_days must be >= 0 (0 keeps everything; unset means %d)", label, DefaultRetentionDays)
+	}
+	switch c.Query {
+	case "", QueryOmit, QueryPlaintext:
+	default:
+		return fmt.Errorf("%s.query must be %s or %s, got %q", label, QueryOmit, QueryPlaintext, c.Query)
 	}
 	return nil
 }
 
 // Entry is one logged session. Every field that names a collection or
-// a page is hashed before it reaches the sink; the initial query is
-// stored as written.
+// a page is hashed before it reaches the sink. The initial query is
+// stored as written when the log keeps queries, and dropped otherwise.
 type Entry struct {
 	Version    int       `json:"version"`
 	RecordedAt time.Time `json:"recorded_at"`
@@ -123,6 +155,7 @@ type Entry struct {
 	Session string `json:"session"`
 	Outcome string `json:"outcome"`
 	// InitialQuery is the agent's first query, verbatim (decision Q1).
+	// Empty in the stored entry unless the log keeps queries (#124).
 	InitialQuery string `json:"initial_query,omitempty"`
 	// Pages are hashed qualified page IDs the agent confirmed.
 	Pages []string `json:"pages,omitempty"`
@@ -286,7 +319,9 @@ type Log struct {
 	sink      Sink
 	key       []byte
 	retention int
-	now       func() time.Time
+	// queries says whether Record keeps the initial query (#124).
+	queries bool
+	now     func() time.Time
 
 	mu         sync.Mutex
 	lastPruned time.Time
@@ -327,20 +362,25 @@ func Open(ctx context.Context, cfg *Config, newS3 func(ctx context.Context, cfg 
 		}
 		sink = s
 	}
-	l := NewLog(sink, []byte(key), cfg.RetentionDays)
+	l := NewLog(sink, []byte(key), cfg.Retention())
+	l.queries = cfg.Query == QueryPlaintext
 	if err := l.Prune(ctx); err != nil {
 		return nil, fmt.Errorf("traversal log: initial retention pass: %w", err)
 	}
 	return l, nil
 }
 
-// NewLog wires a Log to a sink directly (tests, and Open).
+// NewLog wires a Log to a sink directly (tests, and Open). It keeps no
+// queries; Open turns them on for `query: plaintext`.
 func NewLog(sink Sink, key []byte, retentionDays int) *Log {
 	return &Log{sink: sink, key: key, retention: retentionDays, now: time.Now}
 }
 
 // Enabled reports whether entries are written anywhere.
 func (l *Log) Enabled() bool { return l != nil }
+
+// KeepsQueries reports whether Record stores the caller's initial query.
+func (l *Log) KeepsQueries() bool { return l != nil && l.queries }
 
 // Hash returns the hex HMAC-SHA256 of v under the log's key, or "" for
 // an empty v. It is what every name and ID becomes before it is stored.
@@ -363,6 +403,11 @@ func (l *Log) Record(ctx context.Context, e Entry) (key string, err error) {
 	now := l.now().UTC()
 	e.Version = 1
 	e.RecordedAt = now
+	if !l.queries {
+		// Dropped here, beside the hashing, so no caller can store a
+		// query by skipping a step (#124).
+		e.InitialQuery = ""
+	}
 	e.Session = l.Hash(e.Session)
 	for i, p := range e.Pages {
 		e.Pages[i] = l.Hash(p)
