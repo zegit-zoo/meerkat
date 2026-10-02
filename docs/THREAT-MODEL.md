@@ -490,7 +490,6 @@ same PR that closes it.
 | `mk ingest --trust-sources` turns prompt injection into action | Prompts come from ingested content; the agent CLI's own permission prompts are the control, and the flag removes them | accepted; operator opt-in with a warning |
 | `git pull` reads the checkout's own `.git/config` | Pull runs inside the repository, so a local filter driver or `insteadOf` applies. That file is written locally, never cloned | accepted; `on_divergence: pull` is opt-in |
 | Intake raw pages carry the question and the session ID in plaintext | The page exists so the librarian can review and promote the research with its context. Hashing the session ID would need the traversal log's key, which the intake writer does not hold. The intake store is opt-in, and the `intake-write` capability gates writing to it | accepted (#124) |
-| Disclosure channel is the advisory form only, with a 7-day target and no embargo or timeline | No policy document existed | #125 (MK-A-2), #126 (MK-A-3) |
 | `master` requires signatures but no review and no green CI | The ruleset predates the compliance programme | MK-A-1 under #68 |
 | No asset catalogue and no per-operation declarations | Waits on the company catalogue format (CO-F) | MK-A-4, MK-A-5 under #68 |
 | Session-less MCP callers share one freshness-advisory bucket | One principal's session-less call can use up another's advisory: a missed line, never a disclosure | accepted ([hosted-mcp.md](design/hosted-mcp.md)) |
