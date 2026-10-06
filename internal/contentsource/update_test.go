@@ -115,6 +115,26 @@ content:
 	}
 }
 
+func TestParseConfig_UpdateContractWithForgeToken(t *testing.T) {
+	cfg, err := parseConfig([]byte(`
+content:
+  type: local
+  path: kb
+  update:
+    method: merge-request
+    repo: https://gitea.example.com/team/kb.git
+    host: Gitea
+    token_env: " KB_ISSUES_TOKEN "
+`), "content-source.yaml")
+	if err != nil {
+		t.Fatalf("parseConfig: %v", err)
+	}
+	u := cfg.Content.Update
+	if u.Host != UpdateHostGitea || u.TokenEnv != "KB_ISSUES_TOKEN" {
+		t.Errorf("update = %+v, want host gitea and a trimmed token_env", u)
+	}
+}
+
 func TestParseConfig_UpdateNormalizesAndDefaults(t *testing.T) {
 	cfg, err := parseConfig([]byte(`
 content:
@@ -261,7 +281,21 @@ func TestParseConfig_UpdateValidationRunsAtLoadTime(t *testing.T) {
 		},
 		"unknown host": {
 			"content:\n  type: local\n  path: kb\n  update:\n    method: merge-request\n    repo: https://github.com/example-org/kb.git\n    host: bitbucket\n",
-			"update.host must be one of github|gitlab|other",
+			"update.host must be one of github|gitlab|gitea|other",
+		},
+		// SECURITY: token_env names a variable; a token pasted into it
+		// would be committed with the config.
+		"token_env holding a token": {
+			"content:\n  type: local\n  path: kb\n  update:\n    method: merge-request\n    repo: https://github.com/example-org/kb.git\n    token_env: not-a-name-but-a-pasted-token\n",
+			"token_env must NAME an environment variable",
+		},
+		"token_env starting with a digit": {
+			"content:\n  type: local\n  path: kb\n  update:\n    method: merge-request\n    repo: https://github.com/example-org/kb.git\n    token_env: 1TOKEN\n",
+			"token_env must NAME an environment variable",
+		},
+		"token_env under method: direct": {
+			"content:\n  type: local\n  path: kb\n  update:\n    method: direct\n    token_env: KB_TOKEN\n",
+			"token_env apply to method: merge-request",
 		},
 		"path escapes the contribution repo": {
 			"content:\n  type: local\n  path: kb\n  update:\n    method: merge-request\n    repo: https://github.com/example-org/kb.git\n    path: ../../etc\n",

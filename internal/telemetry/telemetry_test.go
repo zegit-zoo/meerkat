@@ -488,3 +488,31 @@ func TestFailRecordsABoundedReasonAndNoErrorObject(t *testing.T) {
 // otelTracerProvider reads the process-global tracer provider, so the
 // test above can assert that New left it alone.
 func otelTracerProvider() trace.TracerProvider { return otel.GetTracerProvider() }
+
+func TestLibrarianFiledIssueHostIsAClosedSet(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := newMetrics(reg)
+	for _, h := range []string{"github", "gitea", "gitlab", "https://github.com/team/kb/issues/1", ""} {
+		m.LibrarianFiledIssue(h)
+	}
+	var nilMetrics *Metrics
+	nilMetrics.LibrarianFiledIssue("github")
+	if got := counterValue(t, reg, "meerkat_librarian_filed_issues_total"); got != 5 {
+		t.Errorf("filed issues = %v, want 5", got)
+	}
+	families, _ := reg.Gather()
+	for _, f := range families {
+		if f.GetName() != "meerkat_librarian_filed_issues_total" {
+			continue
+		}
+		for _, s := range f.GetMetric() {
+			for _, l := range s.GetLabel() {
+				switch l.GetValue() {
+				case "github", "gitea", "gitlab", "other":
+				default:
+					t.Errorf("host label %q is outside the closed set", l.GetValue())
+				}
+			}
+		}
+	}
+}

@@ -137,6 +137,19 @@ type Store interface {
 	Describe() string
 }
 
+// Deleter is implemented by a store that can remove one live document.
+//
+// It is a separate, optional interface for the same reason Fingerprinter
+// is: the memory toolset never deletes (a memory is superseded, not
+// erased), so widening Store would force a delete surface on every
+// backend and every test fake for a caller that does not exist there.
+// The intake store is the one caller: un-parking an item removes its
+// parked/<id>.md marker (meerkat-mob #19). Deleting a key that does not
+// exist is not an error, so a retried removal converges.
+type Deleter interface {
+	Delete(ctx context.Context, key string) error
+}
+
 // Fingerprinter is implemented by a store that can summarise its LIVE
 // document set with a cheap, metadata-only call.
 //

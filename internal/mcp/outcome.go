@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -70,6 +71,7 @@ const (
 	maxSummaryBytes      = 16 << 10
 	maxNotesBytes        = 2048
 	maxListItems         = 50
+	maxListItemBytes     = 512
 	maxSourceItems       = 20
 	maxSessionIDLen      = 128
 )
@@ -315,7 +317,18 @@ func stringList(req mcp.CallToolRequest, name string, cap int) ([]string, error)
 		if !ok || strings.TrimSpace(s) == "" {
 			return nil, fmt.Errorf("%s must be non-empty strings", name)
 		}
-		out = append(out, strings.TrimSpace(s))
+		s = strings.TrimSpace(s)
+		// A collection name, tree path or page ID is one short line.
+		// These lists end up in a raw intake page and, for attempted,
+		// in a forge issue the librarian files (meerkat-mob #19), so
+		// markup-bearing shapes are refused here, not only escaped there.
+		if len(s) > maxListItemBytes {
+			return nil, fmt.Errorf("%s entries are at most %d bytes", name, maxListItemBytes)
+		}
+		if strings.ContainsFunc(s, func(r rune) bool { return r == '`' || unicode.IsControl(r) }) {
+			return nil, fmt.Errorf("%s entries may not contain backticks or control characters (newlines included)", name)
+		}
+		out = append(out, s)
 	}
 	return out, nil
 }

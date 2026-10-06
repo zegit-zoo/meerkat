@@ -88,6 +88,13 @@ func (f *fakeGCS) WriteUnconditional(_ context.Context, _, object string, body [
 	return nil
 }
 
+func (f *fakeGCS) Delete(_ context.Context, _, object string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objects, object)
+	return nil
+}
+
 func (f *fakeGCS) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

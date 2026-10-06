@@ -29,7 +29,8 @@ import (
 //     never delete — Q8),
 //   - missing links: collections agents keep trying and giving up in,
 //     read from the traversal log (issue G) and matched by hashed name,
-//   - parked intake items that need a human,
+//   - parked intake items that need a human, and whether a forge issue
+//     has been filed for them yet (escalate.go),
 //   - staged candidates with enough confirmations to file,
 //   - promotions: hot deep collections that deserve a pointer from the
 //     root (promotion.go),
@@ -40,7 +41,9 @@ import (
 // Nothing is modified unless Apply is called, and Apply files only what
 // the collection's update contract allows: `direct` writes the page
 // into the collection's memory store; `merge-request` and `none` are
-// reported with the instructions, not acted on.
+// reported with the instructions, not acted on. Apply also escalates
+// parked items to the target collection's forge and un-parks the ones
+// whose issue was closed as resolved (escalate.go).
 
 // CullAfter is how long past stale_after a page must be before the
 // librarian proposes archiving it.
@@ -78,6 +81,10 @@ type Report struct {
 	// PromptQuality lists rewrite targets from the initial queries, most
 	// supported first. Each also appears in Findings as prompt_quality.
 	PromptQuality []PromptFinding `json:"prompt_quality,omitempty"`
+	// Parked lists the parked (needs-human) intake items with what an
+	// issue about them would say. Each also appears in Findings as
+	// needs_human.
+	Parked []ParkedEntry `json:"parked,omitempty"`
 }
 
 // Fileable is a confirmed candidate and how its collection takes it.
@@ -221,22 +228,18 @@ func Librarian(ctx context.Context, reg *collections.Registry, store *intake.Sto
 
 	// Intake: parked items and fileable candidates.
 	if store != nil {
-		parked, err := store.Parked(ctx)
-		if err != nil {
-			return nil, err
-		}
-		var ids []string
-		for id := range parked {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			rep.Findings = append(rep.Findings, Finding{Kind: FindingNeedsHuman, Page: id, Detail: parked[id]})
-			m.LibrarianFinding(FindingNeedsHuman)
-		}
 		staged, err := store.ListStaged(ctx)
 		if err != nil {
 			return nil, err
+		}
+		parked, err := parkedEntries(ctx, store, staged)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range parked {
+			rep.Parked = append(rep.Parked, p)
+			rep.Findings = append(rep.Findings, Finding{Kind: FindingNeedsHuman, Collection: p.Collection, Page: p.IntakeID, Detail: p.detail()})
+			m.LibrarianFinding(FindingNeedsHuman)
 		}
 		for _, s := range staged {
 			if done, _ := store.IsDone(ctx, "filed-"+s.ID); done {
@@ -321,10 +324,10 @@ func (r Report) Write(w io.Writer) {
 	}
 }
 
-// Applied is what Apply did with one fileable candidate.
+// Applied is what Apply did with one fileable candidate or parked item.
 type Applied struct {
 	IntakeID string
-	Action   string // filed | instructions | skipped
+	Action   string // filed | instructions | skipped | unparked | adopted | duplicate
 	Detail   string
 }
 
@@ -334,7 +337,15 @@ type Applied struct {
 // `merge-request` and `none` produce instructions and change nothing.
 // Promotion proposals are filed the same way into the root hub (see
 // applyPromotions); their Applied.IntakeID is "promote:<collection>".
+// Parked items are escalated last (applyParked): an issue is filed on
+// the target collection's forge, or the item un-parked when its issue
+// was closed as resolved.
 func Apply(ctx context.Context, reg *collections.Registry, store *intake.Store, rep *Report) ([]Applied, error) {
+	return ApplyWith(ctx, reg, store, rep, ApplyOpts{})
+}
+
+// ApplyWith is Apply with the forge seams set.
+func ApplyWith(ctx context.Context, reg *collections.Registry, store *intake.Store, rep *Report, opts ApplyOpts) ([]Applied, error) {
 	out, err := applyPromotions(ctx, reg, rep)
 	if err != nil {
 		return out, err
@@ -375,7 +386,7 @@ func Apply(ctx context.Context, reg *collections.Registry, store *intake.Store, 
 		}
 		out = append(out, a)
 	}
-	return out, nil
+	return applyParked(ctx, reg, store, rep, opts, out)
 }
 
 func stagedBody(ctx context.Context, store *intake.Store, f Fileable) ([]byte, error) {

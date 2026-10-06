@@ -215,3 +215,84 @@ func TestResolveRuntimeCollections_TreeManifestDescriptionIsBounded(t *testing.T
 		})
 	}
 }
+
+// TestManifest_RefusesTokenEnv pins the guard that keeps token_env out of
+// manifest.yaml (meerkat-mob #19). token_env picks an environment
+// variable whose value the librarian sends, as a bearer token, to the
+// host the same contract's repo names. A manifest is written by whoever
+// maintains the knowledge base, not by the operator, so letting it set
+// token_env would let content choose both the credential and where it
+// goes. Each refused case has a twin without token_env that loads, so
+// the test fails if the guard is removed, not merely if the shape breaks.
+func TestManifest_RefusesTokenEnv(t *testing.T) {
+	const repo = "repo: https://github.com/example-org/kb.git, host: github"
+	for _, tc := range []struct {
+		name     string
+		manifest string
+		label    string
+	}{
+		{
+			"manifest contract",
+			"kind: KnowledgeBase\nname: root\ncontract: {method: merge-request, " + repo + "%s}\n",
+			"contract.token_env",
+		},
+		{
+			"child source update",
+			"kind: KnowledgeBase\nname: root\nchildren:\n  - name: leaf\n    source: {type: local, path: /tmp/leaf, update: {method: merge-request, " + repo + "%s}}\n",
+			"children[0].source.update.token_env",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseManifest([]byte(strings.Replace(tc.manifest, "%s", "", 1))); err != nil {
+				t.Fatalf("the same manifest without token_env: %v", err)
+			}
+			_, err := ParseManifest([]byte(strings.Replace(tc.manifest, "%s", ", token_env: LIBRARIAN_TOKEN", 1)))
+			if err == nil {
+				t.Fatal("a manifest naming token_env loaded; want it refused")
+			}
+			for _, want := range []string{ManifestFile, tc.label, "content-source.yaml"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %v; want it to contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestResolveRuntimeCollections_TreeTokenEnvOnlyFromOperator walks a real
+// tree: a child's manifest naming token_env fails the load with the
+// manifest named, while the operator's own tree.update in
+// content-source.yaml may name one and the root collection carries it.
+func TestResolveRuntimeCollections_TreeTokenEnvOnlyFromOperator(t *testing.T) {
+	const contract = "{method: merge-request, repo: https://gitea.example.com/team/kb.git, host: gitea, token_env: KB_ISSUES_TOKEN}"
+	write := func(t *testing.T, base, cfg string) string {
+		t.Helper()
+		p := filepath.Join(base, ConfigFile)
+		if err := os.WriteFile(p, []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("operator's tree.update may name it", func(t *testing.T) {
+		base := t.TempDir()
+		root := kbDir(t, base, "root", "kind: KnowledgeBase\nname: root\ntier: 0\n")
+		cols, err := ResolveRuntimeCollections(context.Background(), write(t, base, "tree:\n  type: local\n  path: "+root+"\n  update: "+contract+"\n"))
+		if err != nil {
+			t.Fatalf("ResolveRuntimeCollections: %v", err)
+		}
+		if u := cols[0].Source.Update; u == nil || u.TokenEnv != "KB_ISSUES_TOKEN" {
+			t.Errorf("root update = %+v; want the operator's token_env", u)
+		}
+	})
+
+	t.Run("a child's manifest may not", func(t *testing.T) {
+		base := t.TempDir()
+		leaf := kbDir(t, base, "leaf", "kind: KnowledgeBase\nname: leaf\nparent: root\ncontract: "+contract+"\n")
+		root := kbDir(t, base, "root", "kind: KnowledgeBase\nname: root\ntier: 0\nchildren:\n"+child("leaf", leaf, "eager"))
+		_, err := ResolveRuntimeCollections(context.Background(), write(t, base, "tree:\n  type: local\n  path: "+root+"\n"))
+		if err == nil || !strings.Contains(err.Error(), ManifestFile) || !strings.Contains(err.Error(), "token_env is refused") {
+			t.Errorf("err = %v; want the leaf manifest's token_env refused", err)
+		}
+	})
+}

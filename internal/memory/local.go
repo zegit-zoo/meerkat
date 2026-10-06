@@ -190,6 +190,20 @@ func (s *LocalStore) Stage(_ context.Context, key string, body []byte) (string, 
 	return s.Location(key), nil
 }
 
+// Delete implements Deleter: the document is removed through the
+// store's os.Root; a missing document is not an error.
+func (s *LocalStore) Delete(_ context.Context, key string) error {
+	if err := checkKey(key); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.root.Remove(filepath.FromSlash(key)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("delete memory %q: %w", key, err)
+	}
+	return nil
+}
+
 // currentVersion reports the version of key on disk right now.
 func (s *LocalStore) currentVersion(key string) (Version, bool, error) {
 	body, err := s.readFile(key)
