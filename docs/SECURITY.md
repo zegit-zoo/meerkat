@@ -205,8 +205,7 @@ threats and controls per surface, the design notes, and the residual risks.
 
 ## Reporting a vulnerability
 
-For a security issue you'd rather not file as a public issue,
-open a private security advisory on the project's GitHub repository
-(Security → Advisories → "Report a vulnerability"). This keeps the
-report confidential until a fix is published. We aim to respond
-within 7 days and cut a `vX.Y.Z` patch release once the fix lands.
+See the [security policy](../SECURITY.md). It names the contact
+(`security@primitive-engineering.se`, or a private advisory on this
+repository), the response timeline, coordinated disclosure, safe harbour
+and the supported versions.
