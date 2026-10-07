@@ -96,6 +96,7 @@ func newMCPServeHTTPCmd() *cobra.Command {
 		authConfigPath string
 		stateful       bool
 		trustProxyHost bool
+		securityTxt    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "serve-http",
@@ -116,6 +117,8 @@ Endpoints:
   /livez                                  liveness probe (no auth)
   /readyz                                 readiness: content + index health (no auth)
   /metrics                                Prometheus metrics (no auth)
+  /.well-known/security.txt               meerkat's security contact, RFC 9116 (no auth;
+                                          --security-txt=false turns it off)
 
 Authentication and authorization are configured by an "auth:" block in
 content-source.yaml, or by a standalone file passed with --auth-config:
@@ -251,6 +254,7 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				Version:                       version,
 				Stateful:                      stateful,
 				DisableDNSRebindingProtection: trustProxyHost,
+				NoSecurityTxt:                 !securityTxt,
 				Observability:                 activeObservability,
 				// This process runs exactly one hosted server, so it is the
 				// one that may own the OpenTelemetry globals — which is what
@@ -297,6 +301,9 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 		"Disable DNS-rebinding protection (which rejects loopback requests whose Host header is not "+
 			"a localhost value). Only for a same-host reverse proxy that preserves the original Host "+
 			"header; prefer rewriting Host at the proxy instead.")
+	cmd.Flags().BoolVar(&securityTxt, "security-txt", true,
+		"Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. "+
+			"Turn it off when the host serves a security.txt of its own")
 	return cmd
 }
 

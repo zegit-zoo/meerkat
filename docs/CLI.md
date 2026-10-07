@@ -329,6 +329,9 @@ Run an HTTP/OpenAPI server. Endpoints:
   GET  /collections   enumerate the mounted collections
   GET  /openapi.json  schema (no auth)
   GET  /healthz       liveness (no auth)
+  GET  /.well-known/security.txt
+                      meerkat's security contact, RFC 9116 (no auth;
+                      --security-txt=false turns it off)
 
 /search, /show and /list take an optional "collection" field; omitted,
 they span every mounted collection.
@@ -360,6 +363,7 @@ meerkat http serve [flags]
       --api-key string   Static bearer token. Required (or set MEERKAT_API_KEY).
       --host string      Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
       --port int         Bind port (default 4004)
+      --security-txt     Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
 ```
 
 #### Inherited flags
@@ -671,6 +675,8 @@ Endpoints:
   /livez                                  liveness probe (no auth)
   /readyz                                 readiness: content + index health (no auth)
   /metrics                                Prometheus metrics (no auth)
+  /.well-known/security.txt               meerkat's security contact, RFC 9116 (no auth;
+                                          --security-txt=false turns it off)
 
 Authentication and authorization are configured by an "auth:" block in
 content-source.yaml, or by a standalone file passed with --auth-config:
@@ -776,6 +782,7 @@ meerkat mcp serve-http [flags]
       --host string          Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
       --path string          Path the MCP Streamable HTTP endpoint is mounted at (default "/mcp")
       --port int             Bind port (default 4005)
+      --security-txt         Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
       --stateful             Keep per-session state in this process instead of accepting any well-formed session ID. Requires sticky routing when more than one replica sits behind a load balancer.
       --trust-proxy-host     Disable DNS-rebinding protection (which rejects loopback requests whose Host header is not a localhost value). Only for a same-host reverse proxy that preserves the original Host header; prefer rewriting Host at the proxy instead.
 ```

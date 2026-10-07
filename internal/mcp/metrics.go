@@ -29,7 +29,8 @@ import (
 // a cardinality bomb the moment something scans for /wp-admin).
 //
 // The route label is therefore the server's OWN route pattern from a
-// closed set of five, resolved through the mux — never r.URL.Path.
+// closed set (the endpoints routes() registers), resolved through the
+// mux — never r.URL.Path.
 type metrics struct {
 	reg *prometheus.Registry
 
