@@ -170,7 +170,7 @@ func ResolveRuntimeCollections(ctx context.Context, contentSourceFlag string) ([
 		return nil, fmt.Errorf("content-source.yaml (%s): %w", path, err)
 	}
 	if cfg.Tree != nil {
-		cols, _, terr := ResolveTree(ctx, *cfg.Tree, path)
+		cols, _, terr := resolveTree(ctx, *cfg.Tree, path, cfg.childRules())
 		if terr != nil {
 			return nil, fmt.Errorf("content-source.yaml (%s): %w", path, terr)
 		}
@@ -263,6 +263,11 @@ func resolveSourceInner(ctx context.Context, src Source, cfgPath string) (Resolv
 		dir := src.Path
 		if !filepath.IsAbs(dir) {
 			dir = filepath.Join(filepath.Dir(cfgPath), dir)
+		}
+		if src.manifest != nil {
+			if err := src.manifest.recheck(filepath.Clean(dir)); err != nil {
+				return ResolvedCollection{}, fmt.Errorf("%s (%s): %w", ManifestFile, cfgPath, err)
+			}
 		}
 		return ResolvedCollection{Dir: dir, Source: src, Provenance: "disk:" + dir}, nil
 	case TypeURL:

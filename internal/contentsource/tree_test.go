@@ -27,6 +27,12 @@ func kbDir(t *testing.T, base, name, manifest string) string {
 	return dir
 }
 
+// allowLocal is the manifest_children: block that lets a test tree's
+// manifests mount local children under base.
+func allowLocal(base string) string {
+	return "manifest_children:\n  local_paths: [" + base + "]\n"
+}
+
 func child(name, dir, mount string) string {
 	s := "  - name: " + name + "\n    source: {type: local, path: " + dir + "}\n"
 	if mount != "" {
@@ -159,7 +165,7 @@ func TestResolveRuntimeCollections_Tree(t *testing.T) {
 	base := t.TempDir()
 	root := threeTier(t, base)
 	cfgPath := filepath.Join(base, ConfigFile)
-	if err := os.WriteFile(cfgPath, []byte("tree:\n  type: local\n  path: "+root+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte("tree:\n  type: local\n  path: "+root+"\n"+allowLocal(base)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cols, err := ResolveRuntimeCollections(context.Background(), cfgPath)
@@ -193,7 +199,7 @@ func TestResolveRuntimeCollections_TreeManifestDescriptionIsBounded(t *testing.T
 			leaf := kbDir(t, base, "leaf", "kind: KnowledgeBase\nname: leaf\nparent: root\ndescription: "+desc+"\n")
 			root := kbDir(t, base, "root", "kind: KnowledgeBase\nname: root\ntier: 0\nchildren:\n"+child("leaf", leaf, "eager"))
 			cfgPath := filepath.Join(base, ConfigFile)
-			if err := os.WriteFile(cfgPath, []byte("tree:\n  type: local\n  path: "+root+"\n"), 0o644); err != nil {
+			if err := os.WriteFile(cfgPath, []byte("tree:\n  type: local\n  path: "+root+"\n"+allowLocal(base)), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			cols, err := ResolveRuntimeCollections(context.Background(), cfgPath)
@@ -290,7 +296,7 @@ func TestResolveRuntimeCollections_TreeTokenEnvOnlyFromOperator(t *testing.T) {
 		base := t.TempDir()
 		leaf := kbDir(t, base, "leaf", "kind: KnowledgeBase\nname: leaf\nparent: root\ncontract: "+contract+"\n")
 		root := kbDir(t, base, "root", "kind: KnowledgeBase\nname: root\ntier: 0\nchildren:\n"+child("leaf", leaf, "eager"))
-		_, err := ResolveRuntimeCollections(context.Background(), write(t, base, "tree:\n  type: local\n  path: "+root+"\n"))
+		_, err := ResolveRuntimeCollections(context.Background(), write(t, base, "tree:\n  type: local\n  path: "+root+"\n"+allowLocal(base)))
 		if err == nil || !strings.Contains(err.Error(), ManifestFile) || !strings.Contains(err.Error(), "token_env is refused") {
 			t.Errorf("err = %v; want the leaf manifest's token_env refused", err)
 		}
