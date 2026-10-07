@@ -545,8 +545,9 @@ mk http serve --port 4004
 
 Register `http://127.0.0.1:4004/openapi.json` as a Tool Server in OpenWebUI.
 The search/show/list tools are available as `POST /search`, `POST /show`,
-`POST /list`, and `GET /collections` enumerates what's mounted. `/healthz`
-and `/openapi.json` are exempt from auth; everything else needs the bearer
+`POST /list`, and `GET /collections` enumerates what's mounted. `/healthz`,
+`/openapi.json` and `/.well-known/security.txt` (meerkat's security contact;
+`--security-txt=false` turns it off) are exempt from auth; everything else needs the bearer
 token, and the server refuses to start without one. `mk http serve` loads
 its collections once and never runs a `refresh:` block, so `GET /collections`
 reports no refresh status and no freshness. For a server that follows its

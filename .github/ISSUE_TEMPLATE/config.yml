@@ -1,0 +1,10 @@
+# Security reports must not be public issues (#126). The bug template
+# stays, and blank issues stay allowed, as before this file existed.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/zegit-zoo/meerkat/security/advisories/new
+    about: >-
+      Report it privately: open a private advisory here, or email
+      security@primitive-engineering.se. Please do not open a public issue.
+      See SECURITY.md for the policy.

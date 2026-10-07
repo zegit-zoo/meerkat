@@ -14,6 +14,10 @@ policy already follows the CRA's disclosure practice.
 - **Email:** `security@primitive-engineering.se`. A person reads it; it is not an automated intake.
 - **Private advisory:** you can also report through GitHub. On this repository, open Security →
   Advisories → "Report a vulnerability". The report stays private until we publish an advisory.
+- **Machine-readable:** every `mk http serve` and `mk mcp serve-http` publishes
+  `/.well-known/security.txt` (RFC 9116) with these contacts, unless its operator turned it off
+  with `--security-txt=false`. The source is [`internal/wellknown`](internal/wellknown), and its tests
+  fail if the file stops being valid or its `Expires` is not between 30 days and a year ahead.
 - **Encryption:** meerkat has no OpenPGP key yet. Send a short description in clear by email, or
   put the details in a private advisory, which only the maintainers can read.
 - **Please include:**
