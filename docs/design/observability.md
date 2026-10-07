@@ -546,7 +546,7 @@ response (`{recorded, logged, intake, intake_id?}`):
 |---|---|---|
 | telemetry (always) | — | `meerkat.outcome.report` span with `result`, `fallback` (kinds), `pages`, `hops`, `tier_reached`, `has_quality`; `meerkat_retrieval_outcomes_total{outcome,fallback,recorded}` |
 | traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality; fallback; **the initial query in plaintext only with `query: plaintext`** |
-| intake store | `intake:` + the `intake-write` capability | the fallback summary as a raw page: `type: research-raw`, `status: unverified`, `source: agent-fallback`, with the question and the attempted path in its frontmatter |
+| intake store | `intake:` + the `intake-write` capability | the fallback summary as a raw page: `type: research-raw`, `status: unverified`, `source: agent-fallback`, with the question, the attempted path (only collections in the caller's view) and the resolved `target_kb` in its frontmatter |
 
 The disclosure rule holds exactly as before: the span and the metric
 labels carry closed-set values and counts. The disclosure test

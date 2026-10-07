@@ -358,6 +358,11 @@ func ApplyWith(ctx context.Context, reg *collections.Registry, store *intake.Sto
 			out = append(out, a)
 			continue
 		}
+		if why := depositTargetMismatch(ctx, store, f.IntakeID, f.Collection); why != "" {
+			a.Action, a.Detail = "skipped", "not filed into "+f.Collection+": "+why+"; a human must place "+f.Key
+			out = append(out, a)
+			continue
+		}
 		switch f.Method {
 		case contentsource.UpdateDirect:
 			st := c.Memory()

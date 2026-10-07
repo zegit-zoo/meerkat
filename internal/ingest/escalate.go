@@ -52,7 +52,7 @@ const findSlack = 10 * time.Minute
 type ParkedEntry struct {
 	IntakeID string `json:"intake_id"`
 	// Collection is the target collection: the staged candidate's, else
-	// the raw item's deepest attempt, else "unrouted".
+	// the raw item's recorded target, else "unrouted".
 	Collection string `json:"collection"`
 	Reason     string `json:"reason"`
 	// Title is the candidate page's title, when there is a candidate.
@@ -116,7 +116,7 @@ func parkedEntries(ctx context.Context, store *intake.Store, staged []intake.Sta
 			}
 		}
 		if p.Collection == "" {
-			p.Collection = "unrouted"
+			p.Collection = unrouted
 		}
 		out = append(out, p)
 	}
@@ -160,6 +160,15 @@ func applyParked(ctx context.Context, reg *collections.Registry, store *intake.S
 				out = append(out, a)
 			}
 			continue
+		}
+		if p.Issue == nil {
+			// The issue goes to this collection's forge with its token:
+			// only for the target the deposit was authorised for.
+			if why := depositTargetMismatch(ctx, store, p.IntakeID, p.Collection); why != "" {
+				a.Action, a.Detail = "skipped", "no issue filed on the forge of "+p.Collection+": "+why+"; a human must look at "+marker
+				out = append(out, a)
+				continue
+			}
 		}
 		target, err := forge.Resolve(spec.Host, spec.Repo)
 		if err != nil {

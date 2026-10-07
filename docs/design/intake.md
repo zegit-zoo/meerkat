@@ -52,8 +52,18 @@ entries. `kb.Frontmatter.TrustTier()` already reads "verified by an
 agent" as machine-confirmed; the pipeline's bar for *filing* is
 `ConfirmationsRequired` (2).
 
-Target collection: the deepest collection the reporting agent tried
-(the last of `attempted`), or `unrouted` for the librarian to place.
+Target collection (meerkat-mob#38): `mk_report_outcome` keeps only the
+`attempted` entries that resolve to a collection in the caller's own
+view, which the caller holds `intake-write` on or can read, and
+records the deepest (last) of them as the raw item's `target_kb`, or
+`unrouted` when none qualifies. The researcher stages the candidate
+under that recorded target, never under a name taken from `attempted`;
+a deposit made before targets were recorded is `unrouted`. `--apply`
+re-checks the target against the raw item before it files a candidate
+into a collection or files an issue on a collection's forge, and skips
+the item with the reason when they differ. Intake keys are built only
+from single safe segments: `.`, `..` and anything with a path separator
+or control character are refused.
 
 ## Escalation
 

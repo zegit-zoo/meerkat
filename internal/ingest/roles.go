@@ -197,17 +197,39 @@ func planResearch(ctx context.Context, store *intake.Store, opts IntakePlanOpts,
 	return tasks, skips, nil
 }
 
-// targetKB is where a candidate belongs: the deepest collection the
-// agent tried (the last one), or "unrouted" for the librarian to place.
+// targetKB is where a candidate belongs: the target mk_report_outcome
+// resolved and recorded from the depositor's own view of the registry,
+// or "unrouted" for the librarian to place. The attempted list itself is
+// never read for this: it is what the caller typed (meerkat-mob#38), and
+// a deposit made before the target was recorded is unrouted.
 func targetKB(it intake.Item) string {
-	if n := len(it.Attempted); n > 0 {
-		last := it.Attempted[n-1]
-		if i := strings.LastIndex(last, "/"); i >= 0 {
-			last = last[i+1:]
-		}
-		return last
+	if it.TargetKB != "" && intake.Segment(it.TargetKB) == nil {
+		return it.TargetKB
 	}
-	return "unrouted"
+	return unrouted
+}
+
+// unrouted is the target of a deposit with no authorised collection.
+const unrouted = "unrouted"
+
+// depositTargetMismatch re-checks, at filing or escalation time, that a
+// collection is the one the item's deposit was authorised to target:
+// the raw item meerkat wrote at deposit records it. It returns "" when
+// it is, else why not. A staged key alone is not enough, because a
+// candidate staged before targets were recorded named whatever the
+// depositor typed.
+func depositTargetMismatch(ctx context.Context, store *intake.Store, id, collection string) string {
+	raw, ok, err := store.FindRaw(ctx, id)
+	switch {
+	case err != nil:
+		return "the deposit could not be read: " + err.Error()
+	case !ok:
+		return "no deposit found for this item"
+	}
+	if got := targetKB(raw); got != collection {
+		return fmt.Sprintf("the deposit was authorised for %q, not %q", got, collection)
+	}
+	return ""
 }
 
 func planValidation(ctx context.Context, store *intake.Store, opts IntakePlanOpts, prompt string) ([]Task, []Skip, error) {

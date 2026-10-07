@@ -393,7 +393,7 @@ func reportOutcomeHandler(reg *collections.Registry, opts transportOptions) mcps
 			case !g.CanIntake():
 				resp["intake"] = "not_permitted"
 			default:
-				id, err := writeIntake(ctx, opts.Outcome.Intake, g, args, started)
+				id, err := writeIntake(ctx, opts.Outcome.Intake, g, depositArgs(g, view, args), started)
 				if err != nil {
 					telemetry.Record(ctx).RetrievalOutcome(args.outcome, args.fallback.Kind, telemetry.OutcomeError)
 					telemetry.Fail(span, telemetry.OutcomeError)
@@ -480,6 +480,7 @@ func writeIntake(ctx context.Context, store memory.Store, g *authz.Grants, a out
 		"fallback_kind":    a.fallback.Kind,
 		"question":         a.initialQuery,
 		"attempted":        a.attempted,
+		"target_kb":        depositTarget(a.attempted),
 		"reported_at":      now.UTC().Format(time.RFC3339),
 		"session_id":       a.sessionID,
 		"submitted_by":     memory.Namespace(g.Identity()),
