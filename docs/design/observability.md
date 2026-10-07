@@ -93,15 +93,33 @@ written to be actionable, which means they quote things: `search %q`
 quotes the caller's query, `collection %q` quotes a collection name, a
 GCS error quotes bucket and object. So spans record a **classified
 outcome** from a closed set (`telemetry.Fail`) and leave the full text
-to the log. `telemetry.End`, which does record the error, is used only
-where the error is known to be meerkat's own prose.
+to the log. `telemetry.End` does the same: it records the error's class
+(`cancelled`, `timeout`, `not_found` or `error`) as the status
+description and `meerkat.outcome`, never `err.Error()` and no exception
+event, so a call site needs no care about what its error quotes.
+
+**The rule is also structural.** An allowlist span processor sits in
+front of the exporter queue. It exports an attribute only when its key
+is in `meerkat.*` or in a short declared set (HTTP method, route and
+status code, `server.address`, `url.scheme`, `exception.type`); it
+renames any span from a non-meerkat instrumentation scope to a fixed
+`external.<kind>` and drops that span's events and status text. This
+matters because `SetGlobals` installs the provider process-wide, so
+third-party clients instrumented against the globals emit into it. The
+object-store clients additionally have their built-in HTTP
+instrumentation turned off (`option.WithTelemetryDisabled()`), so the
+processor is a second layer rather than the only one. The outbound
+IdP client span records the error class too, not the `*url.Error` that
+embeds the request URL.
 
 The enforcement is a test, not a promise:
 `TestObservability_NoSpanOrMetricCarriesAForbiddenValue` drives every
 read surface plus an ambiguity, a not-found and a scanner probe, then
 walks every recorded span (name, attributes, events, status description,
 resource) and every gathered metric label, failing on any of the value
-classes above.
+classes above. A second test drives the real object-store client against a
+fake endpoint with the global provider installed and asserts no exported
+span carries a URL, bucket or object name.
 
 ## Provider wiring
 

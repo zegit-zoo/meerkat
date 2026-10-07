@@ -16,6 +16,7 @@ import (
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 )
 
 // GCSStore is a memory store backed by a Google Cloud Storage prefix.
@@ -90,7 +91,7 @@ var errGCSPrecondition = errors.New("gcs precondition failed")
 // so tests can substitute a fake without a build tag; production always
 // gets the real ADC-backed client.
 var newGCSMemoryClient = func(ctx context.Context) (gcsMemoryAPI, error) {
-	c, err := storage.NewClient(ctx)
+	c, err := storage.NewClient(ctx, option.WithTelemetryDisabled())
 	if err != nil {
 		return nil, fmt.Errorf("google cloud storage: %w — credentials resolve via Application Default Credentials; "+
 			"run `gcloud auth application-default login`, or attach a workload identity / service account to the workload", err)

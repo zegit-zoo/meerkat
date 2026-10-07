@@ -202,7 +202,9 @@ func (t *Telemetry) startTracing(ctx context.Context, res *resource.Resource, ov
 			log:           t.log,
 			metrics:       t.metrics,
 		})
-		popts = append(popts, sdktrace.WithSpanProcessor(bp))
+		// The allowlist sits in front of the queue so that nothing a
+		// third-party instrumentation attached ever reaches the exporter.
+		popts = append(popts, sdktrace.WithSpanProcessor(newAllowlistProcessor(bp)))
 	}
 	tp := sdktrace.NewTracerProvider(popts...)
 	t.tracerProvider = tp
@@ -537,7 +539,8 @@ func (rt *tracingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	rt.tel.Inject(ctx, out.Header)
 	resp, err := rt.inner.RoundTrip(out)
 	if err != nil {
-		span.RecordError(err)
+		// A *url.Error carries the full request URL; record the class only.
+		recordFailure(span, err)
 		return nil, err
 	}
 	span.SetAttributes(semconv.HTTPResponseStatusCode(resp.StatusCode))
