@@ -30,12 +30,19 @@ var (
 	// hostile entry.
 	maxExtractedFileBytes int64 = 64 << 20 // 64 MiB
 
-	// maxExtractedTotalBytes caps the *cumulative* uncompressed bytes
-	// read from the archive across every entry. Without this, a single
-	// entry that declares a huge size (fed through gzip, which can
-	// inflate at very high ratios) forces us to decompress an
-	// attacker-chosen number of bytes before we ever finish — the
-	// classic decompression-bomb shape. See cumulativeLimitReader.
+	// maxExtractedTotalBytes caps the *cumulative* uncompressed size of
+	// an archive, enforced twice: once on the bytes read out of gzip
+	// (cumulativeLimitReader — bounds decompression work, including for
+	// skipped entries and padding) and once on the bytes actually
+	// written to disk across every extracted file (extractBudget —
+	// bounds disk use). Without the first, a single entry that declares
+	// a huge size (fed through gzip, which can inflate at very high
+	// ratios) forces us to decompress an attacker-chosen number of
+	// bytes before we ever finish — the classic decompression-bomb
+	// shape. Without the second, any entry whose logical content is
+	// larger than its stored bytes (archive/tar synthesises sparse
+	// holes without reading them from the stream) would escape a
+	// read-side-only budget.
 	maxExtractedTotalBytes int64 = 4 << 30 // 4 GiB
 )
 
@@ -115,7 +122,9 @@ func (c *cumulativeLimitReader) Read(p []byte) (int, error) {
 //   - Only regular files and directories are ever created. Every other
 //     type (symlink, hardlink, device node, FIFO, etc.) is skipped.
 //   - A cumulative uncompressed-byte budget (maxExtractedTotalBytes)
-//     across the whole archive guards against a decompression bomb; a
+//     across the whole archive, counted both on bytes read from gzip
+//     and on bytes written to disk, guards against a decompression bomb;
+//     GNU sparse entries are refused outright; a
 //     per-file budget (maxExtractedFileBytes) guards against a single
 //     huge entry; an entry-count cap (maxExtractEntries) guards against
 //     a huge number of tiny entries.
@@ -147,6 +156,7 @@ func extractTarGz(tarballPath, destDir string) error {
 	limited := &cumulativeLimitReader{r: gz, remaining: maxExtractedTotalBytes}
 	tr := tar.NewReader(limited)
 
+	written := &extractBudget{remaining: maxExtractedTotalBytes}
 	entries := 0
 	for {
 		hdr, err := tr.Next()
@@ -155,7 +165,7 @@ func extractTarGz(tarballPath, destDir string) error {
 		}
 		if err != nil {
 			if limited.exceeded {
-				return fmt.Errorf("archive exceeds the %d-byte cumulative uncompressed size cap; refusing (corrupt or unexpectedly large archive)", maxExtractedTotalBytes)
+				return errCumulativeCap()
 			}
 			return fmt.Errorf("tar: %w", err)
 		}
@@ -169,6 +179,13 @@ func extractTarGz(tarballPath, destDir string) error {
 		if !ok {
 			return fmt.Errorf("refusing to extract entry with unsafe name %q", hdr.Name)
 		}
+		if isSparseEntry(hdr) {
+			// A content archive has no use for sparse files, and their
+			// logical size is decoupled from the bytes stored in the
+			// archive. Refuse the whole archive rather than skip the
+			// entry, so a publisher learns their tool produced one.
+			return fmt.Errorf("refusing to extract sparse entry %q; re-create the archive without sparse files", name)
+		}
 		if name == "." {
 			continue // the archive's own root directory entry, if present.
 		}
@@ -180,7 +197,7 @@ func extractTarGz(tarballPath, destDir string) error {
 				return fmt.Errorf("mkdir %q: %w", name, err)
 			}
 		case tar.TypeReg:
-			if err := extractRegularFile(root, name, nativeName, tr, limited); err != nil {
+			if err := extractRegularFile(root, name, nativeName, tr, limited, written); err != nil {
 				return err
 			}
 		case tar.TypeSymlink, tar.TypeLink:
@@ -200,12 +217,45 @@ func extractTarGz(tarballPath, destDir string) error {
 	return nil
 }
 
+// extractBudget tracks how many more bytes extractTarGz may write to
+// disk across every regular file in the archive.
+type extractBudget struct {
+	remaining int64
+}
+
+// isSparseEntry reports whether hdr describes a GNU sparse file, in
+// either the old GNU header form (TypeGNUSparse) or any of the PAX
+// "GNU.sparse.*" forms (0.0, 0.1, 1.0), which archive/tar reports as
+// TypeReg.
+func isSparseEntry(hdr *tar.Header) bool {
+	if hdr.Typeflag == tar.TypeGNUSparse {
+		return true
+	}
+	for k := range hdr.PAXRecords {
+		if strings.HasPrefix(k, "GNU.sparse.") {
+			return true
+		}
+	}
+	return false
+}
+
+// errCumulativeCap is the error for an archive over maxExtractedTotalBytes,
+// whichever of the two enforcement points (read or write) tripped first.
+func errCumulativeCap() error {
+	return fmt.Errorf("archive exceeds the %d-byte cumulative uncompressed size cap; refusing (corrupt or unexpectedly large archive)", maxExtractedTotalBytes)
+}
+
 // extractRegularFile writes one tar.TypeReg entry through root,
 // enforcing the per-file and cumulative size caps. name is the entry's
 // cleaned, slash-separated path (used only in error messages); nativeName
 // is the same path converted to the host's separator convention (what
 // every os.Root call actually uses).
-func extractRegularFile(root *os.Root, name, nativeName string, tr *tar.Reader, cum *cumulativeLimitReader) error {
+//
+// The bytes copied to disk are bounded by min(per-file cap, what is
+// left of the cumulative write budget), so no archive can put more
+// than maxExtractedTotalBytes (+1 byte of detection overshoot) on disk,
+// regardless of how its entries are encoded.
+func extractRegularFile(root *os.Root, name, nativeName string, tr *tar.Reader, cum *cumulativeLimitReader, budget *extractBudget) error {
 	if dir := path.Dir(name); dir != "." {
 		if err := root.MkdirAll(filepath.FromSlash(dir), 0o755); err != nil {
 			return fmt.Errorf("mkdir %q: %w", dir, err)
@@ -217,15 +267,20 @@ func extractRegularFile(root *os.Root, name, nativeName string, tr *tar.Reader, 
 	}
 	defer func() { _ = out.Close() }()
 
-	n, err := io.Copy(out, io.LimitReader(tr, maxExtractedFileBytes+1))
+	limit := min(maxExtractedFileBytes, budget.remaining)
+	n, err := io.Copy(out, io.LimitReader(tr, limit+1))
+	budget.remaining -= n
 	if err != nil {
 		if cum.exceeded {
-			return fmt.Errorf("archive exceeds the %d-byte cumulative uncompressed size cap; refusing (corrupt or unexpectedly large archive)", maxExtractedTotalBytes)
+			return errCumulativeCap()
 		}
 		return fmt.Errorf("write %q: %w", name, err)
 	}
 	if n > maxExtractedFileBytes {
 		return fmt.Errorf("entry %q exceeds the %d-byte per-file cap; refusing", name, maxExtractedFileBytes)
+	}
+	if budget.remaining < 0 {
+		return errCumulativeCap()
 	}
 	return out.Close()
 }
