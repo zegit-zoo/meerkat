@@ -133,14 +133,124 @@ func (r *Registry) TreeLimits() contentsource.Limits {
 }
 
 // TreeNode returns the tree node for a collection name, mounted or
-// declared, and whether one exists.
+// declared, as THIS view may see it, and whether one exists.
+//
+// A name outside the view answers exactly as a name nobody declared
+// (nil, false). For a visible node the result is a copy with every
+// reference to a knowledge base outside the view removed: Children
+// lists only visible children, Parent is blank when the parent is
+// hidden, and Path keeps only the segments below the deepest hidden
+// ancestor (so a caller who can read `flux` alone sees `flux`, not
+// `root/platform/flux`). Mounted, and each child's Mounted, report live
+// residency rather than the declaration-time flag. The copy carries no
+// lazy source; it is for describing the node, not mounting it.
 func (r *Registry) TreeNode(name string) (*contentsource.TreeNode, bool) {
 	t := r.base().tree
-	if t == nil {
+	if t == nil || !r.sees(name) {
 		return nil, false
 	}
 	n, ok := t.nodes[name]
-	return n, ok
+	if !ok {
+		return nil, false
+	}
+	// A collection's own node is the richer one (a lazy child's carries
+	// its declared description, limits and children); the tree index
+	// holds only a stub for it.
+	if c, ok := r.base().by[name]; ok && c.Tree != nil {
+		n = c.Tree
+	}
+	out := r.viewNode(n)
+	return &out, true
+}
+
+// viewNode copies n with every name outside this view removed (see
+// TreeNode). It reads no field a mount writes, so it is safe against a
+// concurrent lazy mount.
+func (r *Registry) viewNode(n *contentsource.TreeNode) contentsource.TreeNode {
+	out := contentsource.TreeNode{
+		Name:          n.Name,
+		Path:          r.visiblePath(n.Path),
+		Depth:         n.Depth,
+		Mounted:       r.treeMounted(n.Name),
+		Mount:         n.Mount,
+		Placement:     n.Placement,
+		SourceType:    n.SourceType,
+		SizeHintBytes: n.SizeHintBytes,
+		StaleAfter:    n.StaleAfter,
+		Access:        n.Access,
+		Limits:        n.Limits,
+		Description:   n.Description,
+	}
+	if n.Parent != "" && r.sees(n.Parent) {
+		out.Parent = n.Parent
+	}
+	for _, ch := range n.Children {
+		if !r.sees(ch.Name) {
+			continue
+		}
+		ch.Mounted = r.treeMounted(ch.Name)
+		out.Children = append(out.Children, ch)
+	}
+	return out
+}
+
+// visiblePath drops the segments of a tree path down to and including
+// the deepest one this view cannot see.
+func (r *Registry) visiblePath(path string) string {
+	segs := strings.Split(path, "/")
+	for i := len(segs) - 1; i >= 0; i-- {
+		if !r.sees(segs[i]) {
+			return strings.Join(segs[i+1:], "/")
+		}
+	}
+	return path
+}
+
+// sees reports whether this view may know that a knowledge base called
+// name exists. A collection is visible exactly when the view holds it
+// (r.by, which Restrict filtered). A node the tree declares but that has
+// no collection in this process at all (placement: dedicated) is
+// visible when the view's Restrict predicate accepts its name; on an
+// unrestricted registry, always.
+//
+// Every tree-aware answer — path aliases, the cold-child error, tree
+// metadata — goes through this, so a hidden knowledge base answers
+// exactly as one that was never declared.
+func (r *Registry) sees(name string) bool {
+	if _, ok := r.by[name]; ok {
+		return true
+	}
+	if _, ok := r.base().by[name]; ok {
+		return false // a collection, filtered out of this view
+	}
+	t := r.base().tree
+	if t == nil {
+		return false
+	}
+	if _, declared := t.nodes[name]; !declared {
+		return false
+	}
+	return r.allow == nil || r.allow(name)
+}
+
+// treePath resolves a tree path to a collection name when, and only
+// when, every knowledge base along it is visible to this view. A path
+// through a hidden hub would otherwise confirm that hub's name.
+func (r *Registry) treePath(path string) (string, bool) {
+	t := r.base().tree
+	if t == nil {
+		return "", false
+	}
+	name, ok := t.byPath[path]
+	if !ok {
+		return "", false
+	}
+	for _, seg := range strings.Split(path, "/") {
+		if !r.sees(seg) {
+			return "", false
+		}
+	}
+	return name, true
 }
 
 // treeMounted reports live residency for a name: a cold collection is
@@ -152,35 +262,36 @@ func (r *Registry) treeMounted(name string) bool {
 	return false
 }
 
-// TreeEntries lists every declared knowledge base in the tree — the
-// mounted collections in this view plus the declared-but-unmounted
-// children of those — ordered by path. Empty for a flat deployment.
+// TreeEntries lists every declared knowledge base in the tree that this
+// view can see — its collections, mounted or cold, plus declared nodes
+// with no collection in this process that its Restrict predicate
+// accepts — ordered by path, each described as TreeNode describes it.
+// Empty for a flat deployment.
 func (r *Registry) TreeEntries() []TreeEntry {
 	t := r.base().tree
 	if t == nil {
 		return nil
 	}
 	var out []TreeEntry
-	for _, n := range t.nodes {
-		if n.Mounted {
-			if _, visible := r.by[n.Name]; !visible {
-				continue // outside this view
-			}
-		} else if parent, ok := t.nodes[n.Parent]; ok {
-			if _, visible := r.by[parent.Name]; !visible {
-				continue // its parent is outside this view; so is it
-			}
+	for name := range t.nodes {
+		n, ok := r.TreeNode(name)
+		if !ok {
+			continue // outside this view
 		}
-		e := TreeEntry{TreeNode: *n}
-		e.Mounted = r.treeMounted(n.Name)
-		out = append(out, e)
+		out = append(out, TreeEntry{TreeNode: *n})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
 }
 
 // resolveTreeName maps a collection reference — a name or a tree path
-// — to a collection name, and reports a declared-but-unmounted one.
+// — to a collection name, and reports a declared node this process has
+// no collection for (ErrColdCollection).
+//
+// A reference this view cannot see is returned unchanged with no error,
+// so the caller (Get) produces the same unknown-collection error it
+// gives for a name nobody declared: a hidden name, a path through a
+// hidden hub and a path that does not exist are indistinguishable.
 func (r *Registry) resolveTreeName(ref string) (string, error) {
 	t := r.base().tree
 	if t == nil {
@@ -188,14 +299,24 @@ func (r *Registry) resolveTreeName(ref string) (string, error) {
 	}
 	name := ref
 	if strings.Contains(ref, "/") {
-		n, ok := t.byPath[ref]
+		n, ok := r.treePath(ref)
 		if !ok {
-			return "", fmt.Errorf("%w %q — no knowledge base at that tree path", ErrUnknownCollection, ref)
+			return ref, nil
 		}
 		name = n
 	}
-	if n, ok := t.nodes[name]; ok && !n.Mounted {
-		return "", fmt.Errorf("%w: %q (mount: %s, under %q) — search its parent hub, or mount it eagerly", ErrColdCollection, name, n.Mount, n.Parent)
+	if !r.sees(name) {
+		return ref, nil
+	}
+	if _, ok := r.by[name]; ok {
+		return name, nil // a collection in view; Get mounts it if cold
+	}
+	if n, ok := t.nodes[name]; ok {
+		where := ""
+		if n.Parent != "" && r.sees(n.Parent) {
+			where = fmt.Sprintf(", under %q", n.Parent)
+		}
+		return "", fmt.Errorf("%w: %q (mount: %s%s) — search its parent hub, or mount it eagerly", ErrColdCollection, name, n.Mount, where)
 	}
 	return name, nil
 }
