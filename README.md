@@ -1139,7 +1139,8 @@ every other collection ranks with no type boost. See
 Research deposited by `mk_report_outcome` becomes knowledge through
 three agent roles: `mk ingest --role researcher` turns a raw item into
 a candidate page, `--role validator` re-derives its claims (a different
-model than the researcher's, two independent confirmations to file),
+model than the researcher's, two recorded confirmations from distinct
+models to file),
 and `--role librarian` reports dangling links, stale pages, cull
 proposals, missing links from the traversal log and parked items —
 changing nothing without `--apply`. See

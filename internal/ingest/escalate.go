@@ -103,6 +103,14 @@ func parkedEntries(ctx context.Context, store *intake.Store, staged []intake.Sta
 			}
 			break
 		}
+		// The validators' reasons, as the pipeline recorded their runs.
+		if vals, err := store.Validations(ctx, it.ID); err == nil {
+			for _, v := range intake.Failures(vals) {
+				if v.Reason != "" && !slices.Contains(p.FailureReasons, v.Reason) {
+					p.FailureReasons = append(p.FailureReasons, v.Reason)
+				}
+			}
+		}
 		raw, ok, err := store.FindRaw(ctx, it.ID)
 		if err != nil {
 			// A malformed deposit still gets its issue, without the
@@ -131,6 +139,11 @@ type ApplyOpts struct {
 	Getenv func(string) string
 	// Now is the clock filing claims are stamped with; nil is time.Now.
 	Now func() time.Time
+	// FileConfirmed lets Apply write confirmed candidates into a
+	// `direct` collection's memory store. Off by default: two agent
+	// confirmations are a machine check, and publishing the page to
+	// every reader of the collection is a human's call (meerkat-mob#33).
+	FileConfirmed bool
 }
 
 // applyParked files an issue for every parked item that has none, and

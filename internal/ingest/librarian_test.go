@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,8 +49,20 @@ func librarianFixture(t *testing.T) (*collections.Registry, *intake.Store, *trav
 	if _, err := st.PutStaged(context.Background(), "flux", "it1", []byte(confirmed)); err != nil {
 		t.Fatal(err)
 	}
-	unconfirmed := "---\nid: intake/it2\ntitle: Half\nverified:\n  - {by: agent:validator:one}\n---\n# Half\n"
+	// it1 has two recorded validator runs of distinct models; its own
+	// verified: entries are text and count for nothing.
+	for i, m := range []string{"model-b", "model-c"} {
+		v := intake.Validation{Run: fmt.Sprintf("run-%d", i), Model: m, Outcome: intake.ValidationConfirmed, At: now}
+		if err := st.RecordValidation(context.Background(), "it1", v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// it2 claims two confirmations in its frontmatter and has one run.
+	unconfirmed := "---\nid: intake/it2\ntitle: Half\nverified:\n  - {by: agent:validator:one}\n  - {by: agent:validator:two}\n---\n# Half\n"
 	if _, err := st.PutStaged(context.Background(), "flux", "it2", []byte(unconfirmed)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordValidation(context.Background(), "it2", intake.Validation{Run: "run-0", Model: "model-b", Outcome: intake.ValidationConfirmed, At: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Park(context.Background(), "it3", "validators disagreed"); err != nil {
@@ -100,7 +113,19 @@ func TestLibrarian_ReportsWithoutModifying(t *testing.T) {
 		t.Error("the report must not file anything")
 	}
 
-	applied, err := Apply(ctx, reg, st, rep)
+	// Without FileConfirmed a direct candidate is held, not written.
+	held, err := Apply(ctx, reg, st, rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(held) != 2 || held[0].Action != "held" || !strings.Contains(held[0].Detail, "--file-confirmed") {
+		t.Fatalf("held = %+v", held)
+	}
+	if recs, _ = flux.Memory().Load(ctx); len(recs) != 0 {
+		t.Fatal("Apply without FileConfirmed must not write into a direct collection")
+	}
+
+	applied, err := ApplyWith(ctx, reg, st, rep, ApplyOpts{FileConfirmed: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +136,15 @@ func TestLibrarian_ReportsWithoutModifying(t *testing.T) {
 	}
 	recs, _ = flux.Memory().Load(ctx)
 	if len(recs) != 1 || recs[0].Key != "global/intake/it1.md" {
-		t.Errorf("filed = %+v", recs)
+		t.Fatalf("filed = %+v", recs)
+	}
+	// The filed page's verified: is rebuilt from the recorded runs.
+	filed, err := kb.ParsePage("intake/it1", "x", recs[0].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filed.Front.Verified) != 2 || filed.Front.Verified[0].By != "agent:validator:model-b" || filed.Front.Verified[1].By != "agent:validator:model-c" || filed.Front.Status != "machine-confirmed" {
+		t.Errorf("filed frontmatter = %+v", filed.Front)
 	}
 	// Filing is idempotent: the next report no longer lists it.
 	rep2, _ := Librarian(ctx, reg, st, LibrarianOpts{Now: func() time.Time { return now }})

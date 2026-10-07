@@ -111,6 +111,7 @@ type ingestFlags struct {
 	namespace     string
 	only          string
 	apply         bool
+	fileConfirmed bool
 	days          int
 }
 
@@ -370,7 +371,7 @@ func runLibrarian(cmd *cobra.Command, ctx context.Context, store *intake.Store) 
 		len(rep.Findings), rep.Count(ingest.FindingDangling), rep.Count(ingest.FindingStale), rep.Count(ingest.FindingCull),
 		rep.Count(ingest.FindingMissingLink), rep.Count(ingest.FindingNeedsHuman), rep.Count(ingest.FindingPromotion), rep.Count(ingest.FindingPromptQuality), len(rep.Fileable))
 	if iflags.apply {
-		applied, err := ingest.Apply(ctx, reg, store, rep)
+		applied, err := ingest.ApplyWith(ctx, reg, store, rep, ingest.ApplyOpts{FileConfirmed: iflags.fileConfirmed})
 		if err != nil {
 			return err
 		}
@@ -378,7 +379,7 @@ func runLibrarian(cmd *cobra.Command, ctx context.Context, store *intake.Store) 
 			fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %s  %s\n", a.Action, a.IntakeID, a.Detail)
 		}
 	} else if len(rep.Fileable) > 0 || len(rep.Promotions) > 0 || len(rep.Parked) > 0 {
-		fmt.Fprintln(cmd.ErrOrStderr(), "nothing filed; add --apply to file the confirmed candidates and root pointers through their contracts, "+
+		fmt.Fprintln(cmd.ErrOrStderr(), "nothing filed; add --apply to file the confirmed candidates (with --file-confirmed for direct contracts) and root pointers through their contracts, "+
 			"and a forge issue for each parked item whose collection's contract names a token_env")
 	}
 	if len(rep.PromptQuality) == 0 {
