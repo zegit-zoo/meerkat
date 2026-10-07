@@ -935,7 +935,7 @@ meerkat update [flags]
 ```text
       --check            Just report the latest version; don't download or install.
       --force            Re-install even if already on the target version (downgrade-friendly).
-      --skip-cosign      Skip cosign signature verification (NOT recommended — sha256-only).
+      --skip-cosign      Skip cosign signature verification (NOT recommended). Also requires MEERKAT_UPDATE_ALLOW_UNVERIFIED=1, and a typed confirmation on a terminal.
       --version string   Install a specific tag (e.g. v0.4.0) instead of latest.
   -y, --yes              Skip the confirmation prompt.
 ```

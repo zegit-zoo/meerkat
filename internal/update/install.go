@@ -189,7 +189,8 @@ func wrapPermissionError(currentExe, stage string, err error) error {
 func wrapSudoInstallError(currentExe string, err error) error {
 	return fmt.Errorf(`install with sudo failed for %q
 
-The new binary was downloaded, cosign-signature-verified, and staged
+The new binary was downloaded, verified (see the cosign: line printed
+earlier for what was checked), and staged
 in a user-owned temp directory. Only the final copy/move operations
 were run with sudo.
 
@@ -242,7 +243,8 @@ Two ways forward:
        mk update
 
      Note: this is the same trust boundary as running 'mk' itself;
-     the binary is cosign-signature-verified before any swap.
+     the binary is verified before any swap (see the cosign: line
+     printed by 'mk update' for exactly what was checked).
 
   2. Move the install to a user-writable directory so future
      updates work without elevation:
@@ -286,7 +288,8 @@ Two ways forward:
        sudo mk update
 
      Note: this is the same trust boundary as running 'mk' itself;
-     the binary is cosign-signature-verified before any swap.
+     the binary is verified before any swap (see the cosign: line
+     printed by 'mk update' for exactly what was checked).
 
   2. Move the install to a user-writable directory so future
      updates work without sudo:

@@ -173,7 +173,7 @@ func TestPermissionDeniedError_MessageShape_Unix(t *testing.T) {
 		"permission denied writing to",
 		"in-place atomic swap",
 		"sudo mk update",
-		"cosign-signature-verified",
+		"the cosign: line",
 		"/usr/local/bin",
 		"docs/INSTALL.md#updating",
 	} {

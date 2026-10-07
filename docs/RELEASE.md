@@ -140,6 +140,11 @@ the signature is included in the public Rekor transparency log — the
 inclusion proof is embedded in the bundle, so this check happens offline
 rather than by querying Rekor live.
 
+`mk update` performs this same check automatically and requires `cosign` on
+`PATH`; its `--skip-cosign` escape hatch is gated behind
+`MEERKAT_UPDATE_ALLOW_UNVERIFIED=1` and, on a terminal, a typed confirmation.
+Verification inside the binary (no cosign prerequisite) is a follow-up.
+
 ## Verifying the container image (consumer side)
 
 ```sh

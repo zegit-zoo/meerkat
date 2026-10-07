@@ -64,6 +64,14 @@ Examples:
 				return update.ErrHomebrewManaged
 			}
 
+			// Gate the signature skip before any network traffic: the
+			// flag alone is not enough (see update.ConfirmUnverified).
+			if skipCosign && !checkOnly {
+				if err := update.ConfirmUnverified(os.Getenv, update.StdinIsTerminal(), os.Stdin, cmd.OutOrStdout()); err != nil {
+					return err
+				}
+			}
+
 			cur := currentVersion()
 			rel, err := update.FetchByTag(ctx, pinTag)
 			if err != nil {
@@ -164,7 +172,7 @@ Examples:
 			defer os.Remove(checksumsLocal)
 
 			if skipCosign {
-				fmt.Fprintln(cmd.OutOrStdout(), "cosign:  SKIPPED (--skip-cosign) — falling back to sha256-only")
+				fmt.Fprintln(cmd.OutOrStdout(), update.UnverifiedNotice)
 			} else {
 				bundleName := update.CosignAssetName(checksumName)
 				bundleURL, ok := rel.FindAsset(bundleName)
@@ -180,11 +188,7 @@ Examples:
 				fmt.Fprintln(cmd.OutOrStdout(), "cosign:  verifying signature on checksums…")
 				if err := update.VerifyChecksumSignature(ctx, checksumsLocal, bundlePath); err != nil {
 					if errors.Is(err, update.ErrCosignMissing) {
-						return fmt.Errorf(
-							"cosign binary not found on PATH.\n\n"+
-								"Install via `brew install cosign` (or see https://docs.sigstore.dev/system_config/installation/),\n"+
-								"or re-run with --skip-cosign to fall back to SHA256-only verification.\n\n"+
-								"Original error: %w", err)
+						return update.MissingCosignError(err)
 					}
 					return fmt.Errorf("signature verification FAILED — refusing to install: %w", err)
 				}
@@ -219,7 +223,7 @@ Examples:
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false,
 		"Skip the confirmation prompt.")
 	cmd.Flags().BoolVar(&skipCosign, "skip-cosign", false,
-		"Skip cosign signature verification (NOT recommended — sha256-only).")
+		"Skip cosign signature verification (NOT recommended). Also requires "+update.AllowUnverifiedEnv+"=1, and a typed confirmation on a terminal.")
 	return cmd
 }
 
