@@ -232,13 +232,22 @@ finding whose page is in that working copy, one executor task with the
 overridable as `ingestion/prompts/librarian-rewrite.md`): the file, the
 one field it may change, the queries and the words no text mentions.
 Pages served from another repo or from a memory overlay are skipped
-with the reason. The commit message cites the queries. Rewrites go to
+with the reason. The commit message cites the queries.
+
+The queries are what sessions typed, so they reach the brief only
+cleaned (control characters flattened, backticks and `$` removed, each
+capped at 200 bytes) and inside a fenced block the brief labels as
+untrusted data; the words derived from them are fenced the same way.
+The commit message travels in a file (`git commit -F`), never on the
+command line (meerkat-mob#35). Rewrites go to
 `--branch`, default `librarian/rewrites`, never the content branch: a
 rewrite is confirmed by review of that branch before it serves.
 
 After the run each page is checked against its pre-run snapshot; any
-change beyond the one field restores the snapshot and reports the task
-as rejected (the agent's commit on the review branch is the operator's
+change beyond the one field, or a new value carrying a URL, a shell or
+template construct (backticks, `$(`, `${`, `{{`, `&&`, `||`, a pipe
+into a shell), markup or a command name such as `curl`, restores the
+snapshot and reports the task as rejected (the agent's commit on the review branch is the operator's
 to discard). `meerkat_librarian_rewrites_total{action}` counts
 rewritten, unchanged, rejected and failed.
 

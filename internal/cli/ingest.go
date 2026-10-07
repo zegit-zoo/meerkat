@@ -153,7 +153,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	if !iflags.execute {
 		var w = cmd.OutOrStdout()
 		if iflags.batchFile != "" {
-			f, err := os.Create(iflags.batchFile)
+			f, err := createBatchFile(iflags.batchFile)
 			if err != nil {
 				return fmt.Errorf("open batch file: %w", err)
 			}
@@ -461,4 +461,19 @@ func runRewrites(cmd *cobra.Command, ctx context.Context, rep *ingest.Report) er
 		return fmt.Errorf("%d of %d rewrites failed or were rejected", bad, len(done))
 	}
 	return nil
+}
+
+// createBatchFile opens the --batch-file for writing, owner-only: it
+// holds every rendered prompt (meerkat-mob#35). An existing file is
+// truncated and narrowed to 0600 too.
+func createBatchFile(name string) (*os.File, error) {
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // G304: the operator names the file.
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }

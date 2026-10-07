@@ -9,9 +9,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/sources"
@@ -136,9 +139,13 @@ func PlanRewrites(rep *Report, opts RewritePlanOpts) ([]Task, []Skip, error) {
 				skips = append(skips, Skip{qualified, "not in this working copy (" + rel + ")"})
 				continue
 			}
-			queries := make([]string, 0, len(f.Queries))
-			for _, q := range f.Queries {
-				queries = append(queries, "- "+q)
+			// The queries are what sessions typed: they reach the brief, and
+			// the commit message, cleaned and inside a data fence
+			// (meerkat-mob#35).
+			queries := cleanQueries(f.Queries)
+			lines := make([]string, 0, len(queries))
+			for _, q := range queries {
+				lines = append(lines, "- "+q)
 			}
 			subs := map[string]string{
 				"page_path":  rel,
@@ -146,12 +153,12 @@ func PlanRewrites(rep *Report, opts RewritePlanOpts) ([]Task, []Skip, error) {
 				"collection": coll,
 				"field":      field,
 				"reason":     reason,
-				"queries":    strings.Join(queries, "\n"),
-				"terms":      strings.Join(f.Terms, ", "),
+				"queries":    queryFence(lines),
+				"terms":      queryFence([]string{strings.Join(cleanQueries(f.Terms), ", ")}),
 			}
 			tasks = append(tasks, Task{
 				Role: RoleLibrarian, IntakeID: "rewrite:" + qualified, TargetKB: coll,
-				PageID: id, PagePath: rel, SourceID: "librarian", Field: field, Queries: f.Queries,
+				PageID: id, PagePath: rel, SourceID: "librarian", Field: field, Queries: queries,
 				Prompt: substitute(prompt, subs), Model: opts.Model, SubagentType: opts.SubagentType, WallClockCapS: opts.WallClockCap,
 			})
 		}
@@ -160,7 +167,7 @@ func PlanRewrites(rep *Report, opts RewritePlanOpts) ([]Task, []Skip, error) {
 }
 
 // buildRewriteInstruction wraps the brief with the one-file contract.
-func buildRewriteInstruction(t Task, workdir, branch string) string {
+func buildRewriteInstruction(t Task, workdir, branch, msgFile string) string {
 	return fmt.Sprintf(`You are the Meerkat librarian agent on **one rewrite**.
 Working directory: %s
 File: `+"`%s`"+`  Field: `+"`%s:`"+`
@@ -168,13 +175,79 @@ Change that one field only, commit + push, then stop.
 **IMPORTANT: Do this work yourself. DO NOT use the Task tool to delegate.**
 After editing, run (in this order, with retry-on-conflict up to 3 times):
     git pull --rebase --quiet || true
-    git add %s
-    git commit -m "%s"
+    git add -- %s
+    git commit -F %s
     git push origin %s
 When done, print exactly: REWRITE_DONE: %s
 Then stop.
 ---
-%s`, workdir, t.PagePath, t.Field, t.PagePath, rewriteCommitMessage(t), branch, t.PageID, t.Prompt)
+%s`, workdir, t.PagePath, t.Field, t.PagePath, msgFile, branch, t.PageID, t.Prompt)
+}
+
+// maxRewriteQueryLen caps one query as the rewrite brief and the commit
+// message quote it.
+const maxRewriteQueryLen = 200
+
+// cleanQueries makes session-typed queries safe to quote: control
+// characters become spaces, backticks and "$" are dropped, white space
+// is collapsed and each query is capped at maxRewriteQueryLen bytes (on
+// a rune boundary). Empty results are left out.
+func cleanQueries(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, q := range in {
+		q = strings.Map(func(r rune) rune {
+			switch {
+			case r == '`' || r == '$':
+				return -1
+			case unicode.IsControl(r):
+				return ' '
+			}
+			return r
+		}, q)
+		q = strings.Join(strings.Fields(q), " ")
+		if len(q) > maxRewriteQueryLen {
+			cut := maxRewriteQueryLen
+			for cut > 0 && !utf8.RuneStart(q[cut]) {
+				cut--
+			}
+			q = q[:cut]
+		}
+		if q != "" {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// queryFence puts cleaned query text in a fenced block. cleanQueries
+// has removed every backtick, so nothing inside can close the fence.
+func queryFence(lines []string) string {
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		lines = []string{"(none)"}
+	}
+	return "```text\n" + strings.Join(lines, "\n") + "\n```"
+}
+
+// rewriteTextProblem rejects a rewritten hint or description that reads
+// like anything but a plain description: a URL, a shell or template
+// construct, or markup. "" means acceptable.
+func rewriteTextProblem(v string) string {
+	for _, p := range rewriteRefusals {
+		if p.re.MatchString(v) {
+			return p.why
+		}
+	}
+	return ""
+}
+
+var rewriteRefusals = []struct {
+	re  *regexp.Regexp
+	why string
+}{
+	{regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://|\bwww\.|\bmailto:|\bdata:`), "the rewritten text contains a URL"},
+	{regexp.MustCompile("`|\\$[({]|\\{\\{|\\}\\}|&&|\\|\\||\\|\\s*(?:ba|z|da)?sh\\b"), "the rewritten text contains a shell or template construct"},
+	{regexp.MustCompile(`<[A-Za-z/!?]`), "the rewritten text contains markup"},
+	{regexp.MustCompile(`(?i)\b(?:curl|wget|sudo|chmod|rm\s+-[a-z]*[rf])\b`), "the rewritten text names a command"},
 }
 
 // rewriteCommitMessage cites the queries that motivated the edit.
@@ -393,6 +466,9 @@ func onlyFieldChanged(t Task, orig, after []byte) (reason, beforeV, afterV strin
 	}
 	if strings.Contains(afterV, "\n") || len(afterV) > maxRewriteFieldLen {
 		return fmt.Sprintf("%s must be one line under %d characters", t.Field, maxRewriteFieldLen), beforeV, afterV
+	}
+	if why := rewriteTextProblem(afterV); why != "" {
+		return why, beforeV, afterV
 	}
 	if afterV == beforeV {
 		return "", beforeV, afterV // formatting-only change; reported as rewritten with equal values
