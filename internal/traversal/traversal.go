@@ -459,21 +459,6 @@ func (l *Log) Record(ctx context.Context, e Entry) (key string, err error) {
 	return key, nil
 }
 
-// stripIntakeNamespace removes the depositor's namespace from an intake
-// key, raw/<namespace>/<day>/<id>/page.md -> raw/<day>/<id>/page.md: the
-// namespace is derived from the depositor's subject, and the log must
-// not carry it. The id stays unique on its own (the intake store's
-// FindRaw looks an item up by id across namespaces). The layout is
-// internal/intake's RawKey, repeated because intake depends on this
-// package through internal/telemetry; traversal_test pins the two.
-func stripIntakeNamespace(id string) string {
-	seg := strings.Split(id, "/")
-	if len(seg) >= 5 && seg[0] == "raw" {
-		return strings.Join(append(seg[:1:1], seg[2:]...), "/")
-	}
-	return id
-}
-
 // maybePrune runs retention at most once an hour on the write path.
 func (l *Log) maybePrune(ctx context.Context, now time.Time) {
 	if l.retention == 0 {
@@ -590,4 +575,19 @@ func (s *localSink) DeleteDay(_ context.Context, day string) error {
 func isDay(s string) bool {
 	_, err := time.Parse("2006-01-02", s)
 	return err == nil
+}
+
+// stripIntakeNamespace removes the depositor's namespace from an intake
+// key, raw/<namespace>/<day>/<id>/page.md -> raw/<day>/<id>/page.md: the
+// namespace is derived from the depositor's subject, and the log must
+// not carry it. The id stays unique on its own (the intake store's
+// FindRaw looks an item up by id across namespaces). The layout is
+// internal/intake's RawKey, repeated because intake depends on this
+// package through internal/telemetry; traversal_test pins the two.
+func stripIntakeNamespace(id string) string {
+	seg := strings.Split(id, "/")
+	if len(seg) >= 5 && seg[0] == "raw" {
+		return strings.Join(append(seg[:1:1], seg[2:]...), "/")
+	}
+	return id
 }
