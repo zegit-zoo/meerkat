@@ -870,6 +870,10 @@ frontmatter (front): trust_tier (unverified | machine-confirmed |
 human-reviewed, derived from front.verified — SPEC.md §5.3) and stale
 (whether today is on/after front.stale_after — SPEC.md §5.5), plus the
 collection the page was served from.
+
+Text output has terminal control characters (C0 and C1, except newline
+and tab) removed, so content from a remote collection cannot drive the
+terminal; --json carries the stored values exactly.
 ```
 
 #### Usage
