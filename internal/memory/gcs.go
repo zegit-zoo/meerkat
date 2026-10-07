@@ -45,6 +45,8 @@ type GCSStore struct {
 	prefix string
 	// owned marks an api this store constructed and must close.
 	owned bool
+	// quota bounds each owner's partition; see Quota.
+	quota Quota
 }
 
 // gcsObject is the object metadata this package needs. A small local
@@ -54,6 +56,7 @@ type GCSStore struct {
 type gcsObject struct {
 	Name       string
 	Generation int64
+	Size       int64
 }
 
 // gcsMemoryAPI is the slice of cloud.google.com/go/storage this package
@@ -61,8 +64,11 @@ type gcsObject struct {
 // Every GCS test in this repo runs against a fake — there is no test
 // anywhere that needs credentials, a bucket, or the network.
 type gcsMemoryAPI interface {
-	// List returns every object under prefix.
-	List(ctx context.Context, bucket, prefix string) ([]gcsObject, error)
+	// List returns the objects under prefix for which keep (nil keeps
+	// everything) returns true. Only kept objects count towards
+	// maxMemoryObjects, so a crowded staging area cannot make the live
+	// listing fail.
+	List(ctx context.Context, bucket, prefix string, keep func(name string) bool) ([]gcsObject, error)
 	// Read returns one object's bytes and the generation they were read
 	// at. generation of 0 means "whatever is current".
 	Read(ctx context.Context, bucket, object string, generation int64) ([]byte, int64, error)
@@ -107,13 +113,13 @@ func OpenGCS(ctx context.Context, bucket, prefix string) (*GCSStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &GCSStore{api: api, bucket: bucket, prefix: normalisePrefix(prefix), owned: true}, nil
+	return &GCSStore{api: api, bucket: bucket, prefix: normalisePrefix(prefix), owned: true, quota: DefaultQuota()}, nil
 }
 
 // newGCSStoreWithAPI builds a store over an explicit API. Test-only
 // entry point; production goes through OpenGCS.
 func newGCSStoreWithAPI(api gcsMemoryAPI, bucket, prefix string) *GCSStore {
-	return &GCSStore{api: api, bucket: bucket, prefix: normalisePrefix(prefix)}
+	return &GCSStore{api: api, bucket: bucket, prefix: normalisePrefix(prefix), quota: DefaultQuota()}
 }
 
 // normalisePrefix trims leading slashes and guarantees a trailing one.
@@ -146,7 +152,7 @@ func (s *GCSStore) object(key string) string { return s.prefix + key }
 
 // Load implements Store.
 func (s *GCSStore) Load(ctx context.Context) ([]Record, error) {
-	objs, err := s.api.List(ctx, s.bucket, s.prefix)
+	objs, err := s.api.List(ctx, s.bucket, s.prefix, s.notStaged)
 	if err != nil {
 		return nil, fmt.Errorf("list %s: %w", s.Describe(), err)
 	}
@@ -177,6 +183,32 @@ func (s *GCSStore) Load(ctx context.Context) ([]Record, error) {
 		out = append(out, Record{Key: key, Body: body, Version: generationVersion(gen)})
 	}
 	return out, nil
+}
+
+// notStaged is the listing filter for Load and Fingerprint: staged
+// proposals are neither loaded nor counted against the object cap.
+func (s *GCSStore) notStaged(name string) bool { return !Staged(strings.TrimPrefix(name, s.prefix)) }
+
+// admit checks a write against the store's Quota, from a listing of the
+// key's partition. The listing and the write are separate requests; see
+// Quota for why that is acceptable.
+func (s *GCSStore) admit(ctx context.Context, key string, size int) error {
+	prefix, _, ok := quotaPartition(key)
+	if !ok {
+		return nil
+	}
+	objs, err := s.api.List(ctx, s.bucket, s.object(prefix), nil)
+	if err != nil {
+		return fmt.Errorf("measure memory partition: %w", err)
+	}
+	used := make([]storedObject, 0, len(objs))
+	for _, o := range objs {
+		k := strings.TrimPrefix(o.Name, s.prefix)
+		if countsTowardQuota(k) {
+			used = append(used, storedObject{Key: k, Size: o.Size})
+		}
+	}
+	return s.quota.admit(key, size, used)
 }
 
 // errNotAMemoryDocument marks an object under the store prefix that is
@@ -227,7 +259,7 @@ func (s *GCSStore) liveDocumentKey(name string) (string, error) {
 // there is no second party to forge one, and the full digest would only
 // make log lines longer.
 func (s *GCSStore) Fingerprint(ctx context.Context) (string, error) {
-	objs, err := s.api.List(ctx, s.bucket, s.prefix)
+	objs, err := s.api.List(ctx, s.bucket, s.prefix, s.notStaged)
 	if err != nil {
 		return "", fmt.Errorf("list %s: %w", s.Describe(), err)
 	}
@@ -285,6 +317,9 @@ func (s *GCSStore) Put(ctx context.Context, key string, body []byte, pre Precond
 		}
 		ifGeneration = gen
 	}
+	if err := s.admit(ctx, key, len(body)); err != nil {
+		return "", err
+	}
 	gen, err := s.api.Write(ctx, s.bucket, s.object(key), body, ifGeneration)
 	if errors.Is(err, errGCSPrecondition) {
 		return "", &ConflictError{Key: key, Current: s.currentVersion(ctx, key)}
@@ -302,6 +337,9 @@ func (s *GCSStore) Stage(ctx context.Context, key string, body []byte) (string, 
 	}
 	if !strings.HasPrefix(key, StagingPrefix+"/") {
 		return "", fmt.Errorf("staged memory key %q must be under %s/", key, StagingPrefix)
+	}
+	if err := s.admit(ctx, key, len(body)); err != nil {
+		return "", err
 	}
 	if err := s.api.WriteUnconditional(ctx, s.bucket, s.object(key), body); err != nil {
 		return "", fmt.Errorf("stage %s: %w", s.Location(key), err)
@@ -348,7 +386,7 @@ func parseGeneration(v Version) (int64, error) {
 
 type storageMemoryAPI struct{ c *storage.Client }
 
-func (s *storageMemoryAPI) List(ctx context.Context, bucket, prefix string) ([]gcsObject, error) {
+func (s *storageMemoryAPI) List(ctx context.Context, bucket, prefix string, keep func(string) bool) ([]gcsObject, error) {
 	it := s.c.Bucket(bucket).Objects(ctx, &storage.Query{Prefix: prefix})
 	var out []gcsObject
 	for {
@@ -359,10 +397,13 @@ func (s *storageMemoryAPI) List(ctx context.Context, bucket, prefix string) ([]g
 		if err != nil {
 			return nil, err
 		}
+		if keep != nil && !keep(a.Name) {
+			continue
+		}
 		if len(out) >= maxMemoryObjects {
 			return nil, fmt.Errorf("memory prefix %q holds more than %d objects; refusing", prefix, maxMemoryObjects)
 		}
-		out = append(out, gcsObject{Name: a.Name, Generation: a.Generation})
+		out = append(out, gcsObject{Name: a.Name, Generation: a.Generation, Size: a.Size})
 	}
 }
 
@@ -445,4 +486,9 @@ func translatePrecondition(err error) error {
 // bucket, and Load fetches every object before the server begins
 // serving; failing loudly at a sane bound beats a silent, unbounded
 // startup. Mirrors internal/contentsource's maxGCSObjects in spirit.
+//
+// It counts LIVE documents only: Load and Fingerprint filter staged
+// proposals out of the listing before the cap applies, so proposals can
+// never make the live set fail to load (meerkat-mob#44). Growth of
+// either is bounded per owner by Quota.
 const maxMemoryObjects = 20_000

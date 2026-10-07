@@ -400,3 +400,33 @@ func TestFindRaw(t *testing.T) {
 		t.Error("nil store finds nothing")
 	}
 }
+
+// TestPutRaw_DailyQuotaPerDepositor: the memory store's Quota charges
+// raw deposits to raw/<namespace>/<day>/, so one depositor's daily
+// volume is bounded, other depositors are not charged for it, and the
+// next day starts afresh (meerkat-mob#44). This also pins
+// memory's copy of the raw/ layout to RawKey.
+func TestPutRaw_DailyQuotaPerDepositor(t *testing.T) {
+	ctx := context.Background()
+	spec := &memory.Spec{Type: memory.BackendLocal, Path: filepath.Join(t.TempDir(), "intake"), Quota: &memory.Quota{Documents: 2}}
+	ms, err := spec.Open(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := New(ms)
+	day := time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC)
+	for _, id := range []string{"a1", "a2"} {
+		if _, err := st.PutRaw(ctx, "alice-ns", day, id, rawPage(id, "alice-ns", "q", "web")); err != nil {
+			t.Fatalf("deposit %s: %v", id, err)
+		}
+	}
+	if _, err := st.PutRaw(ctx, "alice-ns", day, "a3", rawPage("a3", "alice-ns", "q", "web")); !errors.Is(err, memory.ErrQuotaExceeded) {
+		t.Fatalf("third deposit in a day = %v, want ErrQuotaExceeded", err)
+	}
+	if _, err := st.PutRaw(ctx, "bob-ns", day, "b1", rawPage("b1", "bob-ns", "q", "web")); err != nil {
+		t.Fatalf("another depositor was charged: %v", err)
+	}
+	if _, err := st.PutRaw(ctx, "alice-ns", day.Add(24*time.Hour), "a4", rawPage("a4", "alice-ns", "q", "web")); err != nil {
+		t.Fatalf("the next day was charged: %v", err)
+	}
+}

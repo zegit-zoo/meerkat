@@ -46,6 +46,10 @@ func TestSpecValidate(t *testing.T) {
 		{"local default under a cache-backed source", &Spec{Type: BackendLocal}, true, "must be absolute"},
 		{"local absolute under a cache-backed source", &Spec{Type: BackendLocal, Path: "/srv/memory"}, true, ""},
 		{"gcs under a cache-backed source", &Spec{Type: BackendGCS, Bucket: "b", Prefix: "p/"}, true, ""},
+
+		{"quota", &Spec{Type: BackendLocal, Quota: &Quota{Documents: 10, Bytes: 1 << 20}}, false, ""},
+		{"negative quota", &Spec{Type: BackendLocal, Quota: &Quota{Bytes: -1}}, false, "quota: limits must be positive"},
+		{"quota over the load cap", &Spec{Type: BackendLocal, Quota: &Quota{SharedDocuments: maxMemoryObjects + 1}}, false, "must be at most"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
