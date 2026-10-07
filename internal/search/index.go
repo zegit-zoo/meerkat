@@ -434,7 +434,10 @@ func (i *Index) QueryContext(ctx context.Context, q string, limit int) ([]Result
 // search: bleve's collector checks ctx.Done() every
 // collector.CheckDoneEvery (1024) documents and returns ctx.Err()
 // immediately when it fires, instead of running to completion after
-// the caller has stopped waiting.
+// the caller has stopped waiting. Work bleve does before its collector
+// starts (expanding wildcard, regexp, prefix and fuzzy clauses) is not
+// interruptible, so QueryAs also stops waiting at the deadline itself;
+// see search.
 //
 // That only bounds the search/collection phase, though. The raw query
 // string q is validated BEFORE any of that — see validateQuery — since
@@ -546,7 +549,10 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 	req.Highlight.AddField(descriptionField)
 	req.Highlight.AddField(hintField)
 
-	res, err := i.bleve.SearchInContext(ctx, req)
+	res, err := i.search(ctx, req)
+	if tooBroad(err) {
+		return nil, errTooBroad()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
@@ -575,6 +581,49 @@ func (i *Index) run(ctx context.Context, v kb.Viewer, combined query.Query, limi
 	// can rely on the order. Stable, so bleve's tie order survives.
 	sort.SliceStable(out, func(a, b int) bool { return out[a].Score > out[b].Score })
 	return out, nil
+}
+
+// search runs one bleve search under a search slot (see
+// maxConcurrentSearches) and returns when it finishes or when ctx is
+// done, whichever is first.
+//
+// bleve consults ctx only once its collector is running. Everything
+// before that — parsing the query string, expanding wildcard, regexp,
+// prefix and fuzzy clauses into term searchers — runs to completion
+// first, so a deadline that passes during that phase would otherwise be
+// noticed only afterwards. The search therefore runs on its own
+// goroutine, and the caller stops waiting at the deadline.
+//
+// The trade-off: an abandoned search keeps running until bleve's next
+// ctx check, and it keeps its slot until then. That is deliberate — the
+// slot is what bounds how much abandoned work can be live at once, so
+// releasing it at the deadline would let abandoned searches pile up
+// without limit. The per-query limits (validateQuery, maxTermExpansion)
+// keep the abandoned tail short. It is safe for the index to be closed
+// meanwhile: bleve's Close waits for in-flight searches.
+func (i *Index) search(ctx context.Context, req *bleve.SearchRequest) (*bleve.SearchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := acquireSearchSlot(ctx); err != nil {
+		return nil, err
+	}
+	type outcome struct {
+		res *bleve.SearchResult
+		err error
+	}
+	done := make(chan outcome, 1) // buffered: an abandoned search must not block on send
+	go func() {
+		defer releaseSearchSlot()
+		res, err := i.bleve.SearchInContext(ctx, req)
+		done <- outcome{res, err}
+	}()
+	select {
+	case o := <-done:
+		return o.res, o.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // boostedScore is the custom score run hands bleve: a candidate's
