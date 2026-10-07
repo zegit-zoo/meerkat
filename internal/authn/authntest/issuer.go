@@ -108,6 +108,9 @@ type Claims struct {
 	Expiry   time.Time
 	// Issuer overrides the `iss` claim, for testing issuer mismatch.
 	Issuer string
+	// Type, when set, is the JWT header `typ` (default "JWT"); RFC 9068
+	// access tokens use "at+jwt".
+	Type string
 	// Extra adds arbitrary claims, for exercising a custom claim
 	// mapping (roles instead of groups, say).
 	Extra map[string]any
@@ -150,7 +153,17 @@ func (i *Issuer) Token(t *testing.T, c Claims) string {
 	if err != nil {
 		t.Fatalf("marshal claims: %v", err)
 	}
-	jws, err := i.signer.Sign(body)
+	signer := i.signer
+	if c.Type != "" && i.key != nil {
+		signer, err = jose.NewSigner(
+			jose.SigningKey{Algorithm: jose.RS256, Key: i.key},
+			(&jose.SignerOptions{}).WithType(jose.ContentType(c.Type)).WithHeader("kid", i.keyID),
+		)
+		if err != nil {
+			t.Fatalf("new signer: %v", err)
+		}
+	}
+	jws, err := signer.Sign(body)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}

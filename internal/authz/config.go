@@ -16,7 +16,7 @@ import (
 //	  providers:
 //	    - issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
 //	      audience: api://meerkat
-//	      claims: { groups: groups, email: preferred_username, tenant: tid }
+//	      claims: { groups: groups, tenant: tid }
 //	  rules:
 //	    - name: sre
 //	      groups: [sre]
@@ -97,9 +97,27 @@ type Provider struct {
 	// SkipIssuerCheck disables go-oidc's assertion that the token's
 	// `iss` equals Issuer. Needed only for issuers that legitimately
 	// serve discovery from a different host than they mint tokens for.
-	// Off by default and warned about at startup.
+	// Off by default, refused unless RequireTenant pins the directory,
+	// and warned about at startup.
 	SkipIssuerCheck bool `yaml:"skip_issuer_check,omitempty"`
+
+	// TokenType, when "access", accepts only access tokens: the JWT
+	// header's `typ` must be at+jwt (RFC 9068), or the token must carry
+	// an `scp` or `roles` claim (Entra's access tokens, which do not set
+	// typ). Left unset, any token that verifies is accepted, which with
+	// a client ID shared by several applications includes ID tokens
+	// issued to those applications.
+	TokenType string `yaml:"token_type,omitempty"`
+
+	// AllowedAZP, when set, restricts tokens to those whose `azp` (or
+	// `appid`) claim — the client the token was issued to — is one of
+	// these values.
+	AllowedAZP []string `yaml:"allowed_azp,omitempty"`
 }
+
+// TokenTypeAccess is the Provider.TokenType value that requires an
+// access token.
+const TokenTypeAccess = "access"
 
 // ClaimMapping names the claims that carry each identity field. Empty
 // fields fall back to the defaults below, which are what a
@@ -111,7 +129,10 @@ type ClaimMapping struct {
 	// accepted. Set it to "roles" for an Entra app-roles deployment.
 	Groups string `yaml:"groups,omitempty"`
 	// Email names the claim carrying the caller's email. Default
-	// "email"; Entra deployments commonly need "preferred_username".
+	// "email". Do not point it at "preferred_username" (Entra): that
+	// claim is mutable and not meant for authorization, so a rule's
+	// `emails:` would trust a value its owner can change; select on
+	// `subjects:` (the stable `oid`/`sub`) instead. Startup warns.
 	Email string `yaml:"email,omitempty"`
 	// Tenant names the claim carrying the caller's tenant/organization.
 	// Default "tid" (Entra); Okta/Google deployments usually leave it
@@ -258,13 +279,61 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("auth.providers: duplicate issuer %q", p.Issuer)
 		}
 		seen[p.Issuer] = true
+		if err := p.validate(i); err != nil {
+			return err
+		}
 	}
 	for i, r := range c.Rules {
 		if err := r.validate(i); err != nil {
 			return err
 		}
+		if len(c.Providers) > 1 && r.Issuer == "" && !r.Anonymous {
+			if sel := r.identitySelectors(); len(sel) > 0 {
+				return fmt.Errorf("%s selects on %s without issuer: with %d providers configured the rule would match "+
+					"claims from ANY of them, and a user of the less-trusted identity provider can often choose their own "+
+					"groups, email or subject — add issuer: to say which provider the rule is for",
+					ruleLabel(i, r), strings.Join(sel, ", "), len(c.Providers))
+			}
+		}
 	}
 	return nil
+}
+
+// validate checks one provider entry on its own.
+func (p Provider) validate(i int) error {
+	label := fmt.Sprintf("auth.providers[%d]", i)
+	if p.SkipIssuerCheck && p.RequireTenant == "" {
+		return fmt.Errorf("%s.skip_issuer_check requires %s.require_tenant: with the issuer assertion off, nothing else "+
+			"ties a token to the directory you meant, so the tenant claim must be pinned", label, label)
+	}
+	switch p.TokenType {
+	case "", TokenTypeAccess:
+	default:
+		return fmt.Errorf("%s.token_type %q is not supported — leave it unset, or use %q", label, p.TokenType, TokenTypeAccess)
+	}
+	for _, a := range p.AllowedAZP {
+		if a == "" {
+			return fmt.Errorf("%s.allowed_azp contains an empty value", label)
+		}
+	}
+	return nil
+}
+
+// identitySelectors names the rule's selectors that match on values an
+// identity provider (rather than meerkat) decides: subject, email and
+// group. They are only meaningful relative to one provider.
+func (r Rule) identitySelectors() []string {
+	var out []string
+	if len(r.Subjects) > 0 {
+		out = append(out, "subjects")
+	}
+	if len(r.Emails) > 0 {
+		out = append(out, "emails")
+	}
+	if len(r.Groups) > 0 {
+		out = append(out, "groups")
+	}
+	return out
 }
 
 func (r Rule) validate(i int) error {
@@ -558,7 +627,9 @@ func (r Rule) matches(id Identity) bool {
 	if len(r.Subjects) > 0 && !containsExact(r.Subjects, id.Subject) {
 		return false
 	}
-	if len(r.Emails) > 0 && !containsFold(r.Emails, id.Email) {
+	// An email the provider says it has not verified grants nothing: it
+	// is attacker-chosen at many providers.
+	if len(r.Emails) > 0 && (id.EmailUnverified || !containsFold(r.Emails, id.Email)) {
 		return false
 	}
 	if len(r.Groups) > 0 && !anyFold(r.Groups, id.Groups) {
