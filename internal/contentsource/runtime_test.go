@@ -71,18 +71,86 @@ func TestLocateRuntime_NoneFound(t *testing.T) {
 	}
 }
 
-func TestLocateRuntime_CWD(t *testing.T) {
+// TestLocateRuntime_WorkingDirIsNotDiscovered: a ./content-source.yaml in
+// the working directory is never picked up implicitly — the working
+// directory may be an untrusted checkout. It is honoured only when named
+// (explicit), and WorkingDirConfigIgnored reports the skip.
+func TestLocateRuntime_WorkingDirIsNotDiscovered(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, ConfigFile), "content:\n  type: none\n")
 	t.Chdir(dir)
-	isolateConfigDir(t, t.TempDir()) // must not shadow the cwd file
+	isolateConfigDir(t, t.TempDir())
 
 	got, err := LocateRuntime("")
 	if err != nil {
 		t.Fatalf("LocateRuntime: %v", err)
 	}
-	if got != ConfigFile {
-		t.Errorf("path = %q, want %q (relative, cwd-resolved)", got, ConfigFile)
+	if got != "" {
+		t.Errorf("path = %q, want empty: a working-directory file must not be discovered", got)
+	}
+	if !WorkingDirConfigIgnored("") {
+		t.Error("WorkingDirConfigIgnored = false, want true for a skipped ./content-source.yaml")
+	}
+
+	// Named explicitly, the same file is used.
+	got, err = LocateRuntime("./" + ConfigFile)
+	if err != nil {
+		t.Fatalf("LocateRuntime(explicit): %v", err)
+	}
+	if got != "./"+ConfigFile {
+		t.Errorf("path = %q, want the explicit ./%s", got, ConfigFile)
+	}
+}
+
+// TestWorkingDirConfigIgnored covers when the "ignored" notice is due:
+// only when the working-directory file is what discovery would have used
+// before, i.e. nothing explicit and no user-config-dir file.
+func TestWorkingDirConfigIgnored(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		cwdFile       bool
+		userFile      bool
+		explicit      string
+		wantIgnored   bool
+		wantLocateHit bool
+	}{
+		{name: "cwd file only", cwdFile: true, wantIgnored: true},
+		{name: "no files", wantIgnored: false},
+		{name: "user config dir shadows cwd", cwdFile: true, userFile: true, wantIgnored: false, wantLocateHit: true},
+		{name: "explicit path given", cwdFile: true, explicit: "x", wantIgnored: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			isolateConfigDir(t, home)
+			cwd := t.TempDir()
+			t.Chdir(cwd)
+			if tc.cwdFile {
+				write(t, filepath.Join(cwd, ConfigFile), "content:\n  type: none\n")
+			}
+			if tc.userFile {
+				base, err := os.UserConfigDir()
+				if err != nil {
+					t.Skipf("os.UserConfigDir unavailable: %v", err)
+				}
+				write(t, filepath.Join(base, "meerkat", ConfigFile), "content:\n  type: none\n")
+			}
+			if got := WorkingDirConfigIgnored(tc.explicit); got != tc.wantIgnored {
+				t.Errorf("WorkingDirConfigIgnored(%q) = %v, want %v", tc.explicit, got, tc.wantIgnored)
+			}
+			if tc.explicit != "" {
+				return
+			}
+			got, err := LocateRuntime("")
+			if err != nil {
+				t.Fatalf("LocateRuntime: %v", err)
+			}
+			if (got != "") != tc.wantLocateHit {
+				t.Errorf("LocateRuntime = %q, want hit=%v", got, tc.wantLocateHit)
+			}
+			if got == ConfigFile {
+				t.Errorf("LocateRuntime returned the working-directory file")
+			}
+		})
 	}
 }
 
@@ -102,7 +170,7 @@ func TestLocateRuntime_UserConfigDir(t *testing.T) {
 	write(t, want, "content:\n  type: none\n")
 
 	// Also plant a ./content-source.yaml in the cwd -- the user-config-dir
-	// entry must win (it's checked first).
+	// entry is used (the working directory is never discovered).
 	cwd := t.TempDir()
 	write(t, filepath.Join(cwd, ConfigFile), "content:\n  type: local\n  path: should-not-be-used\n")
 	t.Chdir(cwd)
@@ -112,7 +180,7 @@ func TestLocateRuntime_UserConfigDir(t *testing.T) {
 		t.Fatalf("LocateRuntime: %v", err)
 	}
 	if got != want {
-		t.Errorf("path = %q, want %q (user config dir over cwd)", got, want)
+		t.Errorf("path = %q, want %q (user config dir; cwd is never discovered)", got, want)
 	}
 }
 

@@ -23,12 +23,16 @@ lives, consulted highest priority first:
   2. --content-source (or MEERKAT_CONTENT_SOURCE) — an explicit path to
      a content-source.yaml.
   3. <user config dir>/meerkat/content-source.yaml
-  4. ./content-source.yaml in the working directory
-  5. the binary's own embedded content — the fallback when none of the
+  4. the binary's own embedded content — the fallback when none of the
      above apply. Every published artefact (Homebrew formula, release
      tarballs, ghcr.io image) is built with no content source, so this
      step serves an EMPTY knowledge base unless you built the binary
      yourself with content baked in ('make sync').
+
+A ./content-source.yaml in the working directory is never used unless
+you name it (--content-source ./content-source.yaml): the working
+directory may be a checkout you do not control. Meerkat prints a
+one-line notice when it passes one over.
 
 'mk version' reports which one won, as kb_source.
 
@@ -123,12 +127,16 @@ lives, consulted highest priority first:
   2. --content-source (or MEERKAT_CONTENT_SOURCE) — an explicit path to
      a content-source.yaml.
   3. <user config dir>/meerkat/content-source.yaml
-  4. ./content-source.yaml in the working directory
-  5. the binary's own embedded content — the fallback when none of the
+  4. the binary's own embedded content — the fallback when none of the
      above apply. Every published artefact (Homebrew formula, release
      tarballs, ghcr.io image) is built with no content source, so this
      step serves an EMPTY knowledge base unless you built the binary
      yourself with content baked in ('make sync').
+
+A ./content-source.yaml in the working directory is never used unless
+you name it (--content-source ./content-source.yaml): the working
+directory may be a checkout you do not control. Meerkat prints a
+one-line notice when it passes one over.
 
 'mk version' reports which one won, as kb_source.
 
@@ -180,7 +188,7 @@ meerkat
 #### Flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -225,7 +233,7 @@ meerkat collections
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -282,7 +290,7 @@ meerkat collections status [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -310,7 +318,7 @@ meerkat http
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -369,7 +377,7 @@ meerkat http serve [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -434,7 +442,7 @@ meerkat ingest [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -464,7 +472,7 @@ meerkat ingest sources [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -506,7 +514,7 @@ meerkat lint [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -557,7 +565,7 @@ meerkat list [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -603,7 +611,7 @@ meerkat mcp
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -648,7 +656,7 @@ meerkat mcp serve
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -790,7 +798,7 @@ meerkat mcp serve-http [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -838,7 +846,7 @@ meerkat search <query> [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -888,7 +896,7 @@ meerkat show <page-id> [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -943,7 +951,7 @@ meerkat update [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 
@@ -968,7 +976,7 @@ meerkat version [flags]
 #### Inherited flags
 
 ```text
-      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then ./content-source.yaml, then the binary's embedded content (empty in every published release).
+      --content-source string   Path to a content-source.yaml describing where to serve KB content from (content.type: none|local|url|gcs|s3, or a collections: list of named sources — git/submodule are build-time-only, 'make sync'). Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, then the binary's embedded content (empty in every published release). A ./content-source.yaml in the working directory is used only when named here.
       --kb-dir string           Serve KB content from this directory at runtime (content-repo layout: wiki/, ingestion/sources.yaml, ingestion/prompts/, templates/ — the layout 'mk ingest' writes into). Overrides MEERKAT_KB_DIR. The directory must exist; a missing wiki/ingestion/templates subdirectory inside it degrades to empty rather than erroring. Wins over --content-source / content-source.yaml discovery below.
 ```
 

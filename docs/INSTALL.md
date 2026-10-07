@@ -393,8 +393,10 @@ mk list                        # now serves that directory
 The config directory is the OS's own user-config location, not `~/.config`
 everywhere: `~/.config/meerkat` on Linux (or `$XDG_CONFIG_HOME/meerkat`),
 `~/Library/Application Support/meerkat` on macOS, `%AppData%\meerkat` on
-Windows. A `content-source.yaml` in the **working directory** is also picked
-up, which is often the easier thing to try first.
+Windows. A `content-source.yaml` in the **working directory** is not picked
+up on its own (the working directory may be a checkout you do not control);
+name it to use it: `mk --content-source ./content-source.yaml list`, or set
+`MEERKAT_CONTENT_SOURCE`.
 
 A verified HTTPS archive, a GCS or S3 bucket, and several knowledge bases
 mounted side by side as named collections are `content-source.yaml` options
