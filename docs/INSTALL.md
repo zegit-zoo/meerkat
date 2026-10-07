@@ -164,10 +164,28 @@ ln -sf meerkat ~/.local/bin/mk
 meerkat version
 ```
 
+### Checking the sudo update path
+
+The sudo fallback runs real `sudo` commands, so its command sequence is
+covered by unit tests with a stubbed runner and the privileged part is
+checked by hand before a release. On a root-owned install directory
+(for example a copy in `/usr/local/bin`), run `mk update --force --yes`
+and confirm that:
+
+- it runs exactly once (it hands off to `mk version`, it does not update
+  again);
+- afterwards the directory holds only `meerkat` (no `meerkat.old-*` or
+  `meerkat.new-*` leftovers);
+- with a symlink named `meerkat.old` pointing at another directory
+  planted beforehand, the run leaves that directory untouched (backups
+  use an unpredictable name and every privileged command passes `--`).
+
 ### Why `~/.local/bin` and not `/usr/local/bin`?
 
 `mk update` downloads and verifies the new release as the current
-user, stages it in a private temp directory, then performs the final
+user (anonymously first; a cached `gh` token is used only if GitHub's
+anonymous rate limit is hit, and only for this project's release-asset
+URLs; downloads are capped at 512 MiB), stages it in a private temp directory, then performs the final
 copy/move into the install directory. If that final directory is
 root-owned, `mk update` prompts through `sudo` for only those final
 filesystem operations. The default for "system-wide" installs differs
@@ -487,7 +505,7 @@ make docs               # regenerate docs/CLI.md
 mk update --check                      # latest version + current
 mk update                              # download + verified swap + re-exec
 mk update --version <TAG>              # pin to a specific tag, e.g. v1.2.3
-mk update --force                      # downgrade or re-install
+mk update --force                      # downgrade or re-install (runs once; the new binary then just prints `mk version`)
 mk update --yes                        # skip confirmation
 ```
 

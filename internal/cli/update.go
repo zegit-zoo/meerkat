@@ -50,7 +50,19 @@ Examples:
   mk update --force                  # downgrade or re-install same`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			// A freshly installed binary is started as `version` with
+			// this guard set (update.SwapAndReExec). If anything still
+			// ends up running `update` under it, stop: an update must
+			// never trigger another update.
+			if os.Getenv(update.UpdatedGuardEnv) == "1" {
+				fmt.Fprintf(cmd.OutOrStdout(), "update already applied by the parent process (%s=1); not updating again\n", update.UpdatedGuardEnv)
+				return nil
+			}
+
+			// Overall ceiling only. Connect/header timeouts and a
+			// body-stall timeout live in internal/update, so a slow
+			// but steady download is not cut off at a fixed 60s.
+			ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Minute)
 			defer cancel()
 
 			// Homebrew owns the Cellar: the binary, its mode, and the

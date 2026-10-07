@@ -61,9 +61,9 @@ type Asset struct {
 // FetchLatest returns the most recent release on the project.
 //
 // The repository is public, so reading release metadata works
-// anonymously. If a gh CLI OAuth token is cached (via internal/auth) we
-// send it anyway, purely for the higher authenticated GitHub API rate
-// limit; its absence is not an error.
+// anonymously. If a gh CLI OAuth token is cached (via internal/auth) it
+// is used only as a fallback when the anonymous rate limit is hit; its
+// absence is not an error.
 func FetchLatest(ctx context.Context) (*Release, error) {
 	return fetchOne(ctx, "")
 }
@@ -80,9 +80,10 @@ func fetchOne(ctx context.Context, tag string) (*Release, error) {
 	c, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	// A cached token is optional: the repo is public, so anonymous
-	// requests work fine. When present we still send it, for the
-	// higher authenticated rate limit (60/hr anonymous vs 5000/hr).
+	// A cached token is optional and only a fallback: the repo is
+	// public, so the request goes out anonymously first, and the token
+	// is attached only if GitHub reports the anonymous rate limit
+	// (60/hr vs 5000/hr authenticated). See getAnonymousFirst.
 	tok, tokErr := resolveGitHubToken()
 	if tokErr != nil {
 		tok = ""
@@ -101,18 +102,18 @@ func fetchOne(ctx context.Context, tag string) (*Release, error) {
 		u = githubAPIBase + "/repos/" + projectPath + "/releases/latest"
 	}
 
-	req, err := http.NewRequestWithContext(c, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	setUA(req)
-	if tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := updateHTTPClient.Do(req)
+	// The URL was built above from githubAPIBase and the Project
+	// constant, so it is always a place the token may go.
+	resp, err := getAnonymousFirst(func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(c, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		setUA(req)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		return req, nil
+	}, tok, true)
 	if err != nil {
 		return nil, err
 	}

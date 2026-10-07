@@ -59,15 +59,21 @@ func TestFetchLatest_AnonymousWorksWithoutToken(t *testing.T) {
 	}
 }
 
-// TestFetchLatest_SendsTokenWhenCached: when a token IS cached we still
-// send it (for the higher authenticated rate limit), even though the
-// repo no longer requires it.
-func TestFetchLatest_SendsTokenWhenCached(t *testing.T) {
+// TestFetchLatest_SendsTokenOnlyAfterRateLimit: a cached token is a
+// fallback, not a default. The anonymous request goes first and the
+// token is attached only on the retry after a rate-limit refusal.
+func TestFetchLatest_SendsTokenOnlyAfterRateLimit(t *testing.T) {
 	withStubbedToken(t, "ghs_cachedtoken", nil)
 
 	var gotAuthHeader string
+	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		gotAuthHeader = r.Header.Get("Authorization")
+		if gotAuthHeader == "" {
+			http.Error(w, `{"message":"API rate limit exceeded for 1.2.3.4."}`, http.StatusForbidden)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"tag_name":"v0.5.0"}`))
 	}))
@@ -77,8 +83,44 @@ func TestFetchLatest_SendsTokenWhenCached(t *testing.T) {
 	if _, err := FetchLatest(context.Background()); err != nil {
 		t.Fatalf("FetchLatest: %v", err)
 	}
-	if gotAuthHeader != "Bearer ghs_cachedtoken" {
-		t.Errorf("Authorization = %q, want Bearer ghs_cachedtoken", gotAuthHeader)
+	if gotAuthHeader != "Bearer ghs_cachedtoken" || calls != 2 {
+		t.Errorf("Authorization = %q after %d calls, want Bearer ghs_cachedtoken after 2", gotAuthHeader, calls)
+	}
+}
+
+// TestFetchLatest_NoTokenWhenAnonymousWorks: with a cached token and a
+// healthy anonymous quota, no Authorization header is ever sent.
+func TestFetchLatest_NoTokenWhenAnonymousWorks(t *testing.T) {
+	withStubbedToken(t, "ghs_cachedtoken", nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("token sent although anonymous request succeeds")
+		}
+		_, _ = w.Write([]byte(`{"tag_name":"v0.5.0"}`))
+	}))
+	defer srv.Close()
+	withStubbedGitHubAPI(t, srv)
+	if _, err := FetchLatest(context.Background()); err != nil {
+		t.Fatalf("FetchLatest: %v", err)
+	}
+}
+
+// A 403 that is not a rate-limit refusal must not trigger a retry with
+// the token.
+func TestFetchLatest_Plain403DoesNotRetryWithToken(t *testing.T) {
+	withStubbedToken(t, "ghs_cachedtoken", nil)
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, `{"message":"Forbidden"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	withStubbedGitHubAPI(t, srv)
+	if _, err := FetchLatest(context.Background()); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Errorf("calls = %d, want 1", calls)
 	}
 }
 
