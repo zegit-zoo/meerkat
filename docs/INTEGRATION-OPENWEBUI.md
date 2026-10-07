@@ -167,6 +167,9 @@ curl -sS -X POST $HOST/show \
   tool-registration UI prompts for the token.
 - `/healthz` and `/openapi.json` carry no security requirement so
   liveness probes and tool registration work without the token.
+  The schema names the mounted collections only when the request
+  carries the bearer token (OpenWebUI sends it when it fetches the
+  schema); an anonymous reader gets a generic `collection` description.
 - All three data endpoints respond with documented 4xx codes:
   - `400` — body invalid / required field missing
   - `401` — bearer header missing or wrong
