@@ -19,7 +19,11 @@
 //
 // Retention is an application job (Garage has no lifecycle rules). It
 // defaults to DefaultRetentionDays, and `retention_days: 0` keeps
-// everything. Every object has a unique key, so the
+// everything. It runs at Open, on a PruneInterval ticker for as long as
+// Open's context lives, and opportunistically from the write paths; a
+// day that fails to delete is logged, counted (PruneStats) and retried
+// on the next pass without holding up later days (meerkat-mob#45).
+// Every object has a unique key, so the
 // single-writer-per-key rule (docs/design/object-stores.md) holds on
 // every provider.
 package traversal
@@ -33,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -63,6 +68,14 @@ const (
 // DefaultRetentionDays is how long the log is kept when the
 // configuration does not say (#124).
 const DefaultRetentionDays = 90
+
+// PruneInterval is how often retention runs: on the background ticker
+// Open starts, and at most this often from the write paths.
+const PruneInterval = time.Hour
+
+// maxLogObjectBytes bounds a single log object read back (warm start,
+// the librarian). A session entry is tens of kilobytes at most.
+const maxLogObjectBytes = 4 << 20
 
 // Config is the `observability.traversal_log:` block.
 type Config struct {
@@ -206,9 +219,22 @@ type Sink interface {
 	Days(ctx context.Context) ([]string, error)
 	// DeleteDay removes every object under one day prefix.
 	DeleteDay(ctx context.Context, day string) error
-	// ReadDay returns every object under one day prefix.
-	ReadDay(ctx context.Context, day string) ([][]byte, error)
+	// ReadDay returns the objects under one day prefix whose base name
+	// keep accepts (nil accepts all). The filter runs on the name, before
+	// any object is read, so a reader that wants only temperature
+	// records never fetches a session entry.
+	ReadDay(ctx context.Context, day string, keep func(name string) bool) ([][]byte, error)
 }
+
+// temperatureSuffix ends every temperature record's object name, and no
+// session entry's (those end in a random hex nonce).
+const temperatureSuffix = "-temperature.json"
+
+// IsTemperatureObject reports whether an object's base name is a
+// temperature record.
+func IsTemperatureObject(name string) bool { return strings.HasSuffix(name, temperatureSuffix) }
+
+func isSessionObject(name string) bool { return !IsTemperatureObject(name) }
 
 // TemperatureRecord is the periodic flush of the cache's traversal
 // counters (issue E): one object per flush with every collection's
@@ -247,8 +273,14 @@ func (l *Log) RecordTemperatures(ctx context.Context, byName map[string]Temperat
 	if err != nil {
 		return err
 	}
-	key := path.Join(Prefix, now.Format("2006-01-02"), fmt.Sprintf("%d-temperature.json", now.UnixNano()))
-	return l.sink.Put(ctx, key, body)
+	key := path.Join(Prefix, now.Format("2006-01-02"), fmt.Sprintf("%d%s", now.UnixNano(), temperatureSuffix))
+	if err := l.sink.Put(ctx, key, body); err != nil {
+		return err
+	}
+	// A server that flushes temperatures but receives no reports still
+	// expires old days.
+	l.maybePrune(ctx, now)
+	return nil
 }
 
 // ReadSessions returns the session entries of the last days (temperature
@@ -261,7 +293,7 @@ func (l *Log) ReadSessions(ctx context.Context, days int) ([]Entry, error) {
 	var out []Entry
 	now := l.now().UTC()
 	for i := 0; i < days; i++ {
-		objs, err := l.sink.ReadDay(ctx, now.AddDate(0, 0, -i).Format("2006-01-02"))
+		objs, err := l.sink.ReadDay(ctx, now.AddDate(0, 0, -i).Format("2006-01-02"), isSessionObject)
 		if err != nil {
 			return nil, err
 		}
@@ -284,7 +316,9 @@ func (l *Log) ReadSessions(ctx context.Context, days int) ([]Entry, error) {
 
 // ReadTemperatures folds the temperature records of the last days into
 // one map keyed by hashed name: the latest record per hash wins, so a
-// restart sees the counters as they were last flushed.
+// restart sees the counters as they were last flushed. It reads only
+// temperature objects: session entries in the same day prefixes are
+// never fetched, however many there are.
 func (l *Log) ReadTemperatures(ctx context.Context, days int) (map[string]Temperature, error) {
 	if l == nil || days <= 0 {
 		return nil, nil
@@ -294,7 +328,7 @@ func (l *Log) ReadTemperatures(ctx context.Context, days int) (map[string]Temper
 	now := l.now().UTC()
 	for i := 0; i < days; i++ {
 		day := now.AddDate(0, 0, -i).Format("2006-01-02")
-		objs, err := l.sink.ReadDay(ctx, day)
+		objs, err := l.sink.ReadDay(ctx, day, IsTemperatureObject)
 		if err != nil {
 			return nil, err
 		}
@@ -325,6 +359,48 @@ type Log struct {
 
 	mu         sync.Mutex
 	lastPruned time.Time
+	stats      PruneStats
+	onPrune    func(PruneResult)
+}
+
+// PruneResult is one retention pass.
+type PruneResult struct {
+	// Deleted and Failed count the expired day prefixes removed and the
+	// ones that could not be (they are retried on the next pass).
+	Deleted, Failed int
+	// ListFailed reports that the day listing itself failed, so nothing
+	// could be considered.
+	ListFailed bool
+}
+
+// PruneStats accumulates every pass since Open.
+type PruneStats struct {
+	Runs, DaysDeleted, DaysFailed, ListFailures int
+	LastRun                                     time.Time
+	// LastError is the most recent pass's error text, "" after a clean
+	// pass. It names a day prefix and the backend's message, nothing else.
+	LastError string
+}
+
+// PruneStats returns the retention counters since Open.
+func (l *Log) PruneStats() PruneStats {
+	if l == nil {
+		return PruneStats{}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.stats
+}
+
+// OnPrune registers fn to be called after every retention pass, for a
+// metrics exporter to count deletions and failures. It must not block.
+func (l *Log) OnPrune(fn func(PruneResult)) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.onPrune = fn
+	l.mu.Unlock()
 }
 
 // ErrNoKey is returned by Open when the configured environment variable
@@ -367,7 +443,32 @@ func Open(ctx context.Context, cfg *Config, newS3 func(ctx context.Context, cfg 
 	if err := l.Prune(ctx); err != nil {
 		return nil, fmt.Errorf("traversal log: initial retention pass: %w", err)
 	}
+	if l.retention > 0 {
+		go l.RunRetention(ctx, PruneInterval)
+	}
 	return l, nil
+}
+
+// RunRetention prunes every interval until ctx ends. Open starts it, so
+// a long-running server expires old days on schedule whether or not
+// anything is being written.
+func (l *Log) RunRetention(ctx context.Context, interval time.Duration) {
+	if l == nil || l.retention == 0 || interval <= 0 {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			l.mu.Lock()
+			l.lastPruned = l.now()
+			l.mu.Unlock()
+			_ = l.Prune(ctx)
+		}
+	}
 }
 
 // NewLog wires a Log to a sink directly (tests, and Open). It keeps no
@@ -432,13 +533,15 @@ func (l *Log) Record(ctx context.Context, e Entry) (key string, err error) {
 	return key, nil
 }
 
-// maybePrune runs retention at most once an hour on the write path.
+// maybePrune runs retention at most once per PruneInterval on the
+// write paths: a backstop for the ticker, which stops with Open's
+// context.
 func (l *Log) maybePrune(ctx context.Context, now time.Time) {
 	if l.retention == 0 {
 		return
 	}
 	l.mu.Lock()
-	due := now.Sub(l.lastPruned) >= time.Hour
+	due := now.Sub(l.lastPruned) >= PruneInterval
 	if due {
 		l.lastPruned = now
 	}
@@ -450,24 +553,63 @@ func (l *Log) maybePrune(ctx context.Context, now time.Time) {
 
 // Prune deletes day prefixes older than the retention window. With
 // retention 0 it does nothing.
+//
+// A day that fails to delete does not stop the pass: every expired day
+// is attempted, each failure is logged to stderr and counted, and the
+// failures are returned joined. The next pass retries them.
 func (l *Log) Prune(ctx context.Context) error {
 	if l == nil || l.retention == 0 {
 		return nil
 	}
 	cutoff := l.now().UTC().AddDate(0, 0, -l.retention).Format("2006-01-02")
+	var res PruneResult
 	days, err := l.sink.Days(ctx)
 	if err != nil {
+		res.ListFailed = true
+		err = fmt.Errorf("list days: %w", err)
+		fmt.Fprintf(os.Stderr, "meerkat: traversal log retention: %v\n", err)
+		l.prunedOnce(res, err)
 		return err
 	}
 	sort.Strings(days)
+	var errs []error
 	for _, d := range days {
-		if d < cutoff {
-			if err := l.sink.DeleteDay(ctx, d); err != nil {
-				return err
-			}
+		if d >= cutoff {
+			continue
 		}
+		if derr := l.sink.DeleteDay(ctx, d); derr != nil {
+			res.Failed++
+			derr = fmt.Errorf("delete day %s: %w", d, derr)
+			fmt.Fprintf(os.Stderr, "meerkat: traversal log retention: %v\n", derr)
+			errs = append(errs, derr)
+			continue
+		}
+		res.Deleted++
 	}
-	return nil
+	err = errors.Join(errs...)
+	l.prunedOnce(res, err)
+	return err
+}
+
+// prunedOnce folds one pass into the stats and tells the observer.
+func (l *Log) prunedOnce(res PruneResult, err error) {
+	l.mu.Lock()
+	l.stats.Runs++
+	l.stats.DaysDeleted += res.Deleted
+	l.stats.DaysFailed += res.Failed
+	if res.ListFailed {
+		l.stats.ListFailures++
+	}
+	l.stats.LastRun = l.now()
+	l.stats.LastError = ""
+	if err != nil {
+		l.stats.LastError = err.Error()
+	}
+	fn := l.onPrune
+	l.mu.Unlock()
+	if fn != nil {
+		fn(res)
+	}
 }
 
 // --- local sink --------------------------------------------------------
@@ -513,7 +655,7 @@ func (s *localSink) Days(_ context.Context) ([]string, error) {
 	return out, nil
 }
 
-func (s *localSink) ReadDay(_ context.Context, day string) ([][]byte, error) {
+func (s *localSink) ReadDay(_ context.Context, day string, keep func(string) bool) ([][]byte, error) {
 	if !isDay(day) {
 		return nil, nil
 	}
@@ -526,16 +668,27 @@ func (s *localSink) ReadDay(_ context.Context, day string) ([][]byte, error) {
 	}
 	var out [][]byte
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") || (keep != nil && !keep(e.Name())) {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(s.dir, day, e.Name())) //nolint:gosec // G304: our own log directory.
+		b, err := readCapped(filepath.Join(s.dir, day, e.Name()))
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, b)
 	}
 	return out, nil
+}
+
+// readCapped reads one log file, at most maxLogObjectBytes of it — the
+// same bound the S3 sink applies.
+func readCapped(name string) ([]byte, error) {
+	f, err := os.Open(name) //nolint:gosec // G304: our own log directory.
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(io.LimitReader(f, maxLogObjectBytes))
 }
 
 func (s *localSink) DeleteDay(_ context.Context, day string) error {
