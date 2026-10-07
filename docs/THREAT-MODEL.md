@@ -119,9 +119,9 @@ The classification uses the company taxonomy: `public`, `internal`, `confidentia
 | Asset | Where it lives | Class (provisional) | Personal data | Retention today |
 | --- | --- | --- | --- | --- |
 | KB content (pages, frontmatter) | content source, extraction cache, in-memory index | operator's choice; `internal` default | none, unless the content carries it | the source's |
-| Personal memories | memory store, `personal/<sha256(iss, sub)>/` | `confidential` | `identifier` (owner hash) | until deleted |
+| Personal memories | memory store, `personal/<namespace>/`, where the namespace is a slug of `sub` (up to 24 characters) plus the first 64 bits of an unkeyed `sha256(iss, sub)` | `confidential` | `identifier` (the namespace shows part of the subject and is reversible by anyone who can guess candidate subjects) | until deleted |
 | Team and global memories, staged proposals | memory store | `internal` | none | until deleted |
-| Traversal log entries | `observability.traversal_log` (local or S3) | `internal` | none by default; `identifier` with `query: plaintext` | 90 days by default; `retention_days: 0` keeps everything |
+| Traversal log entries | `observability.traversal_log` (local or S3) | `internal` | pseudonymous by default: no caller text, but the session hash can be joined to a user by whoever holds the HMAC key and the access log; `identifier` with `query: plaintext` (query, fallback summary and sources, quality notes) | 90 days by default; `retention_days: 0` keeps everything |
 | Intake raw pages | intake store | `internal` | `identifier` (question, session ID, submitter namespace) | until the librarian processes them |
 | Access log | process stderr | `internal` | `identifier` (`sub`, `issuer`, `tenant`, peer IP) | the operator's log pipeline |
 | Spans and metrics | OTLP collector, `/metrics` | `internal` | none (the disclosure rule) | the collector's |
@@ -168,9 +168,14 @@ Request data that can identify a caller, or reveal what they asked, persists in 
 All other request data lives only in memory for the duration of the request.
 
 1. **The traversal log** (`observability.traversal_log`, opt-in). It stores one entry per
-   `mk_report_outcome`. Collection names and page IDs are HMAC-hashed and the session ID is hashed.
-   The caller's initial query is stored only with `query: plaintext`. A librarian deployment
-   needs it, because it is the training signal. Entries expire after 90 days unless
+   `mk_report_outcome`. Collection names, page IDs and the session ID are HMAC-hashed. Without
+   `query: plaintext` no caller-written text is stored: the initial query, the fallback summary and
+   the quality notes are dropped, fallback source URLs are hashed, and the intake reference is
+   hashed. With `query: plaintext` all of those are stored as sent; a librarian deployment needs
+   them, because they are the training signal. The intake reference never carries the depositor's
+   namespace. The log is pseudonymous, not anonymous: the session hash is an HMAC of the MCP session
+   ID, which the access log records in plaintext beside `sub`, so an operator who holds the HMAC
+   key and the access log can join every entry to a user. Entries expire after 90 days unless
    `retention_days` says otherwise (#124).
 2. **Intake raw pages** (an intake store, opt-in). Each fallback research report is written as one
    page. Its frontmatter carries the initial query as `question`, the `session_id` as sent, and the
@@ -180,7 +185,9 @@ All other request data lives only in memory for the duration of the request.
    method, path, status, peer IP, user agent and MCP session ID, plus `sub`, `issuer` and `tenant`
    for authenticated requests. Retention is whatever the operator's log pipeline keeps.
 4. **Personal memories.** These are content the caller chose to save, stored under a namespace
-   derived from their identity.
+   derived from their identity. The namespace is a readable slug of the subject plus a truncated,
+   unkeyed hash of (issuer, subject), so it identifies the owner to anyone who can read the store
+   or a key that carries it (intake keys and `submitted_by` carry it too).
 5. **Forge issues for parked intake items** (meerkat-mob #19, opt-in per collection through
    `token_env`). `mk ingest --role librarian --apply` files one issue per parked item on the
    target collection's forge. Its body carries the initial question and the attempted path, which

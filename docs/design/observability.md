@@ -545,7 +545,7 @@ response (`{recorded, logged, intake, intake_id?}`):
 | Sink | Configured by | Carries |
 |---|---|---|
 | telemetry (always) | — | `meerkat.outcome.report` span with `result`, `fallback` (kinds), `pages`, `hops`, `tier_reached`, `has_quality`; `meerkat_retrieval_outcomes_total{outcome,fallback,recorded}` |
-| traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality; fallback; **the initial query in plaintext only with `query: plaintext`** |
+| traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality scores; fallback kind; hashed fallback sources and intake reference; **the initial query, fallback summary and sources, quality notes and intake reference in plaintext only with `query: plaintext`** |
 | intake store | `intake:` + the `intake-write` capability | the fallback summary as a raw page: `type: research-raw`, `status: unverified`, `source: agent-fallback`, with the question and the attempted path in its frontmatter |
 
 The disclosure rule holds exactly as before: the span and the metric
@@ -567,10 +567,26 @@ it is unset or shorter than 16 bytes. The librarian agent holds the key
 and joins the log against the manifest; nobody else can.
 
 What the log keeps in plaintext, by decision (2026-09-17): the outcome,
-timings, path shape, quality scores, the fallback kind, summary and
-sources, and the retrieval session's wrong-turn count and its searches
-by planner stage (`wrong_turns`, `stages{exact,fuzzy,prefix}`, counts
-only, present when the report closed a tracked session).
+timings, path shape, quality scores, the fallback kind, and the
+retrieval session's wrong-turn count and its searches by planner stage
+(`wrong_turns`, `stages{exact,fuzzy,prefix}`, counts only, present when
+the report closed a tracked session).
+
+Everything the caller writes as free text follows the query (below),
+not that list (meerkat-mob#53): without `query: plaintext` the fallback
+summary and the quality notes are dropped, each fallback source URL is
+HMAC-hashed (a URL can carry a token), and `intake_id` is hashed. With
+it they are stored as sent. Either way `intake_id` is stored without the
+depositor's namespace (`raw/<day>/<id>/page.md`); the id alone finds
+the intake item.
+
+**Pseudonymous, not anonymous.** The session hash is an HMAC of the MCP
+session ID (or of the caller's `session_id`), and the access log records
+that session ID in plaintext beside `sub`. An operator who holds the
+HMAC key and the access log can therefore join every entry, including
+any stored query, to the user who made it. The hashing keeps names and
+IDs out of a log that is shared more widely than the access log; it is
+not a guarantee against the operator.
 
 **The initial query is opt-in** (#124, MK-A-6; operator decision
 2026-10-02). It is what a librarian reads to judge how well the client
@@ -596,8 +612,9 @@ observability:
 ```
 
 **Data classification** (the company taxonomy, provisional until the
-asset catalogue, MK-A-4): a traversal-log entry is `internal`; with
-`query: plaintext` it also carries `personal-data: identifier`.
+asset catalogue, MK-A-4): a traversal-log entry is `internal` and
+pseudonymous (see above); with `query: plaintext` it also carries
+`personal-data: identifier`.
 
 Threat model:
 
@@ -606,7 +623,8 @@ Threat model:
   takes plaintext and never writes it; spans get only what the
   telemetry table above lists.
 - *The log itself leaks.* It contains hashes and, with
-  `query: plaintext`, queries. Without the key the hashes are opaque;
+  `query: plaintext`, queries and other caller text. Without the key the
+  hashes are opaque;
   the queries are what an agent typed and should be handled like a
   query log anywhere: keep the bucket private, rotate the key when a
   librarian leaves (old entries become unjoinable, which is the

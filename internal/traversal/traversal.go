@@ -11,11 +11,18 @@
 // squares the two: the log carries path identity, but only the holder
 // of the key — the librarian agent — can join it back to the manifest.
 // The caller's initial query is what the librarian reads to judge how
-// well the client asked and how well meerkat routed weak prompting. It
-// is also the one field here that can identify a person or reveal what
-// they were working on. So it is stored only when the operator opts in
-// with `query: plaintext`, and dropped inside Record otherwise (#124,
-// MK-A-6; operator decision 2026-10-02).
+// well the client asked and how well meerkat routed weak prompting. It,
+// and every other field the caller writes as free text (the fallback
+// summary and sources, the quality notes), can identify a person or
+// reveal what they were working on. So they are stored only when the
+// operator opts in with `query: plaintext`, and dropped or hashed
+// inside Record otherwise (#124, MK-A-6; operator decision 2026-10-02;
+// meerkat-mob#53).
+//
+// The log is pseudonymous, not anonymous: the session hash is an HMAC
+// of the MCP session ID, which the access log records beside the
+// caller's subject, so whoever holds both the key and the access log
+// can join an entry to a user.
 //
 // Retention is an application job (Garage has no lifecycle rules). It
 // defaults to DefaultRetentionDays, and `retention_days: 0` keeps
@@ -180,6 +187,8 @@ type Entry struct {
 	// Fallback is what the agent did when meerkat did not have it.
 	Fallback *Fallback `json:"fallback,omitempty"`
 	// IntakeID is the intake object written for the fallback, if any.
+	// Stored without the depositor's namespace, and hashed unless the
+	// log keeps caller text.
 	IntakeID string `json:"intake_id,omitempty"`
 }
 
@@ -404,9 +413,27 @@ func (l *Log) Record(ctx context.Context, e Entry) (key string, err error) {
 	e.Version = 1
 	e.RecordedAt = now
 	if !l.queries {
-		// Dropped here, beside the hashing, so no caller can store a
-		// query by skipping a step (#124).
+		// Dropped (or hashed) here, beside the identifier hashing, so no
+		// caller can store free text by skipping a step (#124,
+		// meerkat-mob#53). Quality and Fallback are copied, not edited:
+		// they arrive as pointers the caller still holds.
 		e.InitialQuery = ""
+		if e.Quality != nil {
+			q := *e.Quality
+			q.Notes = ""
+			e.Quality = &q
+		}
+		if e.Fallback != nil {
+			fb := Fallback{Kind: e.Fallback.Kind}
+			for _, src := range e.Fallback.Sources {
+				fb.Sources = append(fb.Sources, l.Hash(src))
+			}
+			e.Fallback = &fb
+		}
+	}
+	e.IntakeID = stripIntakeNamespace(e.IntakeID)
+	if !l.queries {
+		e.IntakeID = l.Hash(e.IntakeID)
 	}
 	e.Session = l.Hash(e.Session)
 	for i, p := range e.Pages {
@@ -430,6 +457,21 @@ func (l *Log) Record(ctx context.Context, e Entry) (key string, err error) {
 	}
 	l.maybePrune(ctx, now)
 	return key, nil
+}
+
+// stripIntakeNamespace removes the depositor's namespace from an intake
+// key, raw/<namespace>/<day>/<id>/page.md -> raw/<day>/<id>/page.md: the
+// namespace is derived from the depositor's subject, and the log must
+// not carry it. The id stays unique on its own (the intake store's
+// FindRaw looks an item up by id across namespaces). The layout is
+// internal/intake's RawKey, repeated because intake depends on this
+// package through internal/telemetry; traversal_test pins the two.
+func stripIntakeNamespace(id string) string {
+	seg := strings.Split(id, "/")
+	if len(seg) >= 5 && seg[0] == "raw" {
+		return strings.Join(append(seg[:1:1], seg[2:]...), "/")
+	}
+	return id
 }
 
 // maybePrune runs retention at most once an hour on the write path.
