@@ -170,18 +170,31 @@ func planResearch(ctx context.Context, store *intake.Store, opts IntakePlanOpts,
 			skips = append(skips, Skip{it.ID, "no research in the deposit (fallback none or empty body)"})
 			continue
 		}
+		// A deposit that carries a credential is not researched: the
+		// agent would copy it into a page that is committed and pushed.
+		if rule := findSecret([]byte(it.Question + "\n" + strings.Join(it.Sources, "\n") + "\n" + it.Body)); rule != "" {
+			skips = append(skips, Skip{it.ID, "deposit matches the " + rule + " secret pattern; not researched, a human must look at it"})
+			continue
+		}
 		rawRel := path.Join(IntakeDir, it.ID+".md")
 		if err := writeWithin(root, rawRel, []byte(it.Body)); err != nil {
 			return nil, nil, err
 		}
 		pageID := path.Join(CandidateDir, it.ID)
 		pageRel := pagePathForRepo(opts.WikiDir, pageID)
+		// Caller-supplied fields reach the prompt only as labelled data
+		// blocks, and only the sources an agent may open (meerkat-mob#34).
+		sources, dropped := researchableSources(it.Sources)
+		srcLabel := "Sources it cited (https, public hosts only)"
+		if dropped > 0 {
+			srcLabel += fmt.Sprintf("; %d more were not https to a public host and are left out, do not look for them", dropped)
+		}
 		subs := map[string]string{
 			"raw_path":  rawRel,
 			"intake_id": it.ID,
-			"question":  it.Question,
-			"attempted": strings.Join(it.Attempted, ", "),
-			"sources":   strings.Join(it.Sources, ", "),
+			"question":  untrustedBlock("The question the agent asked", []string{it.Question}),
+			"attempted": untrustedBlock("Collections it tried, in order", it.Attempted),
+			"sources":   untrustedBlock(srcLabel, sources),
 			"page_path": pageRel,
 			"page_id":   pageID,
 			"model":     opts.Model,
@@ -195,6 +208,21 @@ func planResearch(ctx context.Context, store *intake.Store, opts IntakePlanOpts,
 		})
 	}
 	return tasks, skips, nil
+}
+
+// researchableSources keeps the deposited sources the researcher may
+// open (intake.CheckSource) and counts the rest. mk_report_outcome
+// refuses the rest at deposit time; this also covers items deposited
+// before it did.
+func researchableSources(in []string) (keep []string, dropped int) {
+	for _, s := range in {
+		if intake.CheckSource(s) == nil {
+			keep = append(keep, s)
+		} else {
+			dropped++
+		}
+	}
+	return keep, dropped
 }
 
 // targetKB is where a candidate belongs: the deepest collection the
@@ -366,6 +394,17 @@ func Finalize(ctx context.Context, store *intake.Store, workdir string, results 
 			}
 			out = append(out, f)
 			continue
+		}
+		if t.Role == RoleResearcher {
+			if rule := findSecret(body); rule != "" {
+				// Not staged, and taken out of the working copy so a later
+				// commit does not carry it. What the agent already pushed is
+				// the operator's to revert.
+				_ = root.Remove(rel)
+				f.Action, f.Detail = "failed", "candidate matches the "+rule+" secret pattern; not staged and removed from the working copy (revert the agent's commit if it pushed one)"
+				out = append(out, f)
+				continue
+			}
 		}
 		page, err := kb.ParsePage(t.PageID, t.PagePath, body)
 		if err != nil {

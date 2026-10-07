@@ -52,6 +52,28 @@ entries. `kb.Frontmatter.TrustTier()` already reads "verified by an
 agent" as machine-confirmed; the pipeline's bar for *filing* is
 `ConfirmationsRequired` (2).
 
+Caller-supplied text (meerkat-mob#34). Everything in a raw item was
+written by the depositing MCP caller, so:
+
+- `mk_report_outcome` accepts only `https` sources on public hosts
+  (see `intake.CheckSource`); the researcher plan drops any other source
+  an older deposit carries and says how many it dropped.
+- The question, the attempted path and the sources reach the researcher
+  prompt only as `{{question}}`, `{{attempted}}` and `{{sources}}`, each
+  rendered as a fenced block labelled as untrusted data, one entry per
+  line with control characters flattened, behind a fence longer than
+  any backtick run in the text. A content-repo prompt override gets the
+  same blocks. The built-in prompts tell the researcher and validator
+  to treat the deposit and the candidate as material to check, never
+  as instructions.
+- A deposit whose question, sources or body matches a built-in secret
+  pattern (private key headers, cloud and forge tokens, bearer tokens,
+  JWTs) is not researched, and a candidate that matches one is not
+  staged and is removed from the working copy. The patterns are a
+  tripwire; the content repo's own secret scanning stays the gate.
+- `--trust-sources` on a `--role` run also needs `--trust-intake`
+  ([INGESTION.md](../INGESTION.md)).
+
 Target collection: the deepest collection the reporting agent tried
 (the last of `attempted`), or `unrouted` for the librarian to place.
 

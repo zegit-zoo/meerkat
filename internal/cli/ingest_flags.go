@@ -58,6 +58,8 @@ func ingestPFlags(f *ingestFlags) *flagSet {
 	fs.IntVar(&f.days, "days", 7,
 		"With --role librarian: days of traversal log to read for missing-link findings.")
 	fs.BoolVar(&f.trustSources, "trust-sources", false,
-		"Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged.")
+		"Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged. With --role it also needs --trust-intake.")
+	fs.BoolVar(&f.trustIntake, "trust-intake", false,
+		"With --role and --trust-sources: accept that text MCP callers sent (intake deposits, session queries) reaches an agent running without permission prompts.")
 	return fs
 }

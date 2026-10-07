@@ -532,7 +532,11 @@ not_found | gave_up), `initial_query` (the agent's first query,
 verbatim), `pages` that answered, `attempted` collections in order,
 `quality` (accuracy, completeness, answer_quality in [0, 1], notes),
 and `fallback` (kind web | source | human | none, a summary of what the
-agent learned instead, its sources). `mk_search` accepts the same
+agent learned instead, its sources). A source must be an `https` URL to
+a public host: other schemes, credentials in the URL, and loopback,
+link-local, private or otherwise non-public literal addresses (and
+`localhost`) are refused, because the researcher agent is told to open
+every source it cites. Host names are not resolved at this point. `mk_search` accepts the same
 `session_id` so a stateless caller can group its calls; a caller with
 an MCP session need not pass one. The tool's description frames a miss
 as a contribution ("every report improves the next agent's
