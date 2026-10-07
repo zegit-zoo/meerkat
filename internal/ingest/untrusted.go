@@ -3,6 +3,8 @@ package ingest
 import (
 	"strings"
 	"unicode"
+
+	"github.com/zegit-zoo/meerkat/internal/intake"
 )
 
 // untrusted.go renders caller-supplied text for an agent prompt
@@ -56,4 +58,19 @@ func oneLineText(s string) string {
 		return r
 	}, s)
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// researchableSources keeps the deposited sources the researcher may
+// open (intake.CheckSource) and counts the rest. mk_report_outcome
+// refuses the rest at deposit time; this also covers items deposited
+// before it did.
+func researchableSources(in []string) (keep []string, dropped int) {
+	for _, s := range in {
+		if intake.CheckSource(s) == nil {
+			keep = append(keep, s)
+		} else {
+			dropped++
+		}
+	}
+	return keep, dropped
 }

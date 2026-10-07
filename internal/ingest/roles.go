@@ -210,21 +210,6 @@ func planResearch(ctx context.Context, store *intake.Store, opts IntakePlanOpts,
 	return tasks, skips, nil
 }
 
-// researchableSources keeps the deposited sources the researcher may
-// open (intake.CheckSource) and counts the rest. mk_report_outcome
-// refuses the rest at deposit time; this also covers items deposited
-// before it did.
-func researchableSources(in []string) (keep []string, dropped int) {
-	for _, s := range in {
-		if intake.CheckSource(s) == nil {
-			keep = append(keep, s)
-		} else {
-			dropped++
-		}
-	}
-	return keep, dropped
-}
-
 // targetKB is where a candidate belongs: the deepest collection the
 // agent tried (the last one), or "unrouted" for the librarian to place.
 func targetKB(it intake.Item) string {
