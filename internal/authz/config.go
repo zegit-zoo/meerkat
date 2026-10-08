@@ -210,7 +210,7 @@ func (c *Config) Enabled() bool {
 // everything). It is called at load time, so a bad policy fails the
 // process rather than the first request.
 func (c *Config) Validate() error {
-	if c == nil || (!c.Enabled() && len(c.Rules) == 0) {
+	if c == nil {
 		return nil
 	}
 	// The anonymous-rule checks come FIRST, ahead of the two general ones
@@ -234,6 +234,15 @@ func (c *Config) Validate() error {
 	}
 	if len(c.Rules) > 0 && !c.Enabled() {
 		return fmt.Errorf("auth.rules is set but no auth.providers are configured — rules can only be evaluated against a verified identity")
+	}
+	if !c.Enabled() {
+		// A present auth: block that asks for nothing is almost always a
+		// mistake (a misspelt key, a deleted provider list), and the
+		// server would then run with no authentication while the file
+		// reads as if it had some. Say so, and make the deliberate form
+		// explicit.
+		return fmt.Errorf("auth: block configures no providers — authentication would be OFF while the file looks configured; " +
+			"set auth.providers, or auth.allow_unauthenticated: true if the server really sits behind a gateway that authenticates for it (or remove the auth: block)")
 	}
 	if c.AllowUnauthenticated && len(c.Providers) > 0 {
 		return fmt.Errorf("auth.allow_unauthenticated cannot be combined with auth.providers — it exists for delegating authentication to a gateway, and would make every configured provider decorative")

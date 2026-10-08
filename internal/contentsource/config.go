@@ -350,6 +350,9 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 	if err := yaml.Unmarshal(body, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", displayPath, err)
 	}
+	if err := checkAuthSubtree(body); err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", displayPath, err)
+	}
 	if cfg.Content.Type == "" {
 		cfg.Content.Type = TypeNone
 	}
