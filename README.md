@@ -122,8 +122,9 @@ the git tag's leading `v` (`v1.2.3` publishes `1.2.3`, `1.2`, and
 docker pull ghcr.io/zegit-zoo/meerkat:1.2.3
 
 docker run --rm --read-only --user 65532:65532 \
+  -p 127.0.0.1:4004:4004 -e MEERKAT_API_KEY \
   ghcr.io/zegit-zoo/meerkat:1.2.3 \
-  http serve --host 0.0.0.0 --api-key "$MEERKAT_API_KEY"
+  http serve --host 0.0.0.0
 ```
 
 The image runs non-root (numeric UID/GID `65532`) on a distroless base, and

@@ -28,12 +28,12 @@ func TestSecurityTxt_ServedWithoutAuth(t *testing.T) {
 }
 
 func TestSecurityTxt_OffWhenDisabled(t *testing.T) {
-	srv, err := New(Config{APIKey: "test-key", Version: "test", NoSecurityTxt: true})
+	srv, err := New(Config{APIKey: "test-key-0123456789", Version: "test", NoSecurityTxt: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { srv.Close() })
-	for _, auth := range []string{"", "Bearer test-key"} {
+	for _, auth := range []string{"", "Bearer test-key-0123456789"} {
 		req := httptest.NewRequest(nethttp.MethodGet, wellknown.SecurityTxtPath, nil)
 		if auth != "" {
 			req.Header.Set("Authorization", auth)

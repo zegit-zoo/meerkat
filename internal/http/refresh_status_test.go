@@ -53,7 +53,7 @@ func refreshedLocalServer(t *testing.T) *Server {
 		t.Fatal("precondition: a collection with a refresh: block has a status slot")
 	}
 	s := &Server{
-		cfg: Config{APIKey: "test-key", Version: "test", QueryTimeout: search.DefaultQueryTimeout},
+		cfg: Config{APIKey: "test-key-0123456789", Version: "test", QueryTimeout: search.DefaultQueryTimeout},
 		reg: reg, mux: nethttp.NewServeMux(),
 	}
 	s.routes()
