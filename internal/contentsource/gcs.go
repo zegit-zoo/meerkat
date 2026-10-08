@@ -9,6 +9,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
@@ -78,14 +79,16 @@ var newGCSClient = func(ctx context.Context) (objectStore, error) { return newSt
 type storageAPI struct{ c *storage.Client }
 
 func newStorageAPI(ctx context.Context) (objectStore, error) {
-	// storage.NewClient with no option.ClientOption resolves credentials
+	// storage.NewClient with no credential option resolves credentials
 	// via Application Default Credentials: GOOGLE_APPLICATION_CREDENTIALS
 	// (including a Workload Identity Federation external_account config),
 	// gcloud's application-default credentials, or the GCE/GKE/Cloud Run
 	// metadata server. Passing no credential options is what keeps every
 	// one of those paths available — and keeps a static key from being
 	// something meerkat could be asked to load.
-	c, err := storage.NewClient(ctx)
+	// WithTelemetryDisabled: the SDK's own HTTP instrumentation would
+	// export request URLs (bucket and object names) on spans.
+	c, err := storage.NewClient(ctx, option.WithTelemetryDisabled())
 	if err != nil {
 		return nil, fmt.Errorf("google cloud storage: %w — credentials resolve via Application Default Credentials; "+
 			"run `gcloud auth application-default login`, or attach a workload identity / service account to the workload", err)

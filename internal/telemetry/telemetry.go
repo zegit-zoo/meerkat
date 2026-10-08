@@ -58,6 +58,8 @@ package telemetry
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -119,19 +121,38 @@ func Record(ctx context.Context) *Metrics {
 
 // End finishes span, marking it an error when err is non-nil.
 //
-// It is the one-liner every instrumented function defers, and it
-// deliberately records only err.Error() — which is meerkat's own
-// message, not caller input — through OpenTelemetry's exception
-// recording. Where an error could embed caller-supplied text (a query
-// string, a page ID), the call site passes a classified outcome instead
-// and does not hand the error here; see internal/search's
-// searchOutcome.
+// It is the one-liner every instrumented function defers. It records a
+// CLASSIFIED reason (see Reason) — never err.Error(). An error message
+// is free text: it can quote a page ID, a path, a bucket or a URL, and a
+// span is exported out of the process. Call sites therefore need no
+// care about what their error contains; the raw error belongs in the
+// log, which stays on the operator's own stderr.
 func End(span trace.Span, err error) {
 	if err != nil {
-		span.SetStatus(codes.Error, "")
-		span.RecordError(err)
+		recordFailure(span, err)
 	}
 	span.End()
+}
+
+// recordFailure marks span failed with the error's class and no text.
+func recordFailure(span trace.Span, err error) {
+	reason := Reason(err)
+	span.SetStatus(codes.Error, reason)
+	span.SetAttributes(Outcome(reason))
+}
+
+// Reason maps an error onto the closed outcome vocabulary: cancelled,
+// timeout, not_found, or error. Nothing from the error's text survives.
+func Reason(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return OutcomeCancelled
+	case errors.Is(err, context.DeadlineExceeded):
+		return OutcomeTimeout
+	case errors.Is(err, fs.ErrNotExist):
+		return OutcomeNotFound
+	}
+	return OutcomeError
 }
 
 // Fail marks span failed with a bounded reason and ends it, WITHOUT
