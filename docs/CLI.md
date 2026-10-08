@@ -415,13 +415,14 @@ meerkat ingest [flags]
 #### Flags
 
 ```text
-      --apply                          With --role librarian: file confirmed candidates through their collection's contract, file a forge issue for each parked item (contract token_env), and un-park items whose issue was closed as resolved. Without it the librarian changes nothing.
+      --apply                          With --role librarian: file confirmed candidates through their collection's contract (direct contracts also need --file-confirmed), file a forge issue for each parked item (contract token_env), and un-park items whose issue was closed as resolved. Without it the librarian changes nothing.
       --batch-file string              Plan-only: write the JSONL batch to this file instead of stdout.
       --branch string                  Push target branch. Overrides the branch derived from content-source.yaml.
       --days int                       With --role librarian: days of traversal log to read for missing-link findings. (default 7)
       --dry-run                        With --execute, print the planned commands without running them.
       --execute                        Actually run the tasks (otherwise plan-only).
       --executor string                Agent CLI to run each page: opencode | claude. (default "opencode")
+      --file-confirmed                 With --role librarian --apply: also write confirmed candidates into collections whose contract is direct. Without it they are reported as held for review.
       --from string                    With --role researcher|validator: where items come from (intake, the content-source.yaml intake: store). (default "intake")
       --max-consecutive-failures int   Stop the executor after this many consecutive failures (0 = never auto-stop).
       --max-parallel int               Max concurrent opencode sessions when --execute (default 1). (default 1)

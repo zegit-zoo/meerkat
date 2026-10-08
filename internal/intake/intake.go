@@ -637,8 +637,8 @@ func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 // Unpark removes a parked item's marker once its issue was resolved:
 // the needs_human finding goes away, and a later Park writes a fresh
 // marker (and the librarian files a new issue). It does not re-enable
-// validation, which a marker never blocked, and it does not reset the
-// validation_failures count a validator keeps in its working copy. It
+// validation, which a marker never blocked, and it does not remove the
+// recorded failed validator runs (validations/<id>/). It
 // needs a store that can delete (memory.Deleter, every shipped
 // backend); removing a marker that is already gone is not an error.
 func (st *Store) Unpark(ctx context.Context, id string) error {

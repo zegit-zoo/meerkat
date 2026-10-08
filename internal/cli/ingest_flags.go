@@ -54,7 +54,9 @@ func ingestPFlags(f *ingestFlags) *flagSet {
 	fs.StringVar(&f.only, "only", "",
 		"With --role: only this intake id.")
 	fs.BoolVar(&f.apply, "apply", false,
-		"With --role librarian: file confirmed candidates through their collection's contract, file a forge issue for each parked item (contract token_env), and un-park items whose issue was closed as resolved. Without it the librarian changes nothing.")
+		"With --role librarian: file confirmed candidates through their collection's contract (direct contracts also need --file-confirmed), file a forge issue for each parked item (contract token_env), and un-park items whose issue was closed as resolved. Without it the librarian changes nothing.")
+	fs.BoolVar(&f.fileConfirmed, "file-confirmed", false,
+		"With --role librarian --apply: also write confirmed candidates into collections whose contract is direct. Without it they are reported as held for review.")
 	fs.IntVar(&f.days, "days", 7,
 		"With --role librarian: days of traversal log to read for missing-link findings.")
 	fs.BoolVar(&f.trustSources, "trust-sources", false,

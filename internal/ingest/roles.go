@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -232,35 +234,48 @@ func planValidation(ctx context.Context, store *intake.Store, opts IntakePlanOpt
 		}
 		pageID := path.Join(CandidateDir, s.ID)
 		pageRel := pagePathForRepo(opts.WikiDir, pageID)
-		name := filepath.FromSlash(pageRel)
-		// Lstat through the root: a missing candidate is seeded, and a
-		// name that already resolves out of the working copy — a link
-		// left by an earlier run — is skipped, never followed (#92).
-		switch _, err := root.Lstat(name); {
-		case errors.Is(err, fs.ErrNotExist):
-			if err := writeWithin(root, pageRel, s.Body); err != nil {
-				return nil, nil, err
-			}
-		case err != nil:
-			skips = append(skips, Skip{s.ID, "candidate path escapes the working copy: " + err.Error()})
-			continue
-		}
-		body, err := root.ReadFile(name)
-		if err != nil {
-			skips = append(skips, Skip{s.ID, "candidate path escapes the working copy: " + err.Error()})
-			continue
-		}
-		page, err := kb.ParsePage(pageID, pageRel, body)
+		// The staged copy is the candidate; the working copy is only where
+		// the validator edits it. Independence is judged on the staged
+		// page and the recorded runs, never on what an earlier run left in
+		// the working copy (meerkat-mob#33).
+		page, err := kb.ParsePage(pageID, pageRel, s.Body)
 		if err != nil {
 			skips = append(skips, Skip{s.ID, "candidate does not parse: " + err.Error()})
 			continue
 		}
-		if rm, _ := page.Front.Extra["researcher_model"].(string); rm != "" && rm == opts.Model {
+		rm := researcherModel(page)
+		if rm != "" && rm == opts.Model {
 			skips = append(skips, Skip{s.ID, "validator must not run the researcher's model (" + rm + "); pass a different --model"})
 			continue
 		}
-		if len(page.Front.Verified) >= ConfirmationsRequired {
+		vals, err := store.Validations(ctx, s.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		models := intake.ConfirmingModels(vals, rm)
+		if len(models) >= ConfirmationsRequired {
 			skips = append(skips, Skip{s.ID, "already has the required confirmations"})
+			continue
+		}
+		if slices.Contains(models, opts.Model) {
+			skips = append(skips, Skip{s.ID, "model " + opts.Model + " already confirmed this candidate; pass a different --model"})
+			continue
+		}
+		// Every run starts from the staged copy, so whatever the page says
+		// after the run is this run's work and nothing an earlier run left
+		// behind is carried in. Lstat through the root: a name that is, or
+		// resolves through, a link (left by an earlier run)
+		// is skipped, never followed or replaced (#92).
+		switch fi, err := root.Lstat(filepath.FromSlash(pageRel)); {
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			skips = append(skips, Skip{s.ID, "candidate path escapes the working copy: " + err.Error()})
+			continue
+		case err == nil && !fi.Mode().IsRegular():
+			skips = append(skips, Skip{s.ID, "candidate path escapes the working copy: not a regular file (" + fi.Mode().Type().String() + ")"})
+			continue
+		}
+		if err := writeWithin(root, pageRel, s.Body); err != nil {
+			skips = append(skips, Skip{s.ID, err.Error()})
 			continue
 		}
 		subs := map[string]string{
@@ -274,6 +289,13 @@ func planValidation(ctx context.Context, store *intake.Store, opts IntakePlanOpt
 		})
 	}
 	return tasks, skips, nil
+}
+
+// researcherModel is the model the pipeline stamped on a staged
+// candidate.
+func researcherModel(p kb.Page) string {
+	rm, _ := p.Front.Extra["researcher_model"].(string)
+	return rm
 }
 
 func substitute(tpl string, subs map[string]string) string {
@@ -375,11 +397,9 @@ func Finalize(ctx context.Context, store *intake.Store, workdir string, results 
 		}
 		switch t.Role {
 		case RoleResearcher:
-			stamped, changed := stampCandidate(page, body, t, now)
-			if changed {
-				if err := root.WriteFile(rel, stamped, 0o600); err != nil {
-					return out, err
-				}
+			stamped := stampCandidate(page, t, now)
+			if err := root.WriteFile(rel, stamped, 0o600); err != nil {
+				return out, err
 			}
 			key, err := store.PutStaged(ctx, t.TargetKB, t.IntakeID, stamped)
 			if err != nil {
@@ -390,33 +410,8 @@ func Finalize(ctx context.Context, store *intake.Store, workdir string, results 
 			}
 			f.Action, f.Detail = "staged", key
 		case RoleValidator:
-			switch {
-			case strings.HasPrefix(strings.ToLower(page.Front.FailureReason), NeedsHumanPrefix):
-				if err := store.Park(ctx, t.IntakeID, page.Front.FailureReason); err != nil {
-					return out, err
-				}
-				telemetry.Record(ctx).LibrarianFinding("needs_human")
-				f.Action, f.Detail = "parked", page.Front.FailureReason
-			case page.Front.FailureReason != "":
-				n := failureCount(page) + 1
-				if n >= ConfirmationsRequired {
-					reason := fmt.Sprintf("validators disagreed %d times; last: %s", n, page.Front.FailureReason)
-					if err := store.Park(ctx, t.IntakeID, reason); err != nil {
-						return out, err
-					}
-					telemetry.Record(ctx).LibrarianFinding("needs_human")
-					f.Action, f.Detail = "parked", reason
-				} else {
-					f.Action, f.Detail = "pending", fmt.Sprintf("validation failed (%d of %d): %s", n, ConfirmationsRequired, page.Front.FailureReason)
-				}
-				_ = root.WriteFile(rel, bumpFailureCount(page, n), 0o600)
-			case agentConfirmations(page) >= ConfirmationsRequired:
-				if err := store.MarkDone(ctx, "validated-"+t.IntakeID, "confirmed by "+strings.Join(verifierNames(page), ", ")); err != nil {
-					return out, err
-				}
-				f.Action, f.Detail = "confirmed", fmt.Sprintf("%d independent confirmations; ready to file into %q", agentConfirmations(page), t.TargetKB)
-			default:
-				f.Action, f.Detail = "pending", fmt.Sprintf("%d of %d confirmations", agentConfirmations(page), ConfirmationsRequired)
+			if err := finalizeValidation(ctx, store, root, rel, t, page, now, &f); err != nil {
+				return out, err
 			}
 		}
 		out = append(out, f)
@@ -424,83 +419,193 @@ func Finalize(ctx context.Context, store *intake.Store, workdir string, results 
 	return out, nil
 }
 
-// agentConfirmations counts distinct agent verifiers.
-func agentConfirmations(p kb.Page) int {
-	seen := map[string]bool{}
-	for _, v := range p.Front.Verified {
-		if strings.HasPrefix(v.By, AgentVerifierPrefix) {
-			seen[v.By] = true
+// finalizeValidation judges one validator run against the staged
+// candidate it started from and records it. The run may change only the
+// fields a validator owns (see validatorChangedOnly); anything else
+// restores the staged copy and fails the run without recording it. What
+// counts is the pipeline's record of the run (its model and outcome) in
+// the intake store; the verified: entry the run wrote is only the signal
+// that it confirmed (meerkat-mob#33).
+func finalizeValidation(ctx context.Context, store *intake.Store, root *os.Root, rel string, t Task, after kb.Page, now time.Time, f *Finalization) error {
+	staged, ok, err := stagedFor(ctx, store, t.TargetKB, t.IntakeID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		f.Action, f.Detail = "failed", "no staged candidate for this validator run"
+		return nil
+	}
+	before, err := kb.ParsePage(t.PageID, t.PagePath, staged)
+	if err != nil {
+		f.Action, f.Detail = "failed", "staged candidate does not parse: "+err.Error()
+		return nil
+	}
+	if reason := validatorChangedOnly(before, after); reason != "" {
+		if err := restorePage(root, rel, staged); err != nil {
+			return err
+		}
+		f.Action, f.Detail = "failed", "validator run rejected: "+reason+"; staged copy restored"
+		return nil
+	}
+	rm := researcherModel(before)
+	if t.Model == "" || t.Model == rm {
+		f.Action, f.Detail = "failed", "validator run has no model distinct from the researcher's; not recorded"
+		return nil
+	}
+	run := intake.Validation{Run: intake.NewRunID(now), Model: t.Model, At: now.UTC()}
+	confirmed := after.Front.FailureReason == "" && len(after.Front.Verified) > len(before.Front.Verified)
+	if confirmed {
+		run.Outcome = intake.ValidationConfirmed
+	} else {
+		run.Outcome, run.Reason = intake.ValidationFailed, after.Front.FailureReason
+		if run.Reason == "" {
+			run.Reason = "the validator neither verified nor failed the candidate"
 		}
 	}
-	return len(seen)
+	if err := store.RecordValidation(ctx, t.IntakeID, run); err != nil {
+		return err
+	}
+	vals, err := store.Validations(ctx, t.IntakeID)
+	if err != nil {
+		return err
+	}
+	switch {
+	case !confirmed && strings.HasPrefix(strings.ToLower(run.Reason), NeedsHumanPrefix):
+		if err := store.Park(ctx, t.IntakeID, run.Reason); err != nil {
+			return err
+		}
+		telemetry.Record(ctx).LibrarianFinding("needs_human")
+		f.Action, f.Detail = "parked", run.Reason
+	case !confirmed:
+		n := len(intake.Failures(vals))
+		if n >= ConfirmationsRequired {
+			reason := fmt.Sprintf("validators disagreed %d times; last: %s", n, run.Reason)
+			if err := store.Park(ctx, t.IntakeID, reason); err != nil {
+				return err
+			}
+			telemetry.Record(ctx).LibrarianFinding("needs_human")
+			f.Action, f.Detail = "parked", reason
+		} else {
+			f.Action, f.Detail = "pending", fmt.Sprintf("validation failed (%d of %d): %s", n, ConfirmationsRequired, run.Reason)
+		}
+	default:
+		models := intake.ConfirmingModels(vals, rm)
+		if len(models) < ConfirmationsRequired {
+			f.Action, f.Detail = "pending", fmt.Sprintf("%d of %d confirmations", len(models), ConfirmationsRequired)
+			break
+		}
+		if err := store.MarkDone(ctx, "validated-"+t.IntakeID, "confirmed by "+strings.Join(verifierNames(models), ", ")); err != nil {
+			return err
+		}
+		f.Action, f.Detail = "confirmed", fmt.Sprintf("%d independent confirmations; ready to file into %q", len(models), t.TargetKB)
+	}
+	return nil
 }
 
-func verifierNames(p kb.Page) []string {
-	out := make([]string, 0, len(p.Front.Verified))
-	for _, v := range p.Front.Verified {
-		out = append(out, v.By)
+// validatorChangedOnly returns "" when a validator run changed nothing
+// but the fields a validator owns (verified, failure_reason, status),
+// else what else it changed.
+func validatorChangedOnly(before, after kb.Page) string {
+	if strings.TrimSpace(before.Body) != strings.TrimSpace(after.Body) {
+		return "the body changed"
+	}
+	fb, fa := before.Front, after.Front
+	fb.Verified, fa.Verified = nil, nil
+	fb.FailureReason, fa.FailureReason = "", ""
+	fb.Status, fa.Status = "", ""
+	// Compare through the renderer, as onlyFieldChanged does, so a
+	// re-render's formatting is not read as a change.
+	if !bytes.Equal(renderPage(kb.Page{Front: fb}), renderPage(kb.Page{Front: fa})) {
+		return "a frontmatter field other than verified, failure_reason or status changed"
+	}
+	return ""
+}
+
+// stagedFor reads the staged candidate for kb/id.
+func stagedFor(ctx context.Context, store *intake.Store, kbName, id string) ([]byte, bool, error) {
+	staged, err := store.ListStaged(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, s := range staged {
+		if s.KB == kbName && s.ID == id {
+			return s.Body, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// verifierNames is how confirming models are named in verified: entries.
+func verifierNames(models []string) []string {
+	out := make([]string, 0, len(models))
+	for _, m := range models {
+		out = append(out, AgentVerifierPrefix+string(RoleValidator)+":"+m)
 	}
 	return out
 }
 
-func failureCount(p kb.Page) int {
-	if n, ok := p.Front.Extra["validation_failures"].(int); ok {
-		return n
+// Confirmations returns the distinct models whose pipeline-recorded
+// validator runs confirmed a staged candidate. The candidate's own
+// verified: entries are never consulted: they are agent-written text.
+func Confirmations(ctx context.Context, store *intake.Store, s intake.Staged) ([]string, error) {
+	vals, err := store.Validations(ctx, s.ID)
+	if err != nil {
+		return nil, err
 	}
-	if f, ok := p.Front.Extra["validation_failures"].(float64); ok {
-		return int(f)
+	rm := ""
+	if p, err := kb.ParsePage(s.ID, s.Key, s.Body); err == nil {
+		rm = researcherModel(p)
 	}
-	return 0
+	return intake.ConfirmingModels(vals, rm), nil
 }
 
-// Confirmed reports whether a candidate page has the confirmations
-// the pipeline requires to file it.
-func Confirmed(p kb.Page) bool { return agentConfirmations(p) >= ConfirmationsRequired }
-
-// stampCandidate fills the provenance a researcher may have left out:
-// generated, last_ingested, extra.intake_id, extra.researcher_model,
-// status unverified, verified []. It returns the page bytes and whether
-// they changed.
-func stampCandidate(p kb.Page, body []byte, t Task, now time.Time) ([]byte, bool) {
-	changed := false
-	if p.Front.Generated == nil {
-		p.Front.Generated = &kb.Generated{By: "agent:" + string(RoleResearcher), At: now.UTC().Format(time.RFC3339)}
-		changed = true
+// withRecordedVerification is the page a confirmed candidate is filed
+// as: the staged copy with verified: rebuilt from the recorded runs.
+func withRecordedVerification(ctx context.Context, store *intake.Store, s intake.Staged) ([]byte, error) {
+	p, err := kb.ParsePage(s.ID, s.Key, s.Body)
+	if err != nil {
+		return nil, err
 	}
-	if p.Front.LastIngested == "" {
-		p.Front.LastIngested = now.UTC().Format(time.RFC3339)
-		changed = true
+	vals, err := store.Validations(ctx, s.ID)
+	if err != nil {
+		return nil, err
 	}
-	if p.Front.Status == "" || p.Front.Status == "placeholder" {
-		p.Front.Status = "unverified"
-		changed = true
+	models := intake.ConfirmingModels(vals, researcherModel(p))
+	p.Front.Verified = nil
+	for _, m := range models {
+		for _, v := range vals {
+			if v.Model == m && v.Outcome == intake.ValidationConfirmed {
+				p.Front.Verified = append(p.Front.Verified, kb.Verifier{By: verifierNames([]string{m})[0], At: v.At.UTC().Format(time.RFC3339)})
+				break
+			}
+		}
 	}
-	if p.Front.Extra == nil {
-		p.Front.Extra = map[string]any{}
+	if len(models) >= ConfirmationsRequired {
+		p.Front.Status = "machine-confirmed"
 	}
-	if p.Front.Extra["intake_id"] != t.IntakeID {
-		p.Front.Extra["intake_id"] = t.IntakeID
-		changed = true
-	}
-	if p.Front.Extra["researcher_model"] != t.Model {
-		p.Front.Extra["researcher_model"] = t.Model
-		changed = true
-	}
-	if p.Front.Extra["target_kb"] != t.TargetKB {
-		p.Front.Extra["target_kb"] = t.TargetKB
-		changed = true
-	}
-	if !changed {
-		return body, false
-	}
-	return renderPage(p), true
+	return renderPage(p), nil
 }
 
-func bumpFailureCount(p kb.Page, n int) []byte {
-	if p.Front.Extra == nil {
-		p.Front.Extra = map[string]any{}
+// stampCandidate makes a researcher's page into the staged candidate.
+// The researcher is an agent working from caller-supplied research, so
+// everything in its frontmatter the pipeline relies on is reset rather
+// than trusted (meerkat-mob#33): verified: is emptied (only recorded
+// validator runs confirm), status is unverified, failure_reason is
+// cleared, generated and last_ingested are the pipeline's, and every key
+// outside the OKF core is dropped before intake_id, researcher_model and
+// target_kb are stamped.
+func stampCandidate(p kb.Page, t Task, now time.Time) []byte {
+	at := now.UTC().Format(time.RFC3339)
+	p.Front.Verified = nil
+	p.Front.Status = "unverified"
+	p.Front.FailureReason = ""
+	p.Front.Generated = &kb.Generated{By: AgentVerifierPrefix + string(RoleResearcher), At: at}
+	p.Front.LastIngested = at
+	p.Front.Extra = map[string]any{
+		"intake_id":        t.IntakeID,
+		"researcher_model": t.Model,
+		"target_kb":        t.TargetKB,
 	}
-	p.Front.Extra["validation_failures"] = n
 	return renderPage(p)
 }
 

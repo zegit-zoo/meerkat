@@ -18,6 +18,8 @@ staged/<kb>/<id>.md                         a researcher's candidate page
 done/<id>.md                                processed marker (idempotency)
 done/validated-<id>.md                      confirmed marker
 done/filed-<id>.md                          filed marker
+validations/<id>/<run>.md                   one record per validator run the
+                                            pipeline executed (model, outcome)
 parked/<id>.md                              needs-human, with the reason
                                             and, once filed, the forge issue
 ```
@@ -40,17 +42,41 @@ success check. Prompts come from the content repo's
 
 | Role | Input | Writes | Success | Then (`Finalize`) |
 |---|---|---|---|---|
-| researcher | raw items not yet done | `wiki/intake/<id>.md`, from the raw item materialised at `ingestion/intake/<id>.md` | the candidate exists and is not a placeholder | provenance stamped (`generated`, `last_ingested`, `intake_id`, `researcher_model`, `target_kb`), copied to `staged/<kb>/<id>.md`, raw item marked done |
-| validator | staged candidates without enough confirmations | the candidate's frontmatter only: a `verified:` entry `agent:validator:<model>` or a `failure_reason` | one or the other is present | two independent agent confirmations mark it validated; a `needs-human:` reason parks it; two failures park it |
-| librarian | the whole registry, the intake store, the traversal log | nothing without `--apply` or `--execute` | — | report; `--apply` files confirmed candidates and root pointers through each collection's contract; `--execute` runs the prompt-quality rewrites (below) |
+| researcher | raw items not yet done | `wiki/intake/<id>.md`, from the raw item materialised at `ingestion/intake/<id>.md` | the candidate exists and is not a placeholder | trust fields reset and provenance stamped (below), copied to `staged/<kb>/<id>.md`, raw item marked done |
+| validator | staged candidates without enough confirmations | the candidate's frontmatter only: `verified:`, `failure_reason:` or `status:`; the working copy is re-seeded from the staged copy before each run | one or the other is present | the run is checked against the staged copy and recorded under `validations/<id>/`; two recorded confirmations from distinct models mark it validated; a `needs-human:` reason parks it; two recorded failures park it |
+| librarian | the whole registry, the intake store, the traversal log | nothing without `--apply` or `--execute` | — | report; `--apply` files confirmed candidates (a `direct` contract also needs `--file-confirmed`) and root pointers through each collection's contract; `--execute` runs the prompt-quality rewrites (below) |
 | librarian (rewrite) | the report's hint, description and route findings | ONE frontmatter field (`hint:` or `description:`) on ONE page per task, in the content working copy | the page still parses | `FinalizeRewrites` compares with a pre-run snapshot: body and every other field byte-identical, the field changed, one line under 300 chars — else the snapshot is restored and the task reported `rejected` |
 
 Independence (Q7): a validator run whose `--model` equals the
-candidate's `researcher_model` is skipped with the reason; the two
-confirmations must come from distinct `agent:validator:<model>`
-entries. `kb.Frontmatter.TrustTier()` already reads "verified by an
-agent" as machine-confirmed; the pipeline's bar for *filing* is
-`ConfirmationsRequired` (2).
+candidate's `researcher_model` is skipped with the reason, and so is a
+model that has already confirmed the candidate; the two confirmations
+must come from recorded runs of distinct models. The pipeline's bar for
+*filing* is `ConfirmationsRequired` (2).
+
+Confirmations are counted from the pipeline's own records, never from
+the page (meerkat-mob#33). A candidate is agent-written text built from
+caller-supplied research, so what its frontmatter says about who
+verified it is not evidence:
+
+- `Finalize` stages a researcher's page with `verified:` emptied,
+  `status: unverified`, `failure_reason:` cleared, `generated:` and
+  `last_ingested:` set by the pipeline, and every key outside the OKF
+  core dropped before `intake_id`, `researcher_model` and `target_kb`
+  are stamped.
+- Each validator run starts from the staged copy. Afterwards the page
+  is compared with it: a run that changed the body or any field other
+  than `verified:`, `failure_reason:` and `status:` is rejected, the
+  staged copy is restored in the working copy, and nothing is recorded.
+- An accepted run is recorded as `validations/<id>/<run>.md` with the
+  `--model` the pipeline ran it with and its outcome. It is a
+  confirmation when it added a `verified:` entry and set no
+  `failure_reason:`; how many entries it added does not matter, one run
+  is one confirmation.
+- The librarian lists a candidate as fileable only from those records,
+  and `--apply` re-checks them before filing. The filed page's
+  `verified:` is rebuilt from the records
+  (`agent:validator:<model>`, the run's time) with
+  `status: machine-confirmed`.
 
 Target collection: the deepest collection the reporting agent tried
 (the last of `attempted`), or `unrouted` for the librarian to place.
@@ -248,9 +274,15 @@ meerkat, not in a content repo. They are written to
 with the queries, for a human to turn into a merge request on meerkat.
 Nothing is ever applied to a running server.
 
-Without `--apply` it changes nothing. With it, `direct` contracts get
-the page written into the collection's memory store at
-`global/intake/<id>.md` and the item marked filed; `merge-request`
+Without `--apply` it changes nothing. With it, a confirmed candidate
+for a `direct` collection is reported as `held` unless
+`--file-confirmed` is also given: two machine confirmations are a check,
+not a review, and a `direct` write publishes the page to every reader
+of the collection at once. Review the staged copy (`staged/<kb>/<id>.md`)
+and re-run with `--file-confirmed` to get the page written into the
+collection's memory store at `global/intake/<id>.md` and the item
+marked filed. A collection that wants review on every candidate should
+declare a `merge-request` contract; `merge-request`
 contracts get the instructions printed (the candidate is already
 committed on the working copy's branch); `none` names the page for a
 human to place. A promotion is filed the same way into the root: a

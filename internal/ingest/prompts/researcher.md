@@ -20,15 +20,12 @@ tags: [<tags>]
 related: [<page ids or collection:name this page should link to>]
 source:
   urls: [<every URL you relied on>]
-generated:
-  by: agent:researcher
-  at: {{now}}
-verified: []
-extra:
-  intake_id: {{intake_id}}
-  researcher_model: {{model}}
 ---
 ```
+
+The pipeline stamps provenance (`generated`, `last_ingested`, `intake_id`, `researcher_model`,
+`target_kb`) and resets `status` and `verified` when it stages the page; anything you write there is
+discarded, and only validator runs the pipeline records can confirm the page.
 
 Rules:
 
