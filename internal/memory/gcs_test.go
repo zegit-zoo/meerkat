@@ -36,13 +36,13 @@ func newFakeGCS() *fakeGCS {
 	return &fakeGCS{objects: map[string]fakeObject{}, nextGen: 1000}
 }
 
-func (f *fakeGCS) List(_ context.Context, _, prefix string) ([]gcsObject, error) {
+func (f *fakeGCS) List(_ context.Context, _, prefix string, keep func(string) bool) ([]gcsObject, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []gcsObject
 	for name, o := range f.objects {
-		if strings.HasPrefix(name, prefix) {
-			out = append(out, gcsObject{Name: name, Generation: o.gen})
+		if strings.HasPrefix(name, prefix) && (keep == nil || keep(name)) {
+			out = append(out, gcsObject{Name: name, Generation: o.gen, Size: int64(len(o.body))})
 		}
 	}
 	return out, nil

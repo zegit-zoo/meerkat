@@ -69,6 +69,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/kb"
 	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/memory"
+	"github.com/zegit-zoo/meerkat/internal/refresh"
 	"github.com/zegit-zoo/meerkat/internal/search"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
@@ -613,13 +614,32 @@ func (c *Collection) Memory() memory.Store {
 // that fail to parse are skipped with a warning rather than failing the
 // mount: one malformed memory must not make a whole collection
 // unserveable.
+//
+// A store that cannot be loaded at all (unreachable, or over the
+// object cap) degrades the collection instead of failing it
+// (meerkat-mob#44): the store is still attached, so saves keep working
+// and are served as they land; the content is served without the
+// memories written before; the failure is counted on the memory backend
+// metric (operation load, outcome error), marks a memory refresh slot
+// degraded when one is configured (whose next cycle retries the load),
+// and is returned so the caller can log it. The returned error is
+// informational — the collection is usable either way.
 func (c *Collection) AttachMemory(ctx context.Context, store memory.Store) error {
 	if store == nil {
 		return nil
 	}
-	records, err := store.Load(ctx)
+	records, err := timedMemory(ctx, memory.Backend(store), telemetry.MemoryLoad, func() ([]memory.Record, error) {
+		return store.Load(ctx)
+	})
 	if err != nil {
-		return fmt.Errorf("collection %q: load memory store: %w", c.Name, err)
+		wrapped := fmt.Errorf("collection %q: load memory store: %w", c.Name, err)
+		c.status.failed(refresh.KindMemory, wrapped)
+		c.overlayMu.Lock()
+		c.memory = store
+		c.overlay = map[string]kb.Page{}
+		c.overlayGen.Add(1)
+		c.overlayMu.Unlock()
+		return wrapped
 	}
 	pages := make(map[string]kb.Page, len(records))
 	for _, rec := range records {
@@ -937,7 +957,11 @@ func Open(ctx context.Context, resolved []contentsource.ResolvedCollection) (*Re
 				return nil, fmt.Errorf("collection %q: memory store: %w", rc.Name, err)
 			}
 			if err := c.AttachMemory(ctx, store); err != nil {
-				return nil, err
+				// Degraded, not fatal: AttachMemory has attached the store
+				// and the content serves without the stored memories. One
+				// writer filling the store must not unmount the collection
+				// for every reader (meerkat-mob#44).
+				fmt.Fprintf(os.Stderr, "meerkat: serving collection %q without its stored memories: %v\n", rc.Name, err)
 			}
 		}
 		c.Tree = rc.Tree
