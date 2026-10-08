@@ -4,6 +4,8 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/traversal"
 
 	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -35,7 +37,8 @@ import (
 //
 // Every fallback is per-FIELD, not per-block: a file that sets only
 // `traces.enabled: true` still picks its endpoint up from
-// OTEL_EXPORTER_OTLP_ENDPOINT.
+// OTEL_EXPORTER_OTLP_ENDPOINT. A file `endpoint:` beats the
+// signal-specific OTEL_EXPORTER_OTLP_{TRACES,METRICS}_ENDPOINT too.
 //
 // # Credentials are the exception, and they are not expressible here
 //
@@ -77,10 +80,12 @@ type Config struct {
 // them off: stderr JSON logging is the hosted server's baseline and
 // removing it is not an observability feature.
 type LogConfig struct {
-	// Level is debug | info | warn | error. Empty keeps the current
-	// default (info).
-	Level string `yaml:"level,omitempty"`
-	// Format is json | text. Empty keeps json.
+	// Level and Format are DEPRECATED and have no effect: the hosted
+	// server's logger is built from its own flags, not from this block.
+	// They are still accepted so that an existing file keeps loading, and
+	// New warns when either is set. Use the server's --log-level /
+	// --log-format flags instead.
+	Level  string `yaml:"level,omitempty"`
 	Format string `yaml:"format,omitempty"`
 	// IncludeTraceContext adds trace_id/span_id to access and auth logs
 	// when a span is active. Nil (unset) means "yes, whenever tracing is
@@ -122,6 +127,20 @@ type TraceConfig struct {
 	// operator who typed `enabled: true` and nothing else wants to see
 	// traces, not a tenth of them.
 	SampleRatio *float64 `yaml:"sample_ratio,omitempty"`
+	// TrustedSources lists the peers (CIDRs or bare IPs, matched against
+	// the TCP peer address — never X-Forwarded-For, which a caller can
+	// write) whose inbound W3C traceparent is honoured: their trace ID
+	// and sampled flag are continued. Everyone else, and everyone when
+	// the list is empty (the default), gets a fresh root span sampled at
+	// sample_ratio and a trace ID of meerkat's own choosing, so a caller
+	// cannot force sampling, fill the export queue or inject spans into
+	// another trace. Behind a proxy or gateway, name the proxy's address.
+	TrustedSources []string `yaml:"trusted_sources,omitempty"`
+	// MaxSpansPerSecond caps how many ended spans per second are handed
+	// to the exporter queue; the excess is dropped and counted
+	// (meerkat_otel_spans_dropped_total). Zero means the default (1000);
+	// a negative value removes the cap.
+	MaxSpansPerSecond int `yaml:"max_spans_per_second,omitempty"`
 }
 
 // OTLPConfig addresses the collector.
@@ -210,6 +229,9 @@ const (
 	defaultExportTimeout   = 10_000_000_000 // 10s
 	defaultShutdownTimeout = 5_000_000_000  // 5s
 	defaultMetricInterval  = 60_000_000_000 // 60s
+	// defaultMaxSpansPerSecond is generous for a documentation server and
+	// small enough that a flood cannot make the collector the bottleneck.
+	defaultMaxSpansPerSecond = 1000
 )
 
 // Resolved is a Config with the environment folded in and every default
@@ -220,6 +242,8 @@ type Resolved struct {
 	Environment        string
 	ResourceAttributes map[string]string
 
+	// LogLevel and LogFormat echo the deprecated, ineffective
+	// observability.logs.level/format keys so New can warn about them.
 	LogLevel            string
 	LogFormat           string
 	IncludeTraceContext bool
@@ -230,6 +254,10 @@ type Resolved struct {
 
 	TracesEnabled bool
 	SampleRatio   float64
+	// TrustedSources are the parsed traces.trusted_sources.
+	TrustedSources []netip.Prefix
+	// MaxSpansPerSecond is the resolved cap; negative means uncapped.
+	MaxSpansPerSecond int
 
 	Endpoint        string
 	TracesEndpoint  string
@@ -324,9 +352,23 @@ func Resolve(cfg *Config) (Resolved, error) {
 		return Resolved{}, fmt.Errorf("observability.traces.sample_ratio must be between 0 and 1, got %v", r.SampleRatio)
 	}
 
+	r.TrustedSources, err = parseTrustedSources(cfg.Traces.TrustedSources)
+	if err != nil {
+		return Resolved{}, err
+	}
+	r.MaxSpansPerSecond = cfg.Traces.MaxSpansPerSecond
+	if r.MaxSpansPerSecond == 0 {
+		r.MaxSpansPerSecond = defaultMaxSpansPerSecond
+	}
+
 	r.Endpoint = first(cfg.OTLP.Endpoint, os.Getenv(envEndpoint))
-	r.TracesEndpoint = os.Getenv(envTracesEndpoint)
-	r.MetricsEndpoint = os.Getenv(envMetricsEndpoint)
+	// A file `endpoint:` is explicit configuration and beats EVERY
+	// environment endpoint, the signal-specific ones included. The
+	// signal-specific variables only apply when the file said nothing.
+	if strings.TrimSpace(cfg.OTLP.Endpoint) == "" {
+		r.TracesEndpoint = os.Getenv(envTracesEndpoint)
+		r.MetricsEndpoint = os.Getenv(envMetricsEndpoint)
+	}
 	r.Protocol = first(cfg.OTLP.Protocol, os.Getenv(envProtocol), ProtocolGRPC)
 	switch r.Protocol {
 	case ProtocolGRPC, ProtocolHTTP:
@@ -378,6 +420,9 @@ func (c *Config) otlpTLSStated() bool {
 // only alongside an explicit `insecure: true`, so the disclosure is
 // something an operator typed rather than something a scheme implied.
 func (r Resolved) validateEndpoints() error {
+	if err := r.validateCredentialTransport(); err != nil {
+		return err
+	}
 	for _, ep := range []string{r.Endpoint, r.TracesEndpoint, r.MetricsEndpoint} {
 		if ep == "" {
 			continue
@@ -402,6 +447,65 @@ func (r Resolved) validateEndpoints() error {
 		}
 	}
 	return nil
+}
+
+// validateCredentialTransport refuses to send collector credentials in
+// the clear. Headers (named by headers_env, or the standard
+// OTEL_EXPORTER_OTLP_HEADERS) are authentication material; combined with
+// `insecure: true` they would cross the network as plaintext. A loopback
+// collector is exempt: that traffic never leaves the host.
+func (r Resolved) validateCredentialTransport() error {
+	if !r.Insecure || len(r.Headers) == 0 {
+		return nil
+	}
+	for _, ep := range []string{r.Endpoint, r.TracesEndpoint, r.MetricsEndpoint} {
+		if ep != "" && !isLoopbackEndpoint(ep) {
+			return fmt.Errorf("observability.otlp.headers_env supplies OTLP headers but observability.otlp.insecure is true and the endpoint is not loopback — " +
+				"credentials would be sent unencrypted; use TLS (insecure: false) or point the exporter at a loopback collector")
+		}
+	}
+	return nil
+}
+
+// isLoopbackEndpoint reports whether an OTLP endpoint (host:port, or a
+// URL) names the local machine: localhost or a loopback IP literal.
+func isLoopbackEndpoint(ep string) bool {
+	host := ep
+	if strings.Contains(ep, "://") {
+		u, err := url.Parse(ep)
+		if err != nil {
+			return false
+		}
+		host = u.Host
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
+}
+
+// parseTrustedSources parses traces.trusted_sources: CIDRs or bare IPs.
+func parseTrustedSources(in []string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, raw := range in {
+		raw = strings.TrimSpace(raw)
+		if p, err := netip.ParsePrefix(raw); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(raw)
+		if err != nil {
+			return nil, fmt.Errorf("observability.traces.trusted_sources: %q is not a CIDR or an IP address", raw)
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+	}
+	return out, nil
 }
 
 // resolveHeaders reads OTLP headers out of the environment.

@@ -774,8 +774,8 @@ content:
 #   environment: production          # deployment.environment.name; omitted if unset
 #
 #   logs:
-#     level: info                    # debug | info | warn | error
-#     format: json                   # json | text
+#     # (`level` and `format` are deprecated and ignored: the server's
+#     # logger is set by its own flags.)
 #     # trace_id/span_id on the access and auth logs when a span is active.
 #     # On by default whenever tracing is — the correlation is the point of
 #     # turning tracing on — but a log pipeline with a fixed schema can say
@@ -796,16 +796,26 @@ content:
 #   traces:
 #     enabled: true
 #     # Head sampling for traces THIS process starts. A trace arriving with
-#     # a valid W3C traceparent inherits the caller's decision instead
-#     # (parent-based), so a gateway that already sampled gets a complete
-#     # trace rather than a meerkat-only fragment. Unset falls back to
+#     # a valid W3C traceparent from a TRUSTED peer (below) inherits the
+#     # caller's decision instead (parent-based), so a gateway that already
+#     # sampled gets a complete trace rather than a meerkat-only fragment.
+#     # Unset falls back to
 #     # OTEL_TRACES_SAMPLER/_ARG, then to 1.0 — `enabled` is already the off
 #     # switch.
 #     sample_ratio: 0.10
+#     # Peers (CIDRs or IPs, matched on the TCP peer address, never
+#     # X-Forwarded-For) whose inbound traceparent is honoured. Default:
+#     # none, so no caller can force sampling or choose a trace ID. Behind a
+#     # gateway, list the gateway's address.
+#     # trusted_sources: [10.0.0.0/8]
+#     # Cap on spans handed to the exporter per second (excess is dropped
+#     # and counted). Default 1000; negative removes the cap.
+#     # max_spans_per_second: 1000
 #
 #   otlp:
 #     # host:port for grpc, or a base URL for http/protobuf. Unset falls
-#     # back to OTEL_EXPORTER_OTLP_ENDPOINT. With NEITHER, tracing still
+#     # back to OTEL_EXPORTER_OTLP_ENDPOINT (and the _TRACES_/_METRICS_
+#     # variants); when set here it beats all of them. With NEITHER, tracing still
 #     # runs — spans are created and the logs correlate — and nothing leaves
 #     # the process.
 #     endpoint: otel-collector.observability.svc:4317
@@ -813,6 +823,8 @@ content:
 #     # TLS is on unless this says otherwise. An in-cluster collector
 #     # address looks local, and a plaintext export of request metadata
 #     # across a cluster network is a disclosure worth having to type.
+#     # `insecure: true` together with headers_env is refused unless the
+#     # endpoint is loopback: credentials are never sent in the clear.
 #     insecure: false
 #     # AUTHENTICATION MATERIAL IS NAMED HERE, NEVER WRITTEN HERE. This is
 #     # the NAME of an environment variable holding `k1=v1,k2=v2` headers;

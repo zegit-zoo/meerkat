@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -254,6 +255,10 @@ func (r *rateLimiter) allow() bool {
 // without a working collector, and it writes to meerkat's structured
 // logger on STDERR rather than through the standard logger — stdout is
 // the stdio MCP transport's wire and nothing here may ever touch it.
+//
+// otel.SetErrorHandler is process-global and replaces whatever was there,
+// so it is called exactly once (installErrorHandler); instances register
+// as the target of one delegating handler instead of re-installing.
 type errorHandler struct {
 	log     *slog.Logger
 	metrics *Metrics
@@ -267,5 +272,43 @@ func (h *errorHandler) Handle(err error) {
 	h.metrics.ExportFailed(SignalTraces)
 	if h.limiter.allow() {
 		h.log.Warn("opentelemetry sdk error — serving is unaffected", "error", err.Error())
+	}
+}
+
+var (
+	errHandlerOnce   sync.Once
+	errHandlerTarget atomic.Pointer[errorHandler]
+	// errHandlerInstalls counts global installs; tests assert it never
+	// exceeds one.
+	errHandlerInstalls atomic.Int32
+)
+
+// delegatingErrorHandler is the one handler ever given to the SDK. It
+// forwards to whichever instance registered last, and falls back to the
+// default logger when none is active.
+type delegatingErrorHandler struct{}
+
+func (delegatingErrorHandler) Handle(err error) {
+	if h := errHandlerTarget.Load(); h != nil {
+		h.Handle(err)
+		return
+	}
+	if err != nil {
+		slog.Default().Warn("opentelemetry sdk error", "error", err.Error())
+	}
+}
+
+func installErrorHandler(h *errorHandler) {
+	errHandlerTarget.Store(h)
+	errHandlerOnce.Do(func() {
+		errHandlerInstalls.Add(1)
+		otel.SetErrorHandler(delegatingErrorHandler{})
+	})
+}
+
+// uninstallErrorHandler stops routing to h, if it is still the target.
+func uninstallErrorHandler(h *errorHandler) {
+	if h != nil {
+		errHandlerTarget.CompareAndSwap(h, nil)
 	}
 }
