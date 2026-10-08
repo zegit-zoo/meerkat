@@ -17,41 +17,31 @@ import (
 )
 
 // DownloadAsset fetches one release asset to a tempfile and returns
-// its path + sha256 hex. token is optional: pass "" for anonymous
-// download, which works fine now that the repo is public. Pass a cached
-// gh token to get the higher authenticated GitHub API rate limit (or to
-// reach a private repo, should this one ever go back to being private).
+// its path + sha256 hex. The request is anonymous first; token (a cached
+// gh token, optional) is sent only to retry after a rate-limit refusal,
+// and only to this project's release-asset API URLs. The body is capped
+// at maxDownloadBytes and subject to an idle timeout rather than a
+// total-time limit.
 //
 // GitHub asset API URLs respond with a 302 redirect to a signed CDN
 // URL when Accept: application/octet-stream is set. Go's default
 // client follows the redirect and correctly drops the Authorization
 // header on the cross-host hop.
 func DownloadAsset(ctx context.Context, url, token string) (path string, sha256hex string, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", "", err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	// GitHub asset API requires octet-stream to serve the binary
-	// directly (otherwise it returns JSON metadata).
-	req.Header.Set("Accept", "application/octet-stream")
-	setUA(req)
-
-	resp, err := updateHTTPClient.Do(req)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resp, err := getAnonymousFirst(func() (*http.Request, error) {
+		return assetRequest(ctx, url)
+	}, token, tokenAllowedForAsset(url))
 	if err != nil {
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		if token != "" {
-			return "", "", fmt.Errorf("GitHub returned %s — run `gh auth login` (or `gh auth status`) to refresh your token", resp.Status)
-		}
-		return "", "", fmt.Errorf("GitHub returned %s — this is likely the anonymous API rate limit; run `gh auth login` for a higher limit", resp.Status)
+	if err := checkAssetStatus(resp, url, token); err != nil {
+		return "", "", err
 	}
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("GitHub returned %s for %s", resp.Status, url)
+	if resp.ContentLength > maxDownloadBytes {
+		return "", "", fmt.Errorf("download %s: size %d exceeds the %d-byte limit", url, resp.ContentLength, maxDownloadBytes)
 	}
 
 	tmp, err := os.CreateTemp("", "meerkat-download-*.tar.gz")
@@ -60,12 +50,54 @@ func DownloadAsset(ctx context.Context, url, token string) (path string, sha256h
 	}
 	defer tmp.Close()
 
+	body := newIdleTimeoutReader(resp.Body, bodyIdleTimeout, cancel)
+	defer body.stop()
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
+	// Read one byte past the cap so an over-long body is detected, not
+	// silently truncated into a (then checksum-failing) short file.
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(body, maxDownloadBytes+1))
+	if err != nil {
 		os.Remove(tmp.Name())
 		return "", "", fmt.Errorf("download: %w", err)
 	}
+	if n > maxDownloadBytes {
+		os.Remove(tmp.Name())
+		return "", "", fmt.Errorf("download %s: exceeds the %d-byte limit", url, maxDownloadBytes)
+	}
 	return tmp.Name(), hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// maxDownloadBytes caps a release-asset download. Generous (the real
+// archives are ~10 MiB) so legitimate growth never trips it, while a
+// hostile or broken response cannot fill the temp directory. A var,
+// not a const, so tests can shrink it.
+var maxDownloadBytes int64 = 512 << 20 // 512 MiB
+
+// assetRequest builds an anonymous GET for a release asset. The
+// Authorization header, if any, is added by getAnonymousFirst.
+func assetRequest(ctx context.Context, url string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	// GitHub asset API requires octet-stream to serve the binary
+	// directly (otherwise it returns JSON metadata).
+	req.Header.Set("Accept", "application/octet-stream")
+	setUA(req)
+	return req, nil
+}
+
+func checkAssetStatus(resp *http.Response, url, token string) error {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		if token != "" {
+			return fmt.Errorf("GitHub returned %s — run `gh auth login` (or `gh auth status`) to refresh your token", resp.Status)
+		}
+		return fmt.Errorf("GitHub returned %s — this is likely the anonymous API rate limit; run `gh auth login` for a higher limit", resp.Status)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GitHub returned %s for %s", resp.Status, url)
+	}
+	return nil
 }
 
 // FetchChecksumFor returns the expected sha256 hex for assetName,
@@ -136,30 +168,21 @@ func DownloadToTemp(ctx context.Context, url, token, namePattern string) (string
 // (required for GitHub asset URLs), returning the response body bounded
 // by maxBytes.
 func fetchBytes(ctx context.Context, url, token string, maxBytes int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-	req.Header.Set("Accept", "application/octet-stream")
-	setUA(req)
-	resp, err := updateHTTPClient.Do(req)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resp, err := getAnonymousFirst(func() (*http.Request, error) {
+		return assetRequest(ctx, url)
+	}, token, tokenAllowedForAsset(url))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		if token != "" {
-			return nil, fmt.Errorf("GitHub returned %s — run `gh auth login` (or `gh auth status`) to refresh your token", resp.Status)
-		}
-		return nil, fmt.Errorf("GitHub returned %s — this is likely the anonymous API rate limit; run `gh auth login` for a higher limit", resp.Status)
+	if err := checkAssetStatus(resp, url, token); err != nil {
+		return nil, err
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub returned %s for %s", resp.Status, url)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	body := newIdleTimeoutReader(resp.Body, bodyIdleTimeout, cancel)
+	defer body.stop()
+	return io.ReadAll(io.LimitReader(body, maxBytes))
 }
 
 // maxExtractedBinarySize caps how many bytes we'll write out when

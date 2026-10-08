@@ -40,21 +40,23 @@ func fakeAsset(t *testing.T, content string) ([]byte, string) {
 	return body, hex.EncodeToString(sum[:])
 }
 
-// TestDownloadAsset_HappyPath: server returns the tarball + correct
-// auth header is required.
+// TestDownloadAsset_HappyPath: the first (anonymous) request is refused
+// with a rate-limit 403; the retry carries the token and succeeds.
 func TestDownloadAsset_HappyPath(t *testing.T) {
 	body, wantSha := fakeAsset(t, "fake binary contents")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
-			http.Error(w, "missing bearer", http.StatusUnauthorized)
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			http.Error(w, "API rate limit exceeded", http.StatusForbidden)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
+	withAssetBase(t, srv)
 
-	path, gotSha, err := DownloadAsset(context.Background(), srv.URL+"/asset.tar.gz", "test-token")
+	path, gotSha, err := DownloadAsset(context.Background(), srv.URL+assetPath("1"), "test-token")
 	if err != nil {
 		t.Fatalf("DownloadAsset: %v", err)
 	}
