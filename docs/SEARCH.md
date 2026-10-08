@@ -260,12 +260,51 @@ some power without needing docs:
 | `description:Foo` | match against the frontmatter one-liner only |
 | `hint:Foo` | match against a pointer's hint only |
 | `body:foo*` | wildcard suffix in body |
+| `/kube.*/` | regexp over the indexed terms (whole term, must start with a literal) |
 | `cache OR queue` | either term |
 
 Field targeting against `id`, `title`, `description` and `hint` works
 alongside the boost, so `title:retry` returns only pages whose title
 contains "retry", and `description:retry` only those whose frontmatter
 summary does.
+
+### Limits on query syntax
+
+Every query passes the same checks before it runs, on every surface
+(CLI, `POST /search`, `mk_search`). A query that fails one is refused
+as an invalid query (HTTP 400, an MCP tool error) with a message saying
+which limit it hit; nothing is silently rewritten or truncated.
+
+| Limit | Value | Why |
+|---|---|---|
+| query length | 512 bytes | real queries are a few words |
+| whitespace-separated terms | 64 | bounds the clauses the parser builds |
+| parenthesis nesting | 8 | the query-string language has no grouping |
+| wildcard (`kube*`, `fo?`) and regexp (`/kube.*/`) clauses | 2 per query | each one expands into a clause per matching index term |
+| literal start of a wildcard or regexp | at least 1 character | `*foo`, `?oo`, `/.*/` and `/(?i)foo/` would scan every term of the field |
+| index terms one wildcard, regexp, prefix or fuzzy term may match | 1,024 | `abc*` on a vocabulary where thousands of words start with `abc` is refused as too broad; use a longer prefix |
+| fuzziness (`foo~2`) | 2 edits | bleve's own maximum |
+| a query bleve cannot parse | refused | it would fail at search time anyway |
+
+The 1,024-term limit also applies to the planner's prefix and fuzzy
+stages below, so a three-letter word that falls through to the prefix
+stage and prefixes more than 1,024 terms is refused the same way.
+Category boosts repeat the query-string clause once per boosted
+category, so a deployment's worst-case cost per query scales with the
+number of entries in its boost map; keep that map short.
+
+Two limits bound searches as a whole rather than the query text:
+
+- **Concurrency.** At most 8 searches run at once in one process,
+  across every collection (`maxConcurrentSearches` in
+  `internal/search/limits.go`). Further searches wait for a slot, or
+  give up with their caller's deadline.
+- **Deadline.** The HTTP and MCP surfaces give each search 10 s
+  (`search.DefaultQueryTimeout`). The caller gets its answer, or a
+  deadline error, at that deadline even if the search is still
+  expanding terms, which is work bleve does not interrupt. A search
+  abandoned that way keeps its concurrency slot until it actually
+  finishes, so abandoned work cannot pile up past the slot count.
 
 ## The staged planner: exact, then fuzzy, then prefix
 
