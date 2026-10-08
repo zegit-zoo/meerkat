@@ -400,7 +400,9 @@ func saveMemory(ctx context.Context, col *collections.Collection, args saveMemor
 		"namespace":  ref.Namespace,
 		"id":         page.ID,
 		"version":    string(version),
-		"location":   store.Location(ref.Key),
+		// No storage location (meerkat-mob#62): an s3:// URL or a server
+		// path names infrastructure the caller has no use for. The page ID
+		// is the caller's handle on the memory.
 		"searchable": true,
 		"note": "Saved and indexed. mk_search and mk_show can find it now. " +
 			"Pass this 'version' back as the 'version' argument to update this same memory later.",
@@ -421,7 +423,9 @@ func stageMemory(ctx context.Context, col *collections.Collection, args saveMemo
 		telemetry.Fail(span, telemetry.OutcomeError)
 		return nil, err
 	}
-	location, err := col.StageMemory(ctx, ref.StagingKey(), body)
+	// The staging location is the store's business, not the caller's
+	// (meerkat-mob#62); the response names the page ID and the status.
+	_, err = col.StageMemory(ctx, ref.StagingKey(), body)
 	if err != nil {
 		telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeError)
 		telemetry.Fail(span, telemetry.OutcomeError)
@@ -436,7 +440,6 @@ func stageMemory(ctx context.Context, col *collections.Collection, args saveMemo
 		"scope":      string(ref.Scope),
 		"namespace":  ref.Namespace,
 		"id":         ref.PageID,
-		"location":   location,
 		"searchable": false,
 		"note": fmt.Sprintf("You are not authorized to write %s memories to %q, so this was saved as a "+
 			"pending review artifact instead. It is NOT searchable and NOT visible to anyone until a "+
