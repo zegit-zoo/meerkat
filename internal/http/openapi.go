@@ -13,6 +13,10 @@ import (
 // schema drifts.
 //
 // Reference: https://docs.openwebui.com/features/plugin/tools/openapi-tools/
+//
+// collectionNames is nil for an anonymous reader: the schema then names
+// no collection and says nothing about how many are mounted, so a
+// single- and a multi-collection deployment answer identically.
 func openAPISchema(version string, collectionNames []string) map[string]any {
 	if version == "" {
 		version = "dev"
@@ -25,7 +29,10 @@ func openAPISchema(version string, collectionNames []string) map[string]any {
 	// client that fetches the schema (OpenWebUI does) learns the set
 	// without a second call.
 	collectionDesc := "Optional. Restrict to one collection. "
-	if len(collectionNames) > 1 {
+	if collectionNames == nil {
+		collectionDesc += "GET /collections (with the API key) lists the mounted collections. " +
+			"Omit to span all of them; every result names the collection it came from."
+	} else if len(collectionNames) > 1 {
 		collectionDesc += "Mounted collections: " + strings.Join(collectionNames, ", ") +
 			". Omit to span all of them; every result names the collection it came from."
 	} else {

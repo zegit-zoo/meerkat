@@ -255,23 +255,44 @@ func (s *Server) authGate(public map[string]bool) http.Handler {
 			s.mux.ServeHTTP(w, r)
 			return
 		}
-		header := r.Header.Get("Authorization")
-		const prefix = "Bearer "
-		if !strings.HasPrefix(header, prefix) {
+		switch s.checkKey(r) {
+		case keyMissing:
 			writeError(w, http.StatusUnauthorized, "missing or malformed Authorization header (expected 'Bearer <key>')")
 			return
-		}
-		got := []byte(strings.TrimPrefix(header, prefix))
-		want := []byte(s.cfg.APIKey)
-		// ConstantTimeCompare requires equal lengths to be useful;
-		// it returns 0 for unequal lengths so the check is safe but
-		// also cheaply rejects different lengths early.
-		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
+		case keyWrong:
 			writeError(w, http.StatusUnauthorized, "invalid API key")
 			return
 		}
 		s.mux.ServeHTTP(w, r)
 	})
+}
+
+type keyState int
+
+const (
+	keyOK keyState = iota
+	keyMissing
+	keyWrong
+)
+
+// checkKey classifies the request's bearer credential. It is shared by
+// authGate and by the public routes that tailor their answer to whether
+// the caller holds the key (handleOpenAPI).
+func (s *Server) checkKey(r *http.Request) keyState {
+	header := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return keyMissing
+	}
+	got := []byte(strings.TrimPrefix(header, prefix))
+	want := []byte(s.cfg.APIKey)
+	// ConstantTimeCompare requires equal lengths to be useful;
+	// it returns 0 for unequal lengths so the check is safe but
+	// also cheaply rejects different lengths early.
+	if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
+		return keyWrong
+	}
+	return keyOK
 }
 
 // --- request/response payloads -------------------------------
@@ -569,7 +590,14 @@ func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, openAPISchema(s.cfg.Version, s.reg.Names()))
+	// The schema stays public so tool registration works, but the mounted
+	// collection names are only included for a caller holding the key:
+	// like GET /collections, they are not for an anonymous reader.
+	var names []string
+	if s.checkKey(r) == keyOK {
+		names = s.reg.Names()
+	}
+	writeJSON(w, http.StatusOK, openAPISchema(s.cfg.Version, names))
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -588,10 +616,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "  POST /show     body: {\"id\": \"concepts/Rate-Limiting\"}")
 	fmt.Fprintln(w, "  POST /list     body: {\"prefix\": \"systems/\", \"category\": \"...\", \"status\": \"...\"}")
 	fmt.Fprintln(w, "  GET  /collections")
-	if !s.reg.Single() {
-		fmt.Fprintf(w, "\nMounted collections (pass \"collection\" to narrow, omit to span all):\n  %s\n",
-			strings.Join(s.reg.Names(), ", "))
-	}
+	// No collection names here: the banner is public (see /collections).
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Public endpoints (no auth):")
 	fmt.Fprintln(w, "  GET  /openapi.json")
