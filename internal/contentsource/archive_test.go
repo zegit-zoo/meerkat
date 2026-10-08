@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -569,5 +571,186 @@ func TestCumulativeLimitReader_Archive(t *testing.T) {
 	}
 	if !cr.exceeded {
 		t.Fatal("expected exceeded=true once the budget is exhausted")
+	}
+}
+
+// --- hardening: sparse entries and the on-disk write budget ---
+
+// rawTarHeader returns one 512-byte ustar header block for name with the
+// given typeflag and size, checksum included. archive/tar's Writer will
+// not emit GNU sparse records, so the sparse tests assemble their
+// archives from raw blocks.
+func rawTarHeader(t *testing.T, name string, typeflag byte, size int64) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: size, Format: tar.FormatUSTAR}); err != nil {
+		t.Fatal(err)
+	}
+	blk := append([]byte(nil), buf.Bytes()[:512]...)
+	blk[156] = typeflag
+	for i := 148; i < 156; i++ {
+		blk[i] = ' '
+	}
+	var sum int64
+	for _, b := range blk {
+		sum += int64(b)
+	}
+	copy(blk[148:], []byte(fmt.Sprintf("%06o\x00 ", sum)))
+	return blk
+}
+
+// padBlock pads b with zero bytes to a multiple of the 512-byte tar block.
+func padBlock(b []byte) []byte {
+	if r := len(b) % 512; r != 0 {
+		b = append(b, make([]byte, 512-r)...)
+	}
+	return b
+}
+
+// paxRecord renders one PAX extended-header record ("<len> key=value\n").
+func paxRecord(k, v string) string {
+	rec := " " + k + "=" + v + "\n"
+	n := len(rec)
+	for {
+		l := len(strconv.Itoa(n + len(rec)))
+		if l+len(rec) == n {
+			return strconv.Itoa(n) + rec
+		}
+		n = l + len(rec)
+	}
+}
+
+// sparseTarGz builds a gzip'd tar with count GNU PAX 0.1 sparse entries,
+// each storing one data byte but declaring logicalSize bytes of content.
+func sparseTarGz(t *testing.T, count int, logicalSize int64) []byte {
+	t.Helper()
+	var raw []byte
+	for i := range count {
+		name := fmt.Sprintf("sparse-%d.md", i)
+		pax := paxRecord("GNU.sparse.major", "0") + paxRecord("GNU.sparse.minor", "1") +
+			paxRecord("GNU.sparse.size", strconv.FormatInt(logicalSize, 10)) +
+			paxRecord("GNU.sparse.numblocks", "1") + paxRecord("GNU.sparse.map", "0,1")
+		raw = append(raw, rawTarHeader(t, "PaxHeaders/"+name, tar.TypeXHeader, int64(len(pax)))...)
+		raw = append(raw, padBlock([]byte(pax))...)
+		raw = append(raw, rawTarHeader(t, name, tar.TypeReg, 1)...)
+		raw = append(raw, padBlock([]byte("x"))...)
+	}
+	raw = append(raw, make([]byte, 1024)...) // end-of-archive marker
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// dirSize sums the sizes of every regular file under root.
+func dirSize(t *testing.T, root string) int64 {
+	t.Helper()
+	var total int64
+	err := filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return total
+}
+
+// TestExtractTarGz_SparseEntryRefused: a few-hundred-byte archive of
+// sparse entries whose logical size is far above the cumulative cap must
+// be refused, and must not leave more than the cap on disk.
+func TestExtractTarGz_SparseEntryRefused(t *testing.T) {
+	origTotal := maxExtractedTotalBytes
+	maxExtractedTotalBytes = 1 << 20
+	t.Cleanup(func() { maxExtractedTotalBytes = origTotal })
+
+	body := sparseTarGz(t, 4, 4<<20)
+	if len(body) > 4096 {
+		t.Fatalf("test archive is %d bytes; it should be tiny", len(body))
+	}
+
+	// The fixture really is sparse as archive/tar sees it.
+	gz, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr, err := tar.NewReader(gz).Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isSparseEntry(hdr) || hdr.Size != 4<<20 {
+		t.Fatalf("fixture header = %+v, want a sparse entry of %d bytes", hdr, 4<<20)
+	}
+
+	dest := t.TempDir()
+	err = extractTarGz(writeTarGzFile(t, t.TempDir(), body), dest)
+	if err == nil || !strings.Contains(err.Error(), "sparse") {
+		t.Fatalf("extractTarGz err = %v, want a sparse-entry refusal", err)
+	}
+	if got := dirSize(t, dest); got > maxExtractedTotalBytes {
+		t.Errorf("%d bytes on disk after refusal, want <= %d", got, maxExtractedTotalBytes)
+	}
+}
+
+func TestIsSparseEntry(t *testing.T) {
+	cases := []struct {
+		name string
+		hdr  tar.Header
+		want bool
+	}{
+		{"regular", tar.Header{Typeflag: tar.TypeReg}, false},
+		{"other pax", tar.Header{Typeflag: tar.TypeReg, PAXRecords: map[string]string{"path": "a"}}, false},
+		{"old gnu", tar.Header{Typeflag: tar.TypeGNUSparse}, true},
+		{"pax 1.0", tar.Header{Typeflag: tar.TypeReg, PAXRecords: map[string]string{"GNU.sparse.major": "1"}}, true},
+		{"pax 0.0", tar.Header{Typeflag: tar.TypeReg, PAXRecords: map[string]string{"GNU.sparse.offset": "0"}}, true},
+	}
+	for _, tc := range cases {
+		if got := isSparseEntry(&tc.hdr); got != tc.want {
+			t.Errorf("%s: isSparseEntry = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestExtractRegularFile_WriteBudget: the on-disk budget is enforced on
+// bytes written, independently of the gzip read budget, and bounds what
+// lands on disk to the remaining budget plus one detection byte.
+func TestExtractRegularFile_WriteBudget(t *testing.T) {
+	body := buildTarGz(t, []tarEntry{regEntry("a.md", strings.Repeat("a", 100))})
+	gz, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cum := &cumulativeLimitReader{r: gz, remaining: 1 << 20}
+	tr := tar.NewReader(cum)
+	if _, err := tr.Next(); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	root, err := os.OpenRoot(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	budget := &extractBudget{remaining: 40}
+	err = extractRegularFile(root, "a.md", "a.md", tr, cum, budget)
+	if err == nil || !strings.Contains(err.Error(), "cumulative") {
+		t.Fatalf("err = %v, want the cumulative cap", err)
+	}
+	if got := dirSize(t, dest); got > 41 {
+		t.Errorf("%d bytes on disk, want <= 41", got)
 	}
 }
