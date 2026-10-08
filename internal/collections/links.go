@@ -118,6 +118,19 @@ type linkGraph struct {
 type linkCache struct {
 	mu    sync.Mutex
 	graph *linkGraph
+	// content holds each collection's CONTENT pages (no memory overlay)
+	// as last listed, keyed by the snapshot generation they were listed
+	// from. A rebuild re-lists only collections whose snapshot changed:
+	// a memory save moves its collection's overlay generation, not its
+	// snapshot, so the rebuild it triggers merges the live overlay over
+	// cached content and walks no content root at all. Guarded by mu.
+	content map[string]contentPages
+}
+
+// contentPages is one collection's cached content page list.
+type contentPages struct {
+	gen   uint64
+	pages []kb.Page
 }
 
 // base returns the registry the graph is built from: the root, or r
@@ -147,7 +160,7 @@ func (r *Registry) graph() *linkGraph {
 	if root.links == nil {
 		// A registry assembled without New/Global (tests); no sharing,
 		// no caching.
-		return root.buildGraph(root.graphKey())
+		return root.buildGraph(root.graphKey(), nil)
 	}
 	key := root.graphKey()
 	root.links.mu.Lock()
@@ -155,14 +168,46 @@ func (r *Registry) graph() *linkGraph {
 	if root.links.graph != nil && root.links.graph.key == key {
 		return root.links.graph
 	}
-	root.links.graph = root.buildGraph(key)
+	root.links.graph = root.buildGraph(key, root.links)
 	return root.links.graph
 }
 
 func qualify(collection, id string) string { return collection + ":" + id }
 
-// buildGraph walks every page of every collection once.
-func (r *Registry) buildGraph(key string) *linkGraph {
+// pagesOf returns c's pages as the graph needs them — unfiltered, memory
+// overlay included, exactly what c.PagesFor(kb.Unfiltered()) returns —
+// re-listing the content root only when c's serving snapshot differs
+// from the one the cached list came from. Called with lc.mu held; a nil
+// lc lists every time.
+func (lc *linkCache) pagesOf(c *Collection) ([]kb.Page, error) {
+	if lc == nil {
+		return c.PagesFor(kb.Unfiltered())
+	}
+	s := c.acquire()
+	defer s.release()
+	if c.IsCold() {
+		return nil, nil
+	}
+	cached, ok := lc.content[c.Name]
+	if !ok || cached.gen != s.gen {
+		pages, err := c.contentPagesFrom(s.fsys)
+		if err != nil {
+			delete(lc.content, c.Name)
+			return nil, err
+		}
+		if lc.content == nil {
+			lc.content = map[string]contentPages{}
+		}
+		cached = contentPages{gen: s.gen, pages: pages}
+		lc.content[c.Name] = cached
+	}
+	return c.mergeOverlay(cached.pages, c.viewerFor(kb.Unfiltered())), nil
+}
+
+// buildGraph resolves every page of every collection once. Content
+// pages come from lc's per-snapshot cache when the collection's snapshot
+// has not changed since they were listed (lc may be nil: no cache).
+func (r *Registry) buildGraph(key string, lc *linkCache) *linkGraph {
 	g := &linkGraph{
 		key:        key,
 		mounted:    make(map[string]bool, len(r.list)),
@@ -180,7 +225,7 @@ func (r *Registry) buildGraph(key string) *linkGraph {
 	}
 	var all []located
 	for _, c := range r.list {
-		pages, err := c.PagesFor(kb.Unfiltered())
+		pages, err := lc.pagesOf(c)
 		if err != nil {
 			// A collection that cannot list is reported by health(); the
 			// graph simply does not know its pages, and links into it

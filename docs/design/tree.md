@@ -81,7 +81,9 @@ they appear in `mk_list_collections`, `GET /collections` and `mk list
 an agent knows the name exists. The first request that names one
 mounts it under the cache's cold policy — blocking by default, or an
 immediate `{status: cold, retry_after_ms}` answer with `cold_policy:
-async` — and the resident budget decides how long it stays warm. See
+async` — and the resident budget decides how long it stays warm. A
+blocking mount runs under the request's context: a request that ends
+first leaves the child cold and commits nothing. See
 [docs/design/cache.md](cache.md).
 
 ## What the registry does differently in tree mode

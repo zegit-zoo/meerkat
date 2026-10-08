@@ -2,8 +2,12 @@ package collections
 
 import (
 	"context"
+	"fmt"
+	"io/fs"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/fstest"
 
 	"github.com/zegit-zoo/meerkat/internal/kb"
 )
@@ -241,5 +245,70 @@ func TestBundles_GroupByPointerTarget(t *testing.T) {
 	}
 	if reg.Bundles(nil) != nil {
 		t.Error("no hits, no bundles")
+	}
+}
+
+// countingFS counts Open calls: every page a listing reads is an Open.
+type countingFS struct {
+	fs.FS
+	opens atomic.Int64
+}
+
+func (c *countingFS) Open(name string) (fs.File, error) {
+	c.opens.Add(1)
+	return c.FS.Open(name)
+}
+
+// TestLinks_MemorySaveRebuildsWithoutRelistingContent pins item 1 of
+// meerkat-mob#63: a memory save invalidates the link graph, but the
+// rebuild it triggers re-reads no content root — content pages are
+// cached per snapshot — while a snapshot swap still re-lists.
+func TestLinks_MemorySaveRebuildsWithoutRelistingContent(t *testing.T) {
+	cfs := &countingFS{FS: fstest.MapFS{
+		"content/a.md": {Data: []byte("---\nid: a\ntitle: A\nrelated: [b]\n---\nbody\n")},
+		"content/b.md": {Data: []byte("---\nid: b\ntitle: B\n---\nbody\n")},
+	}}
+	docs := newCollection("docs", "disk:x", "v1", cfs)
+	other := FromPages("other", []kb.Page{{ID: "o", Title: "O"}})
+	reg, err := New(docs, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Build the search index first: a memory save writes into it, and
+	// building it is a listing of its own that is not the graph's.
+	if _, err := docs.Index(); err != nil {
+		t.Fatal(err)
+	}
+	before := cfs.opens.Load()
+	g1 := reg.graph()
+	if _, ok := g1.exists["docs:a"]; !ok {
+		t.Fatalf("content not in the graph: %v", g1.exists)
+	}
+	listed := cfs.opens.Load()
+	if listed == before {
+		t.Fatal("the first build must list the content root")
+	}
+
+	for i := range 3 {
+		if err := docs.publishMemory(kb.Page{ID: fmt.Sprintf("memory/team/m%d", i), Title: "M", Front: kb.Frontmatter{Related: []string{"b"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if reg.graph() == g1 {
+			t.Fatal("a memory save must still invalidate the graph")
+		}
+	}
+	if got := cfs.opens.Load(); got != listed {
+		t.Errorf("memory saves re-read the content root: %d opens, want %d", got, listed)
+	}
+	ref, _ := reg.Show("docs", "b")
+	if pl := reg.LinksOf(ref); len(pl.LinkedFrom) != 4 {
+		t.Errorf("backlinks after the saves = %v, want docs:a and the three memories", pl.LinkedFrom)
+	}
+
+	// A new snapshot is new content: it is listed again.
+	docs.install(&snapshot{fsys: cfs, provenance: "disk:x", version: "v2"})
+	reg.graph()
+	if cfs.opens.Load() == listed {
+		t.Error("a snapshot swap must re-list the content root")
 	}
 }
