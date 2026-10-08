@@ -89,18 +89,9 @@ type OutcomeOptions struct {
 	Intake memory.Store
 	// Sessions tracks retrieval sessions (issue F); nil tracks nothing.
 	Sessions *retrieval.Tracker
-}
-
-// sessionKey is the retrieval-session key for a call: the explicit
-// session_id, else the MCP client session, else "" (no session).
-func sessionKey(ctx context.Context, explicit string) string {
-	if explicit != "" {
-		return explicit
-	}
-	if cs := mcpserver.ClientSessionFromContext(ctx); cs != nil {
-		return cs.SessionID()
-	}
-	return ""
+	// Reports bounds traversal-log writes per principal (ratelimit.go);
+	// the zero value takes the defaults.
+	Reports ReportLimits
 }
 
 // limitResult answers a call that exceeded a traversal limit: a tool
@@ -170,8 +161,9 @@ func reportOutcomeTool(reg *collections.Registry) mcp.Tool {
 				"answer was. fallback says what you did instead — kind web | source | human | none, a "+
 				"summary of what you learned, and the sources — and when the deployment has an intake "+
 				"store and you hold intake-write, that summary becomes a draft page for review. "+
-				"Returns {recorded, logged, intake_id?}. Idempotent per session_id: report once at the "+
-				"end; a later report for the same session supersedes it."+
+				"Returns {recorded, logged, log, intake, intake_id?}. Report once per retrieval session, at the "+
+				"end: only a session's first report is logged (log: duplicate otherwise), so use a fresh "+
+				"session_id per question."+
 				mounted),
 		mcp.WithString("session_id", mcp.Description("The retrieval session this report closes. Optional; defaults to the MCP session, or a fresh ID for a stateless caller. Pass the same value you gave mk_search.")),
 		mcp.WithString("outcome", mcp.Required(), mcp.Description("found | not_found | gave_up")),
@@ -334,6 +326,7 @@ func stringList(req mcp.CallToolRequest, name string, cap int) ([]string, error)
 }
 
 func reportOutcomeHandler(reg *collections.Registry, opts transportOptions) mcpserver.ToolHandlerFunc {
+	gate := newReportGate(opts.Outcome.Reports)
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args, err := parseOutcomeArgs(req)
 		if err != nil {
@@ -382,7 +375,7 @@ func reportOutcomeHandler(reg *collections.Registry, opts transportOptions) mcps
 		)
 		started := time.Now()
 
-		resp := map[string]any{"recorded": true, "logged": false, "intake": "not_configured"}
+		resp := map[string]any{"recorded": true, "logged": false, "log": logNotConfigured, "intake": "not_configured"}
 
 		// 3. Intake first, so the log line can carry the intake ID.
 		intakeID := ""
@@ -407,8 +400,11 @@ func reportOutcomeHandler(reg *collections.Registry, opts transportOptions) mcps
 			resp["intake"] = "none"
 		}
 
-		// 2. The traversal log.
+		// 2. The traversal log, when the gate admits this report.
 		if opts.Outcome.Log.Enabled() {
+			resp["log"] = gate.admit(ctx, key, sum != nil)
+		}
+		if resp["log"] == logWritten {
 			entry := traversal.Entry{
 				Session:      args.sessionID,
 				Outcome:      args.outcome,

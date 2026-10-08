@@ -154,14 +154,46 @@ present on the other.
 | collections visible | all | the caller's — including, since #36, the ones explicitly published to callers with no token |
 
 Defaults: `/mcp` on `127.0.0.1:4005`, stateless session IDs (any
-well-formed ID is accepted, so replicas need no sticky routing —
-`--stateful` opts into in-process session state), a 30s SSE heartbeat so
+well-formed ID bound to the caller is accepted, so replicas need no
+sticky routing — `--stateful` opts into in-process session state), a 30s SSE heartbeat so
 proxies don't reap idle streams, and a 30m idle sweep so a client that
 vanishes without a DELETE doesn't leak session state.
 
 `WriteTimeout` is deliberately **0**. A Streamable HTTP GET is a
 long-lived SSE stream, and a write deadline would sever it mid-session;
 per-request work is bounded by the query timeout instead.
+
+### Sessions belong to a principal (meerkat-mob#46)
+
+Two identifiers name a session, and the caller supplies both: the
+`session_id` tool argument (retrieval sessions, their traversal limits,
+freshness advisories) and the MCP session ID (`Mcp-Session-Id`, the
+transport's per-session state and GET stream). Neither may reach
+another principal's state.
+
+- **The principal** is `memory.Namespace(identity)`, the hash of the
+  verified `(iss, sub)` that also owns personal memories. Every caller
+  with no subject (anonymous callers, and all callers of a deployment
+  without auth) is one principal.
+- **Tool-level keys** are `principal + "\x00" + id`. Two principals that
+  pick the same `session_id` get two sessions: neither can spend the
+  other's limits, end it with `mk_report_outcome`, suppress its
+  advisories or parent spans under it.
+- **MCP session IDs are minted bound to the principal**:
+  `mcp-session-<nonce>.<tag>`, where the tag is a hash of the principal
+  and the nonce. A request presenting an ID whose tag does not match its
+  own principal is answered `404`, the answer for an unknown session, on
+  POST, GET and DELETE, in both modes. The check needs no secret and no
+  shared state, because it is made against the principal of the
+  presenting request, which comes from a verified token. Stateless
+  replicas therefore still need no sticky routing. `--stateful`
+  additionally answers `404` for any ID this process did not issue.
+- **Caps.** A principal may hold 32 open GET streams (`429` beyond) and,
+  in stateful mode, 32 issued IDs. The process holds at most 10,000 IDs,
+  and past either cap the oldest ID is evicted. The retrieval tracker
+  holds at most 64 live sessions per principal and 10,000 overall. When
+  a cap is reached the least recently used session goes, the principal's
+  own first, and ends as an idle one would.
 
 DNS-rebinding protection (mcp-go's rejection of loopback requests whose
 `Host` is not a localhost value) stays on. `--trust-proxy-host` disables
@@ -647,10 +679,10 @@ A client that reads the first item keeps working. A client that renders
 every item shows the line. It is sent once per (session, collection,
 state), at most 240 bytes, and never names a commit, path or URL. It only
 covers collections the caller may read. The session is the explicit
-`session_id`, else the MCP session. Calls with neither share one bucket
-across every caller, so one principal's session-less call can use up
-another's advisory. That costs a missed line, never a disclosure, and a
-caller that wants its own passes `session_id`. Only a `type: local` collection
+`session_id`, else the MCP session, else one bucket for the caller's
+session-less calls. Every key is scoped to the caller's principal, so
+one principal cannot use up another's advisory by picking the same
+`session_id` (meerkat-mob#46). Only a `type: local` collection
 with a `refresh:` block has a state at all, so a deployment without one
 never sees a second item. See
 [hot-reload.md](hot-reload.md#part-c-the-surfaces).
