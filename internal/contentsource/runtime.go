@@ -198,6 +198,10 @@ func ResolveRuntimeCollections(ctx context.Context, contentSourceFlag string) ([
 	if err != nil {
 		return nil, fmt.Errorf("content-source.yaml (%s): %w", path, err)
 	}
+	cacheKeepVersions = DefaultKeepVersions
+	if cfg.Cache != nil && cfg.Cache.KeepVersions > 0 {
+		cacheKeepVersions = cfg.Cache.KeepVersions
+	}
 	if cfg.Tree != nil {
 		cols, _, terr := resolveTree(ctx, *cfg.Tree, path, cfg.childRules())
 		if terr != nil {

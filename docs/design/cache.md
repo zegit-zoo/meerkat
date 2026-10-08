@@ -85,6 +85,15 @@ The collection a request just mounted is never culled by its own mount:
 the request needs it now, even if that evicts a warmer one. Warm start
 is the exception (below).
 
+## On-disk versions
+
+Culling is about memory. The on-disk content cache that object-store
+sources are fetched into is bounded separately: after a new version of
+a gcs/s3 location is installed, only the newest `cache.keep_versions`
+(default 2) versions of that location are kept, in every deployment
+form, not only `tree:`. A complete entry is never replaced by a
+concurrent fill. See [object-stores.md](object-stores.md#the-on-disk-cache).
+
 ## Temperatures and warm start
 
 ```yaml

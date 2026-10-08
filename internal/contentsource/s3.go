@@ -56,7 +56,7 @@ var s3Kind = storeKind{
 		if src.Object == "" {
 			mode, target = "prefix", src.Prefix
 		}
-		return src.Endpoint + "\x00" + src.Bucket + "\x00" + mode + "\x00" + target
+		return src.Endpoint + "\x00" + src.Bucket + "\x00" + mode + "\x00" + target + pinKeySuffix(src)
 	},
 	fingerprintSize: true,
 	validate:        func(src Source, p string) error { return src.validateS3(p) },
@@ -178,6 +178,13 @@ func (s Source) validateS3(p string) error {
 	if s.Endpoint != "" {
 		if !strings.HasPrefix(s.Endpoint, "https://") && !strings.HasPrefix(s.Endpoint, "http://") {
 			return fmt.Errorf("%s.endpoint must be an http(s):// URL, got %q", p, s.Endpoint)
+		}
+		// Plaintext carries the signed requests (access key ID, session
+		// token) and the content and ETags meerkat compares, so it must
+		// be asked for explicitly — the same rule observability: applies
+		// to its collector endpoint.
+		if strings.HasPrefix(s.Endpoint, "http://") && !s.Insecure {
+			return fmt.Errorf("%s.endpoint %q is plaintext http; use https, or set insecure: true to accept an unencrypted connection (a local test store, a trusted private network)", p, s.Endpoint)
 		}
 	}
 	if s.ETag != "" {

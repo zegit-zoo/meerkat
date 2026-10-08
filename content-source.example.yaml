@@ -122,10 +122,15 @@ content:
   # etag: "d41d8cd98f00b204e9800998ecf8427e"
   #                                   # OPTIONAL: pin one exact ETag — the S3
   #                                   # counterpart of generation:. Never
-  #                                   # consulted again once set.
+  #                                   # consulted again once set. It trusts
+  #                                   # the store's ETag; pin sha256: too to
+  #                                   # verify the bytes themselves.
   # prefix: kb/live/                  # (b) prefix mode, keyed by a fingerprint
   #                                   # over every object's (key, ETag, size)
-  # endpoint: https://s3.example.net  # REQUIRED for anything that is not AWS
+  # endpoint: https://s3.example.net  # REQUIRED for anything that is not AWS.
+  #                                   # https only: an http:// endpoint is
+  #                                   # refused unless you also set
+  # insecure: true                    # (a local test store, a trusted network)
   # region: garage                    # signing region; Garage validates it
   #                                   # against its s3_region. On AWS it may
   #                                   # come from AWS_REGION instead.
@@ -136,7 +141,8 @@ content:
   # The ETag is OPAQUE to meerkat: compared, cached under, and sent back as
   # If-Match so a replaced object fails the fetch instead of being served
   # under the old name. It is not assumed to be a content hash.
-  # Cache: <user cache dir>/meerkat/content/s3/<hash(endpoint,bucket,…)>/<etag-or-fingerprint>/
+  # Cache: <user cache dir>/meerkat/content/s3/<hash(endpoint,bucket,…,sha256)>/<etag-or-fingerprint>/
+  # The newest cache.keep_versions (default 2) versions of a location are kept.
   #
   # Credentials: the AWS default chain only — AWS_ACCESS_KEY_ID /
   # AWS_SECRET_ACCESS_KEY, ~/.aws/config, IRSA / web identity, instance
@@ -926,6 +932,8 @@ content:
 #   retry_after: 2s              # what an async cold answer asks the caller to wait
 #   warm_start_days: 7           # read temperature flushes from the traversal log
 #   flush_interval: 5m           # write temperatures to the traversal log
+#   keep_versions: 2             # on-disk versions kept per gcs/s3 location
+#                                # (newest first; any deployment form)
 
 # --- sessions: retrieval-session bounds --------------------------------------
 #
