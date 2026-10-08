@@ -1,7 +1,10 @@
 package contentsource
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -23,6 +26,41 @@ type authDocument struct {
 	Auth *authz.Config `yaml:"auth"`
 }
 
+// decodeStrict decodes body into v refusing any key v has no field for.
+// A mistyped key in an auth: block (`provider:` for `providers:`) would
+// otherwise be dropped silently and leave the server running with less
+// policy than the file appears to state.
+func decodeStrict(body []byte, v any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(body))
+	dec.KnownFields(true)
+	if err := dec.Decode(v); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
+// checkAuthSubtree strictly decodes just the auth: subtree of a
+// content-source.yaml. The rest of that document keeps its lenient
+// decoding (older files may carry keys newer or older builds ignore),
+// but the policy block fails closed on an unknown key.
+func checkAuthSubtree(body []byte) error {
+	var raw struct {
+		Auth yaml.Node `yaml:"auth"`
+	}
+	if err := yaml.Unmarshal(body, &raw); err != nil || raw.Auth.Kind == 0 {
+		return nil // the main decode reports a malformed document
+	}
+	sub, err := yaml.Marshal(&raw)
+	if err != nil {
+		return fmt.Errorf("auth: %w", err)
+	}
+	var doc authDocument
+	if err := decodeStrict(sub, &doc); err != nil {
+		return fmt.Errorf("auth: %w", err)
+	}
+	return nil
+}
+
 // LoadAuthFile reads a standalone auth policy file: a YAML document
 // with a top-level `auth:` key.
 //
@@ -40,6 +78,9 @@ func LoadAuthFile(path string) (*authz.Config, error) {
 	}
 	var doc authDocument
 	if err := yaml.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := checkAuthSubtree(body); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	if doc.Auth == nil {

@@ -251,3 +251,70 @@ func TestLoadRuntimeAuth_ConfigWithoutAuthIsNil(t *testing.T) {
 		t.Fatalf("cfg = %+v, want nil for a config with no auth: block", cfg)
 	}
 }
+
+// TestAuthBlock_MistypedKeyFailsClosed: a key the auth: block does not
+// know (`provider:` for `providers:`) is an error, in a content-source.yaml
+// and in a standalone file, rather than a policy that silently asks for
+// nothing and leaves the server unauthenticated.
+func TestAuthBlock_MistypedKeyFailsClosed(t *testing.T) {
+	mistyped := "auth:\n  resource: https://mcp.example.com/mcp\n  provider:\n    - issuer: https://login.example.com\n      audience: a\n"
+	dir := t.TempDir()
+
+	standalone := filepath.Join(dir, "auth.yaml")
+	if err := os.WriteFile(standalone, []byte(mistyped), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadAuthFile(standalone); err == nil || !strings.Contains(err.Error(), "provider") {
+		t.Errorf("LoadAuthFile err = %v, want it to name the unknown key", err)
+	}
+
+	cs := filepath.Join(dir, ConfigFile)
+	if err := os.WriteFile(cs, []byte("content:\n  type: local\n  path: ./kb\n"+mistyped), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(cs); err == nil || !strings.Contains(err.Error(), "provider") {
+		t.Errorf("LoadFile err = %v, want it to name the unknown key", err)
+	}
+
+	// A nested unknown key is caught too, and an unknown key OUTSIDE auth:
+	// keeps its old lenient behaviour.
+	nested := "content:\n  type: local\n  path: ./kb\nauth:\n  resource: https://m.example.com/mcp\n  providers:\n    - issuer: https://i.example.com\n      audiance: a\n"
+	if err := os.WriteFile(cs, []byte(nested), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(cs); err == nil || !strings.Contains(err.Error(), "audiance") {
+		t.Errorf("nested typo err = %v, want it to name the key", err)
+	}
+	if err := os.WriteFile(cs, []byte("content:\n  type: local\n  path: ./kb\nfuture_key: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(cs); err != nil {
+		t.Errorf("an unknown key outside auth: must stay accepted, got %v", err)
+	}
+}
+
+// TestAuthBlock_EmptyBlockNeedsExplicitOptIn: an auth: block with no
+// providers is refused unless allow_unauthenticated: true is explicit.
+func TestAuthBlock_EmptyBlockNeedsExplicitOptIn(t *testing.T) {
+	dir := t.TempDir()
+	cs := filepath.Join(dir, ConfigFile)
+	for _, tc := range []struct {
+		name, auth string
+		wantErr    bool
+	}{
+		{"empty mapping", "auth: {}\n", true},
+		{"resource only", "auth:\n  resource: https://m.example.com/mcp\n", true},
+		{"explicit opt-in", "auth:\n  allow_unauthenticated: true\n", false},
+		{"no block", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(cs, []byte("content:\n  type: local\n  path: ./kb\n"+tc.auth), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadFile(cs)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("LoadFile err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
