@@ -19,7 +19,7 @@ func TestPermissionDeniedError_MessageShape_Windows(t *testing.T) {
 	for _, want := range []string{
 		"permission denied writing to",
 		"elevated PowerShell",
-		"cosign-signature-verified",
+		"the cosign: line",
 		"setx PATH",
 		"docs/INSTALL.md#install-on-windows",
 	} {

@@ -498,6 +498,19 @@ install](#updating-a-homebrew-install). Only `mk update --check`,
 which never writes anything, behaves identically on both kinds of
 install.
 
+**`mk update` requires `cosign`.** It verifies the Sigstore signature on
+the release's checksums file before trusting anything in it, and refuses
+to install if `cosign` is not on `PATH`; install it (`brew install
+cosign`) and re-run. Without a verified signature the checksums file
+comes from the same release page as the binary, so a SHA-256 match only
+detects corruption, not tampering. For the rare case where signature
+verification cannot be used, `--skip-cosign` is accepted only when
+`MEERKAT_UPDATE_ALLOW_UNVERIFIED=1` is also set in the environment, and
+on a terminal you must additionally type `yes` at a warning prompt
+(`--yes` does not answer it). A skipped verification is reported as
+`cosign:  SKIPPED` in the output. Verifying in-process, so cosign is not a
+prerequisite, is tracked as a follow-up.
+
 `mk update` works with no authentication — the repo is public. If
 you've run `gh auth login`, `mk update` reuses the cached GitHub OAuth
 token via the `gh` CLI for a higher API rate limit; `gh auth status`
@@ -596,8 +609,8 @@ command-line argument.
      named workflow in this same repository, not a branch push. This is
      the one piece of trust this whole process is bootstrapping *into* —
      everything after this step inherits it.
-   - This step is **not skippable**. Unlike `mk update --skip-cosign`,
-     `meerkat-bootstrap` has no SHA-256-only fallback, because this is
+   - This step is **not skippable**. Unlike `mk update`, whose `--skip-cosign` is gated
+     (see [Updating](#updating)), `meerkat-bootstrap` has no SHA-256-only fallback, because this is
      the step that establishes trust in the upstream identity in the
      first place; there is nothing to fall back to that would still mean
      anything.
