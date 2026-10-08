@@ -518,6 +518,22 @@ content:
 #   region: garage
 #   path_style: true
 #
+# A manifest is written by whoever maintains the knowledge base, not by
+# you, so the children it may declare are YOURS to allow. Without this
+# block a child may only be an object-store child in the root's own
+# bucket and endpoint; local and url children are refused. A manifest
+# may never declare memory:, update: {method: direct}, refresh
+# remote_check/on_divergence or token_env, and a local child never
+# resolves inside meerkat's cache directory. See docs/design/tree.md.
+#
+# manifest_children:
+#   types: [s3, url, local]            # omitted: root's type, + url/local when listed below
+#   buckets: [kb-archive]              # besides the root's own bucket
+#   endpoints: [https://s3.other.example]
+#   url_prefixes: [https://kb.example.net/bundles/]   # https, ends in "/"
+#   local_paths: [/srv/kb]             # absolute; relative child paths resolve
+#                                      # against the manifest's own directory
+#
 # collections:
 #   - name: runbooks
 #     type: local

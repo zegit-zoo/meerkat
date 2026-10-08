@@ -35,10 +35,12 @@ limits: {max_hops: 12, max_steps: 40, max_attempts: 20}
 depth_limit: 3              # optional; lowers the cap for this subtree, never raises it
 ```
 
-`children[].source` is an ordinary content source — anything
-`collections:` accepts (S3, GCS, url, local). `contract:` is the
-collection's update contract and is applied unless the child source
-declares its own. Unknown keys are refused.
+`children[].source` has the shape of an ordinary content source, but a
+manifest is written by whoever maintains the knowledge base, not by the
+operator, so what a child may point at is decided by the operator — see
+[What a manifest may declare](#what-a-manifest-may-declare). `contract:`
+is the collection's update contract and is applied unless the child
+source declares its own. Unknown keys are refused.
 
 `content-source.yaml` names the root:
 
@@ -54,6 +56,49 @@ tree:
 
 `tree:` is exclusive with `content:` and `collections:`; the tree's
 members come from its manifests.
+
+## What a manifest may declare
+
+Every child a manifest names is checked, before it is resolved or
+recorded as a lazy child, against the operator's `manifest_children:`
+block in `content-source.yaml`:
+
+```yaml
+manifest_children:
+  types: [s3, url, local]                  # source types a child may use
+  buckets: [kb-archive]                    # gcs/s3 buckets, besides the root's own
+  endpoints: [https://s3.other.example]    # S3 endpoints, besides the root's own
+  url_prefixes: [https://kb.example.net/bundles/]   # https, ending in "/"
+  local_paths: [/srv/kb]                   # absolute; checked after symlinks
+```
+
+- **Absent**, a child may only be an object-store child of the root's
+  own type, in the root's own bucket, through the root's own endpoint
+  or the provider default. `local` and `url` children are refused.
+- **`types`** omitted means: the root's object-store type, plus `url`
+  when `url_prefixes` is set and `local` when `local_paths` is set.
+- A **`url`** child must start with a listed prefix (same scheme and
+  host; no dot segments). Its `sha256` comes from the manifest, so the
+  prefix is what the operator vouches for.
+- A **`local`** child must resolve under a listed directory, after
+  symlinks. A relative path resolves against the directory the manifest
+  sits in, never against the directory of `content-source.yaml`. A lazy
+  local child is checked again when it is mounted.
+- A child that overlaps the deployment's `memory:` or `intake:` store
+  (same bucket and nested prefix, or nested directory) is refused.
+
+Refused in a manifest **whatever the policy says**, because each one
+makes meerkat write somewhere or run git in a directory: a child's
+`memory:`, `update: {method: direct}` on a child or as the manifest's
+`contract:`, `refresh.remote_check` / `refresh.on_divergence`, and
+`token_env` anywhere. A `local` child never resolves inside meerkat's
+cache directory (`<user cache dir>/meerkat`), where fetched archives
+and object-store trees are extracted.
+
+`contentsource.ResolveTree`, the programmatic entry point that takes a
+root `Source` directly, applies only those unconditional refusals; the
+allowlist is applied on the `content-source.yaml` path
+(`ResolveRuntimeCollections`).
 
 ## The walk (`contentsource.ResolveTree`)
 
@@ -72,6 +117,7 @@ Guards, all load errors with a message that names the offending path:
 | cycles / duplicates | a child whose source location was already walked, or whose name was already declared, is refused. Names are collection names and address pages (`<collection>:<id>`), so they must be unique across the whole tree. |
 | agreement | a child's `name` must equal the name in its own manifest; `parent:` and `tier:`, when set, must match the real position. |
 | shape | `kind: KnowledgeBase`, a valid collection name, a valid `mount`/`placement`, an ISO `stale_after`, non-negative limits, and a source that validates. |
+| policy | every child is admitted by `manifest_children:` (see above) before it is resolved or recorded. |
 
 ## Cold children
 
