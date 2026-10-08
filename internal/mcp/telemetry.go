@@ -53,12 +53,13 @@ func (s *HostedServer) traceHTTP(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route := s.routeLabel(r)
-		// Continue the caller's trace when they sent a well-formed
-		// traceparent, start a new one when they did not. A malformed
-		// header yields an invalid parent span context, which is the same
-		// thing as none — the request is served identically either way,
-		// which is the point.
-		ctx := s.tel.Extract(r.Context(), r.Header)
+		// Continue the caller's trace only for a configured trusted peer
+		// (observability.traces.trusted_sources). Anyone else gets a fresh
+		// root span sampled at sample_ratio: this runs BEFORE the gate, so
+		// an unauthenticated caller must not be able to choose the
+		// sampling decision or the trace ID. A malformed header from a
+		// trusted peer yields an invalid parent, i.e. a new root.
+		ctx := s.tel.ExtractRequest(r.Context(), r)
 		ctx, span := s.tel.Start(ctx, spanName(r.Method, route),
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(

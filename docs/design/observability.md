@@ -230,11 +230,17 @@ staging discipline.
 
 ## Context propagation
 
-- **Inbound.** W3C `traceparent` is extracted from every request. A
-  malformed header yields an invalid parent span context, which is the
-  same thing as none: the request is served identically and a fresh root
-  trace is started. A caller cannot change a response, or suppress
-  instrumentation, with a broken header.
+- **Inbound.** The root span is created before authentication, so a
+  caller's `traceparent` is **not** trusted by default: it is honoured
+  (trace ID and sampled flag continued) only when the request's TCP peer
+  is listed in `traces.trusted_sources` (CIDRs or IPs; the peer address,
+  never `X-Forwarded-For`). Everyone else gets a fresh root span with a
+  meerkat-chosen trace ID, sampled at `sample_ratio`, so a caller cannot
+  force sampling, crowd out real spans or file spans under another
+  trace. Behind a gateway, list the gateway's address. A malformed header
+  from a trusted peer yields an invalid parent, which is the same thing
+  as none: the request is served identically. A caller cannot change a
+  response, or suppress instrumentation, with a broken header.
 - **Outbound.** OIDC discovery and JWKS fetches go through
   `Telemetry.HTTPClient`, which injects `traceparent` and emits a client
   span — so "the IdP took 400ms" and "meerkat took 400ms" stop looking
@@ -246,8 +252,12 @@ staging discipline.
   would push their key/value pairs to the identity provider. Not
   carrying it is a stronger statement than carrying it carefully.
 - **Sampling is parent-based.** `sample_ratio` governs traces this
-  process *starts*. A trace a gateway already sampled is not re-sampled
-  here, because half a trace is worse than none.
+  process *starts*. A trace a trusted gateway already sampled is not
+  re-sampled here, because half a trace is worse than none.
+- **Span rate cap.** A token bucket in front of the exporter queue
+  admits at most `traces.max_spans_per_second` ended spans per second
+  (default 1000, burst of one second; negative lifts the cap). The excess
+  is dropped and counted in `meerkat_otel_spans_dropped_total`.
 
 ## Configuration and precedence
 
@@ -257,8 +267,6 @@ observability:
   environment: production
 
   logs:
-    level: info
-    format: json
     include_trace_context: true
 
   metrics:
@@ -268,6 +276,8 @@ observability:
   traces:
     enabled: true
     sample_ratio: 0.10
+    # trusted_sources: [10.0.0.0/8]   # peers whose traceparent is honoured; default none
+    # max_spans_per_second: 1000
 
   otlp:
     endpoint: otel-collector.observability.svc:4317
@@ -292,7 +302,10 @@ A field **written** in the block wins. A field **left out** falls back
 to the standard OpenTelemetry variable for that setting, then to
 meerkat's default. The fallback is per **field**, not per block: a file
 that sets only `traces.enabled: true` still picks its endpoint up from
-`OTEL_EXPORTER_OTLP_ENDPOINT`.
+`OTEL_EXPORTER_OTLP_ENDPOINT`. A file `otlp.endpoint:` beats the
+signal-specific `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and
+`..._METRICS_ENDPOINT` as well; those apply only when the file names no
+endpoint.
 
 The direction makes both audiences right. The file is the artifact under
 review — an operator who wrote `sample_ratio: 0.1` and reads the
@@ -346,7 +359,9 @@ headers) is refused at config load.
 
 `observability:` is validated in `parseConfig`, beside `auth:`, so a
 plaintext `http://` endpoint with no explicit `insecure: true`, an
-unsupported protocol, a sample ratio outside `[0,1]`, an unsupported
+unsupported protocol, `headers_env` (or `OTEL_EXPORTER_OTLP_HEADERS`)
+together with `insecure: true` towards a non-loopback endpoint, an invalid
+`trusted_sources` entry, a sample ratio outside `[0,1]`, an unsupported
 `OTEL_TRACES_SAMPLER`, or a malformed `headers_env` all fail the process
 where an operator is looking at the file — rather than producing a
 server that exports nothing and says so nowhere.
@@ -654,8 +669,9 @@ pipeline that validates and places intake pages (issue H).
   the access log) is met, and shipping the logs themselves needs the
   OTel log SDK plus an slog bridge — a materially larger dependency and
   test surface for a signal most deployments already collect from
-  stderr. The `logs:` config block is present and honoured for level,
-  format and correlation.
+  stderr. Of the `logs:` block only `include_trace_context` has an effect;
+  `level` and `format` are deprecated, ignored, and warned about at
+  startup.
 - **Per-collection operational spans.** A search fans out across
   collections, and the only per-collection thing a span could add is the
   collection's name, which may not be exported. Per-collection detail
