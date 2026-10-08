@@ -2,6 +2,7 @@ package collections
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -136,13 +137,14 @@ func TestLinks_BacklinksRespectTheViewer(t *testing.T) {
 		t.Errorf("Alice must see her own note among the backlinks: %v", pl.LinkedFrom)
 	}
 
-	// A restricted view still resolves against the full mounted set
-	// (the graph is the root's) but only lists backlinks it can name.
+	// A restricted view shares the root's graph but resolves as it sees:
+	// a link into a collection outside it reads "not mounted", and it
+	// only lists backlinks it can name.
 	only := reg.Restrict(func(name string) bool { return name == "hub" })
 	ref, _ = only.Show("hub", "flux")
 	pl = only.LinksOf(ref)
-	if !pl.Links[1].Resolved {
-		t.Errorf("qualified link must still resolve in a restricted view: %+v", pl.Links[1])
+	if pl.Links[1].Resolved || pl.Links[1].Reason != `collection "flux" is not mounted` {
+		t.Errorf("a link out of the view must read as not mounted: %+v", pl.Links[1])
 	}
 	for _, src := range pl.LinkedFrom {
 		if strings.HasPrefix(src, "flux:") {
@@ -241,5 +243,117 @@ func TestBundles_GroupByPointerTarget(t *testing.T) {
 	}
 	if reg.Bundles(nil) != nil {
 		t.Error("no hits, no bundles")
+	}
+}
+
+// TestLinks_HiddenTargetsReadAsMissing pins meerkat-mob#40: link status
+// in a view — `related:` entries, a pointer's target, and a search hit's
+// target_resolved — says nothing about collections outside the view or
+// pages its viewer may not see. Each probe is compared, with the probed
+// name normalised, against a target that does not exist at all.
+func TestLinks_HiddenTargetsReadAsMissing(t *testing.T) {
+	const alice = "memory/personal/alice/"
+	related := []string{
+		"secret:plan", "ghost:plan", // hidden collection, real page vs. no collection
+		"secret:nothing", "ghost:nothing", // hidden collection, no page vs. no collection
+		"pub:" + alice + "note", "pub:" + alice + "none", // another principal's private page vs. no page
+		alice + "note", alice + "none", // the same, as local links
+	}
+	pub := FromPages("pub", []kb.Page{
+		{ID: "page", Title: "Page", Front: kb.Frontmatter{Related: related}},
+		{ID: "to-secret", Title: "Zanzibar secret", Body: "zanzibar", Front: kb.Frontmatter{Type: kb.TypePointer, Target: "collection:secret", Hint: "h"}},
+		{ID: "to-ghost", Title: "Zanzibar ghost", Body: "zanzibar", Front: kb.Frontmatter{Type: kb.TypePointer, Target: "collection:ghost", Hint: "h"}},
+		{ID: "to-plan", Title: "Zanzibar plan", Body: "zanzibar", Front: kb.Frontmatter{Type: kb.TypePointer, Target: "secret:plan", Hint: "h"}},
+		{ID: "to-nothing", Title: "Zanzibar nothing", Body: "zanzibar", Front: kb.Frontmatter{Type: kb.TypePointer, Target: "ghost:plan", Hint: "h"}},
+		{ID: alice + "note", Title: "Alice's note"},
+	})
+	secret := FromPages("secret", []kb.Page{{ID: "plan", Title: "Plan", Front: kb.Frontmatter{Related: []string{"pub:page"}}}})
+	reg, err := New(pub, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob := reg.Restrict(func(name string) bool { return name == "pub" }).ViewedBy(kb.AsOwner("bob"))
+	norm := func(l ResolvedLink, from, to string) string {
+		return fmt.Sprintf("%v %s", l.Resolved, strings.ReplaceAll(l.Reason, from, to))
+	}
+
+	ref, err := bob.Show("pub", "page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl := bob.LinksOf(ref)
+	if len(pl.Links) != len(related) {
+		t.Fatalf("links = %+v", pl.Links)
+	}
+	for i := 0; i < len(related); i += 2 {
+		hidden, missing := pl.Links[i], pl.Links[i+1]
+		if hidden.Resolved {
+			t.Errorf("%s resolved in a view that cannot see it", related[i])
+		}
+		a := norm(hidden, "secret", "<c>")
+		a = strings.ReplaceAll(strings.ReplaceAll(a, `"note"`, `"<p>"`), alice+"note", alice+"<p>")
+		b := norm(missing, "ghost", "<c>")
+		b = strings.ReplaceAll(strings.ReplaceAll(b, `"none"`, `"<p>"`), alice+"none", alice+"<p>")
+		if a != b {
+			t.Errorf("%s reads %q but %s reads %q", related[i], a, related[i+1], b)
+		}
+	}
+	if len(pl.LinkedFrom) != 0 {
+		t.Errorf("a backlink from a hidden collection was listed: %v", pl.LinkedFrom)
+	}
+
+	// Pointer targets: LinksOf, PointerOf and search hits agree.
+	pointer := func(id string) ResolvedLink {
+		ref, err := bob.Show("pub", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pl := bob.LinksOf(ref)
+		if pl.Pointer == nil {
+			t.Fatalf("%s: no pointer", id)
+		}
+		viaOf, _ := bob.PointerOf("pub", ref.Page)
+		if viaOf.Resolved != pl.Pointer.Resolved || viaOf.Reason != pl.Pointer.Reason {
+			t.Errorf("%s: PointerOf %+v disagrees with LinksOf %+v", id, viaOf, pl.Pointer)
+		}
+		return *pl.Pointer
+	}
+	for _, pair := range [][2]string{{"to-secret", "to-ghost"}, {"to-plan", "to-nothing"}} {
+		a, b := norm(pointer(pair[0]), "secret", "<c>"), norm(pointer(pair[1]), "ghost", "<c>")
+		if a != b {
+			t.Errorf("pointer %s reads %q but %s reads %q", pair[0], a, pair[1], b)
+		}
+	}
+	hits, err := bob.Search(context.Background(), "", "zanzibar", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 4 {
+		t.Fatalf("hits = %+v", hits)
+	}
+	for _, h := range hits {
+		if h.TargetResolved {
+			t.Errorf("search hit %s: target_resolved = true for a target outside the view", h.Page.ID)
+		}
+	}
+	if from := bob.PointersTo("secret"); len(from) != 0 {
+		t.Errorf("PointersTo(hidden) = %v", from)
+	}
+
+	// The unrestricted, unfiltered registry still resolves everything.
+	ref, _ = reg.Show("pub", "page")
+	for i, l := range reg.LinksOf(ref).Links {
+		if want := i%2 == 0 && i != 2; l.Resolved != want {
+			t.Errorf("root view: %s resolved = %v, want %v", related[i], l.Resolved, want)
+		}
+	}
+	if res, _ := reg.PointerOf("pub", kb.Page{ID: "to-plan", Front: kb.Frontmatter{Type: kb.TypePointer, Target: "secret:plan", Hint: "h"}}); !res.Resolved {
+		t.Errorf("root view: pointer to secret:plan = %+v", res)
+	}
+	// Alice sees her own note through the same links.
+	aliceView := reg.Restrict(func(name string) bool { return name == "pub" }).ViewedBy(kb.AsOwner("alice"))
+	ref, _ = aliceView.Show("pub", "page")
+	if l := aliceView.LinksOf(ref).Links[4]; !l.Resolved {
+		t.Errorf("alice's own note must resolve for her: %+v", l)
 	}
 }

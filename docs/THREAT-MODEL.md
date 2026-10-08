@@ -355,7 +355,25 @@ argument — produces the same answer as an ID nobody has ever written.
 The ambiguity error counts only pages the caller may see, so the same
 personal key saved into two collections is an ambiguity for its owner
 and a plain not-found for everyone else. Page counts in
-`mk_list_collections` do not move when another principal saves.
+`mk_list_collections` do not move when another principal saves. Link
+status follows the same rule: a `related:` link or pointer target that
+names someone else's personal memory reads `not found`, exactly like a
+page that was never written (see [design/links.md](design/links.md)).
+
+**Accepted residual: ranking statistics are collection-wide.** Each
+collection has one search index, and the visibility clause decides which
+documents are *eligible*, not which ones feed the BM25 term statistics.
+A private memory therefore still counts toward a term's document
+frequency and the collection's average length, and the raw `score` on a
+search hit can move slightly when another principal saves or removes a
+private memory. That is a weak, noisy signal about whether terms occur
+somewhere in private memories the caller cannot read. It never returns
+their content, IDs or counts. It is accepted for now (meerkat-mob#40)
+for two reasons. Per-owner indexes would restructure every collection's
+index and the cross-collection merge. Hiding or bucketing scores would
+change the `score` field every client ranks and merges on. If this
+becomes material, the remedy is to take personal memories out of the
+shared index's statistics, not to add a per-request filter.
 
 **Where the line is drawn.** `team` and `global` memories are unchanged:
 readable by every reader of the collection. This is not a general
