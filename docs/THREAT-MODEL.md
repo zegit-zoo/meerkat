@@ -257,6 +257,11 @@ added later for free. Specifically:
   never-mounted one, `available:` list included;
 - `<hidden>:<page-id>` stops parsing as a collection qualification and
   404s as a bare page ID;
+- in a `tree:` deployment the same holds for tree paths and tree
+  metadata: a path through or to a hidden knowledge base, and a hidden
+  cold child, answer as a path nobody declared, and the listings' `path`,
+  `parent` and `children` name only what the caller can see (see
+  [design/tree.md](design/tree.md#restricted-views));
 - `tools/list` and `tools/call` are both rebuilt through mcp-go's tool
   filter, so a caller with no readable collection is offered no KB tools
   and cannot invoke them either.

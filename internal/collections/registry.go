@@ -757,6 +757,12 @@ type Registry struct {
 	// surfaces or silently unhide private pages from anonymous callers,
 	// depending on which way the zero value fell.
 	viewer *kb.Viewer
+	// allow is the composed Restrict predicate this view was narrowed
+	// by; nil when no Restrict is in force. r.by already answers it for
+	// every collection; it is kept for the one thing r.by cannot answer:
+	// whether a tree node that is declared but has NO collection in this
+	// process (placement: dedicated) is visible to this view. See sees.
+	allow func(name string) bool
 }
 
 // PageRef is a page together with the collection it came from.
@@ -1080,6 +1086,10 @@ func (r *Registry) Restrict(allow func(name string) bool) *Registry {
 	if allow == nil {
 		return r
 	}
+	composed := allow
+	if prev := r.allow; prev != nil {
+		composed = func(name string) bool { return prev(name) && allow(name) }
+	}
 	out := &Registry{
 		list:    make([]*Collection, 0, len(r.list)),
 		by:      make(map[string]*Collection, len(r.list)),
@@ -1087,6 +1097,7 @@ func (r *Registry) Restrict(allow func(name string) bool) *Registry {
 		viewer:  r.viewer,
 		links:   r.links,
 		root:    r.base(),
+		allow:   composed,
 	}
 	for _, c := range r.list {
 		if !allow(c.Name) {
@@ -1124,6 +1135,7 @@ func (r *Registry) ViewedBy(v kb.Viewer) *Registry {
 		viewer:  &v,
 		links:   r.links,
 		root:    r.base(),
+		allow:   r.allow,
 	}
 	return out
 }
@@ -1473,11 +1485,6 @@ func (r *Registry) Search(ctx context.Context, collection, query string, limit i
 	return out, nil
 }
 
-// SplitQualified splits a possibly-qualified page ID into its
-// collection and page parts. The "<collection>:" prefix is only
-// recognised when it names a collection that is actually mounted:
-// anything else is returned untouched as a bare page ID, so an ID that
-// happens to contain a colon can never be mistaken for a qualification.
 // stageRank orders planner stages by how far the planner had to fall
 // back; a merged search reports the deepest stage any collection used.
 func stageRank(s search.Stage) int {
@@ -1502,6 +1509,18 @@ func StageOf(hits []Hit) search.Stage {
 	return deepest
 }
 
+// SplitQualified splits a possibly-qualified page ID into its
+// collection and page parts. The "<collection>:" prefix is only
+// recognised when it names a collection that is actually mounted:
+// anything else is returned untouched as a bare page ID, so an ID that
+// happens to contain a colon can never be mistaken for a qualification.
+//
+// "Mounted" means in THIS view: a tree path alias
+// (`root/platform/flux:<id>`) is recognised only when every knowledge
+// base along the path is visible to the view and the one it names is a
+// collection in it. A path through, or to, a hidden collection degrades
+// to a bare page ID exactly as `<hidden>:<id>` does, so it answers as a
+// path nobody declared.
 func (r *Registry) SplitQualified(id string) (collection, pageID string) {
 	name, rest, found := strings.Cut(id, ":")
 	if !found || rest == "" {
@@ -1511,9 +1530,11 @@ func (r *Registry) SplitQualified(id string) (collection, pageID string) {
 		return name, rest
 	}
 	// A tree path alias: root/platform/flux:<id>.
-	if t := r.base().tree; t != nil && strings.Contains(name, "/") {
-		if resolved, ok := t.byPath[name]; ok {
-			return resolved, rest
+	if strings.Contains(name, "/") {
+		if resolved, ok := r.treePath(name); ok {
+			if _, inView := r.by[resolved]; inView {
+				return resolved, rest
+			}
 		}
 	}
 	return "", id

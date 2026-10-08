@@ -92,11 +92,35 @@ async` — and the resident budget decides how long it stays warm. See
   see the root falls back to what it can see.
 - **Tree paths are collection aliases.** `root/platform/flux` names the
   same collection as `flux`, in `mk_search`'s `collection` and in a
-  qualified page ID (`root/platform/flux:concepts/drift`).
+  qualified page ID (`root/platform/flux:concepts/drift`). A path that
+  names a cold lazy child mounts it, exactly as its bare name does.
 - `mk_list_collections` (and the HTTP and CLI listings) carry `path`,
   `tier`, `parent`, `children[] {name, mount, mounted, source_type}`,
-  `mounted`, `mount`, `placement`. A restricted view lists only the
-  subtree it can see.
+  `mounted`, `mount`, `placement`. Each child's `mounted` is its live
+  residency.
+
+### Restricted views
+
+A restricted view (a hosted caller's grants, see
+[THREAT-MODEL.md](../THREAT-MODEL.md#collection-authorization-invisible-not-denied))
+sees the tree only through the knowledge bases it may read, and every
+tree-aware answer is filtered the same way the flat registry filters
+collections:
+
+- a path alias resolves only when **every** knowledge base along the
+  path is visible; otherwise it is an unknown collection (or, in a page
+  ID, a bare ID that is not found), worded exactly as for a path nobody
+  declared;
+- naming a hidden cold child gives the plain unknown-collection error,
+  never the cold-collection one;
+- tree metadata names nothing hidden: `children` lists only visible
+  children, `parent` is empty when the parent is hidden, and `path`
+  starts below the deepest hidden ancestor (a caller who reads only
+  `flux` sees `path: flux`). `tier` is kept: it is a number, and
+  traversal limits and telemetry depend on it;
+- a node the tree declares but this process has no collection for
+  (`placement: dedicated`) is listed, and named as cold, only for a
+  view whose grants include it, not because its parent is visible.
 - `meerkat.tree.depth` on the list-collections span and the
   `meerkat_tree_depth` gauge (domain telemetry, so an unconfigured
   server's `/metrics` is unchanged) report the deepest declared KB.

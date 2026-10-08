@@ -1268,7 +1268,12 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry, runnin
 		if pages, err := c.PagesFor(view.Viewer()); err == nil {
 			entry.Pages = len(pages)
 		}
-		if n := c.Tree; n != nil {
+		// view.TreeNode, not c.Tree: the view's copy names no knowledge
+		// base this caller cannot see — hidden children are dropped, a
+		// hidden parent is blank, and the path starts below the deepest
+		// hidden ancestor — so the tree metadata is as invisible as the
+		// collections themselves.
+		if n, ok := view.TreeNode(c.Name); ok && c.Tree != nil {
 			entry.Path, entry.Parent, entry.Children = n.Path, n.Parent, n.Children
 			tier, mounted := n.Depth, !c.IsCold()
 			entry.Tier, entry.Mounted, entry.Mount, entry.Placement = &tier, &mounted, n.Mount, n.Placement
