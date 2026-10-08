@@ -8,6 +8,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -82,12 +83,16 @@ lives, consulted highest priority first:
   2. --content-source (or MEERKAT_CONTENT_SOURCE) — an explicit path to
      a content-source.yaml.
   3. <user config dir>/meerkat/content-source.yaml
-  4. ./content-source.yaml in the working directory
-  5. the binary's own embedded content — the fallback when none of the
+  4. the binary's own embedded content — the fallback when none of the
      above apply. Every published artefact (Homebrew formula, release
      tarballs, ghcr.io image) is built with no content source, so this
      step serves an EMPTY knowledge base unless you built the binary
      yourself with content baked in ('make sync').
+
+A ./content-source.yaml in the working directory is never used unless
+you name it (--content-source ./content-source.yaml): the working
+directory may be a checkout you do not control. Meerkat prints a
+one-line notice when it passes one over.
 
 'mk version' reports which one won, as kb_source.
 
@@ -143,8 +148,27 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 		// The work itself lives in resolveContent so shell completion can
 		// run the identical resolution — see completion.go for why it has
 		// to run it a second time.
+		//
+		// Subcommands that never read content (resolveSkipCommands)
+		// resolve nothing. The TAB-time `__complete` request resolves
+		// from the environment only (its flags are not parsed yet), under
+		// the same deadline completionContent uses, and prints no notice:
+		// stdout is the completion protocol, and stderr shows up in the
+		// user's prompt.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			return resolveContent(cmd.Context(), kbDirFlag, contentSourceFlag)
+			if resolveSkipCommands[topLevelName(cmd)] {
+				return nil
+			}
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			if isCompletionRequest(cmd) {
+				tctx, cancel := context.WithTimeout(ctx, completionResolveTimeout)
+				defer cancel()
+				return resolveContent(tctx, kbDirFlag, contentSourceFlag, nil)
+			}
+			return resolveContent(ctx, kbDirFlag, contentSourceFlag, cmd.ErrOrStderr())
 		},
 		// PersistentPostRun fires after every (sub-)command's RunE.
 		// We use it to nag about new releases — but only when the
@@ -174,8 +198,8 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 			"git/submodule are build-time-only, 'make sync'). "+
 			"Overrides MEERKAT_CONTENT_SOURCE. Loses to --kb-dir/MEERKAT_KB_DIR. When neither this "+
 			"nor --kb-dir/MEERKAT_KB_DIR is set, falls back to <user-config-dir>/meerkat/content-source.yaml, "+
-			"then ./content-source.yaml, then the binary's embedded content (empty in every "+
-			"published release).")
+			"then the binary's embedded content (empty in every published release). A "+
+			"./content-source.yaml in the working directory is used only when named here.")
 
 	root.AddGroup(
 		&cobra.Group{ID: groupKB, Title: "Knowledge base (answered locally, no service to call):"},
@@ -209,9 +233,18 @@ Short alias: 'mk' (installed as a symlink alongside meerkat).`,
 //
 // --kb-dir/MEERKAT_KB_DIR is resolved first and, if set, wins outright —
 // this branch is unchanged from before content-source resolution
-// existed. Only when it's unset does content-source.yaml discovery
-// (internal/contentsource.ResolveRuntime) run.
-func resolveContent(ctx context.Context, kbDir, contentSource string) error {
+// existed. Only when it's unset does content-source.yaml discovery run:
+// the file is located ONCE (contentsource.LocateRuntime) and read ONCE,
+// and every block this process uses — collections, auth:,
+// observability:, intake:, cache:, sessions: — comes from that one
+// parsed Config. Locating and reading it per block, as this used to,
+// let two blocks come from two different files (or two versions of one).
+//
+// notice, when non-nil, receives a one-line message if a
+// ./content-source.yaml in the working directory was passed over (it is
+// never used unless named; see contentsource.LocateRuntime). Completion
+// passes nil: it must never write outside its protocol.
+func resolveContent(ctx context.Context, kbDir, contentSource string, notice io.Writer) error {
 	if dir := kbdir.Resolve(kbDir); dir != "" {
 		source, err := kbdir.Configure(dir)
 		if err != nil {
@@ -234,40 +267,35 @@ func resolveContent(ctx context.Context, kbDir, contentSource string) error {
 		activeSessions = nil
 		return nil
 	}
-	resolved, err := contentsource.ResolveRuntimeCollections(ctx, contentSource)
+	explicit := contentsource.ResolveFlag(contentSource)
+	path, err := contentsource.LocateRuntime(explicit)
+	if err != nil {
+		return err
+	}
+	if path == "" && notice != nil && contentsource.WorkingDirConfigIgnored(explicit) {
+		fmt.Fprintf(notice, "meerkat: ignoring ./%s in the working directory; "+
+			"pass --content-source ./%s (or set %s) to use it\n",
+			contentsource.ConfigFile, contentsource.ConfigFile, contentsource.EnvVar)
+	}
+	var cfg contentsource.Config
+	if path != "" {
+		if cfg, err = contentsource.LoadFile(path); err != nil {
+			return fmt.Errorf("content-source.yaml (%s): %w", path, err)
+		}
+	}
+	resolved, err := resolveCollections(ctx, cfg, path)
 	if err != nil {
 		return err
 	}
 	// The auth: block lives in the same content-source.yaml the
-	// collections came from. Reading it here — once per
-	// invocation, alongside content resolution — is what lets `mk
-	// mcp serve-http` pick it up without re-running discovery.
-	// It is inert for every other subcommand.
-	auth, err := contentsource.LoadRuntimeAuth(contentSource)
-	if err != nil {
-		return err
-	}
-	activeAuth = auth
-	obs, err := contentsource.LoadRuntimeObservability(contentSource)
-	if err != nil {
-		return err
-	}
-	activeObservability = obs
-	intake, err := contentsource.LoadRuntimeIntake(contentSource)
-	if err != nil {
-		return err
-	}
-	activeIntake = intake
-	cacheSpec, err := contentsource.LoadRuntimeCache(contentSource)
-	if err != nil {
-		return err
-	}
-	activeCache = cacheSpec
-	sessionsSpec, err := contentsource.LoadRuntimeSessions(contentSource)
-	if err != nil {
-		return err
-	}
-	activeSessions = sessionsSpec
+	// collections came from — the same parsed Config, in fact. It is
+	// inert for every subcommand but `mk mcp serve-http`; likewise the
+	// other blocks below are read only by the surfaces that use them.
+	activeAuth = cfg.Auth
+	activeObservability = cfg.Observability
+	activeIntake = cfg.Intake
+	activeCache = cfg.Cache
+	activeSessions = cfg.Sessions
 	// Point the process-global KB filesystem at the FIRST resolved
 	// collection. For every single-collection configuration (which
 	// is every configuration that predates collections) that is
@@ -288,6 +316,63 @@ func resolveContent(ctx context.Context, kbDir, contentSource string) error {
 	activeRegistry = reg
 	kbSourceProvenance = reg.Provenance()
 	return nil
+}
+
+// resolveCollections turns an already-loaded content-source.yaml into the
+// collections it declares, by the rules of
+// contentsource.ResolveRuntimeCollections — which it mirrors step for
+// step, minus the locate-and-read that function does itself. path == ""
+// (no config found) is the embedded build as a single default
+// collection.
+func resolveCollections(ctx context.Context, cfg contentsource.Config, path string) ([]contentsource.ResolvedCollection, error) {
+	if path == "" {
+		return []contentsource.ResolvedCollection{{
+			Name: contentsource.DefaultCollectionName, Provenance: contentsource.SourceEmbedded,
+		}}, nil
+	}
+	if cfg.Tree != nil {
+		cols, _, err := contentsource.ResolveTree(ctx, *cfg.Tree, path)
+		if err != nil {
+			return nil, fmt.Errorf("content-source.yaml (%s): %w", path, err)
+		}
+		return cols, nil
+	}
+	if len(cfg.Collections) == 0 {
+		rc, err := contentsource.ResolveSource(ctx, cfg.Content, path)
+		if err != nil {
+			return nil, err
+		}
+		rc.Name = contentsource.DefaultCollectionName
+		return []contentsource.ResolvedCollection{rc}, nil
+	}
+	out := make([]contentsource.ResolvedCollection, 0, len(cfg.Collections))
+	for _, c := range cfg.Collections {
+		rc, err := contentsource.ResolveSource(ctx, c.Source, path)
+		if err != nil {
+			return nil, fmt.Errorf("collection %q: %w", c.Name, err)
+		}
+		rc.Name = c.Name
+		out = append(out, rc)
+	}
+	return out, nil
+}
+
+// resolveSkipCommands lists top-level subcommands that never read the
+// knowledge base, so the root hook resolves nothing for them: no
+// content-source.yaml is read, nothing is fetched or mounted. `update`
+// talks only to the release channel; `completion` only prints a shell
+// script; `help` only prints help. (`version` still resolves: reporting kb_source is its job.)
+var resolveSkipCommands = map[string]bool{
+	"update":     true,
+	"completion": true,
+	"help":       true,
+}
+
+// isCompletionRequest reports whether cmd is cobra's hidden TAB-time
+// command (`__complete` / `__completeNoDesc`).
+func isCompletionRequest(cmd *cobra.Command) bool {
+	n := cmd.Name()
+	return n == cobra.ShellCompRequestCmd || n == cobra.ShellCompNoDescRequestCmd
 }
 
 // Execute runs the root command and returns an exit code suitable

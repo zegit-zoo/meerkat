@@ -2,9 +2,9 @@
 #
 # Copy to `content-source.yaml` (gitignored or committed per deployment).
 # Read for two different purposes, depending on where it lives:
-#   - <user config dir>/meerkat/, the working directory, or
-#     --content-source/MEERKAT_CONTENT_SOURCE, read by the meerkat/mk binary
-#     itself at RUNTIME (see the README's resolution order). This is the main
+#   - <user config dir>/meerkat/, or --content-source/MEERKAT_CONTENT_SOURCE
+#     (the only way a copy in the working directory is read), read by the
+#     meerkat/mk binary itself at RUNTIME (see the README's resolution order). This is the main
 #     path: an installed meerkat carries no content, and serves the source
 #     named here directly, with no rebuild.
 #     type: none | local | url | gcs | s3.
