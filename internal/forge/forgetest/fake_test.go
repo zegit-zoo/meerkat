@@ -26,6 +26,12 @@ func TestFake(t *testing.T) {
 	if _, _, ok, _ := f.FindIssue(ctx, "team/kb", "<!-- other -->", time.Time{}); ok {
 		t.Error("another marker is not found")
 	}
+	// An issue somebody else opened with the same marker is not adopted.
+	g := &Fake{}
+	g.Plant("team/kb", "depositor", "<!-- m -->\nplanted")
+	if _, _, ok, _ := g.FindIssue(ctx, "team/kb", "<!-- m -->", time.Time{}); ok {
+		t.Error("a planted issue was found")
+	}
 	f.Close("team/kb", 1, "resolved")
 	if st, labels, _ := f.IssueState(ctx, "team/kb", 1); st != forge.StateClosed || len(labels) != 2 {
 		t.Errorf("after close: %q %v", st, labels)

@@ -331,8 +331,11 @@ type frontmatter struct {
 	MemoryNamespace string `yaml:"memory_namespace"`
 	MemoryKey       string `yaml:"memory_key"`
 	// MemorySubject / MemoryIssuer are the verified claims the namespace
-	// was derived from. The subject is an opaque identifier, not a name
-	// or an address: this is provenance, not a contact list.
+	// was derived from, written on PERSONAL documents only, which only
+	// their owner reads. A team or global document (and a staged
+	// proposal for one) is read by others, and some identity providers
+	// use an email address as the subject, so there the namespace alone
+	// records provenance (meerkat-mob#62).
 	MemorySubject string `yaml:"memory_subject,omitempty"`
 	MemoryIssuer  string `yaml:"memory_issuer,omitempty"`
 }
@@ -358,8 +361,9 @@ func Render(doc Document, ref Ref, id authz.Identity, status string, now time.Ti
 		MemoryScope:     string(ref.Scope),
 		MemoryNamespace: ref.Namespace,
 		MemoryKey:       ref.Slug,
-		MemorySubject:   id.Subject,
-		MemoryIssuer:    id.Issuer,
+	}
+	if ref.Scope == ScopePersonal {
+		fm.MemorySubject, fm.MemoryIssuer = id.Subject, id.Issuer
 	}
 	if fm.Title == "" {
 		fm.Title = ref.Slug
