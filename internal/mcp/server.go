@@ -692,7 +692,7 @@ func searchHandler(reg *collections.Registry, mem transportOptions) mcpserver.To
 			return nil, fmt.Errorf("encode results: %w", err)
 		}
 		return withAdvisories(mcp.NewToolResultText(body),
-			mem.Advice.take(advisoryKey(ctx, sessionID), searchedCollections(view, targetName))), nil
+			mem.Advice.take(sessionKey(ctx, sessionID), searchedCollections(view, targetName))), nil
 	}
 }
 
@@ -902,7 +902,7 @@ func showHandler(reg *collections.Registry, mem transportOptions) mcpserver.Tool
 			return nil, err
 		}
 		return withAdvisories(mcp.NewToolResultText(body),
-			mem.Advice.take(advisoryKey(ctx, showSession), searchedCollections(view, ref.Collection))), nil
+			mem.Advice.take(sessionKey(ctx, showSession), searchedCollections(view, ref.Collection))), nil
 	}
 }
 

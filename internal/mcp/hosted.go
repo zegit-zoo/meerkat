@@ -107,11 +107,11 @@ type HostedConfig struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
-	// Stateful keeps a registry of the session IDs this process issued
-	// and answers any other as unknown, instead of accepting any
-	// well-formed ID bound to the caller (session.go). It requires sticky
-	// routing when more than one replica is behind a load balancer, which
-	// is why it is off by default.
+	// Stateful keeps per-session state in this process (mcp-go's
+	// InsecureStatefulSessionIdManager) instead of accepting any
+	// well-formed session ID. It requires sticky routing when more than
+	// one replica is behind a load balancer, which is why it is off by
+	// default.
 	Stateful bool
 	// HeartbeatInterval keeps idle SSE streams alive through proxies
 	// that reap quiet connections. Zero means DefaultHeartbeat; a
@@ -178,8 +178,6 @@ type HostedServer struct {
 	metrics *metrics
 	gate    *authn.Gate
 	auth    *authz.Config
-	// sessions binds MCP session IDs to principals (session.go).
-	sessions *sessionBinder
 	// stopCache stops the temperature flusher (cache.go); set by
 	// NewHosted, called by Close.
 	stopCache func()
@@ -312,31 +310,15 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		authn.WithDenyHook(s.onDeny),
 		authn.WithAnonymousHook(s.onAnonymous))
 
-	// Session IDs are minted bound to the caller's principal and refused
-	// to anyone else, in both modes (session.go, meerkat-mob#46). Stateful
-	// mode additionally remembers what it issued, which is what
-	// mcp-go's WithStateful did — now with a cap.
-	s.sessions = newSessionBinder(cfg.Stateful, DefaultMaxSessionsPerPrincipal, DefaultMaxSessions)
-
 	hooks := &mcpserver.Hooks{}
-	hooks.AddOnRegisterSession(func(hctx context.Context, cs mcpserver.ClientSession) {
+	hooks.AddOnRegisterSession(func(context.Context, mcpserver.ClientSession) {
 		s.metrics.sessions.Inc()
-		// Registration runs in the request that opened the session, whose
-		// principal is the one the session ID is bound to.
-		s.sessions.own(cs.SessionID(), principal(hctx))
 	})
 	hooks.AddOnUnregisterSession(func(hctx context.Context, cs mcpserver.ClientSession) {
 		s.metrics.sessions.Dec()
 		// A client that went away without reporting ends its retrieval
-		// session as a timeout (issue F). The key is scoped to the
-		// principal recorded when the session was registered, not to
-		// hctx: mcp-go's idle sweeper unregisters with no request, and so
-		// no principal, in hctx.
-		p, ok := s.sessions.disown(cs.SessionID())
-		if !ok {
-			p = principal(hctx)
-		}
-		cfg.Outcome.Sessions.End(telemetry.NewContext(hctx, s.tel), retrieval.Key(p, cs.SessionID()), retrieval.OutcomeTimeout, nil)
+		// session as a timeout (issue F).
+		cfg.Outcome.Sessions.End(telemetry.NewContext(hctx, s.tel), cs.SessionID(), retrieval.OutcomeTimeout, nil)
 	})
 
 	// AllowAnonymousPersonal is deliberately false on this transport,
@@ -363,7 +345,9 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	streamOpts := []mcpserver.StreamableHTTPOption{
 		mcpserver.WithEndpointPath(cfg.EndpointPath),
 		mcpserver.WithStreamableHTTPLogger(s.log),
-		mcpserver.WithSessionIdManagerResolver(s.sessions),
+	}
+	if cfg.Stateful {
+		streamOpts = append(streamOpts, mcpserver.WithStateful(true))
 	}
 	if cfg.HeartbeatInterval > 0 {
 		streamOpts = append(streamOpts, mcpserver.WithHeartbeatInterval(cfg.HeartbeatInterval))
@@ -502,7 +486,7 @@ func (c *HostedConfig) validate() error {
 func (s *HostedServer) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.Handle(s.cfg.EndpointPath, s.gate.Middleware(captureIdentity(s.sessions.middleware(s.stream))))
+	mux.Handle(s.cfg.EndpointPath, s.gate.Middleware(captureIdentity(s.stream)))
 
 	if s.auth != nil && s.auth.Resource != "" {
 		md := authn.MetadataHandler(s.auth, "meerkat knowledge base")
