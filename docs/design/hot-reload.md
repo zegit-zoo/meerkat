@@ -492,7 +492,7 @@ signal is the change detection there.
 
 Every rebuild now moves the snapshot's version, including a SIGHUP
 rebuild of a collection with no block. The link graph keys on that
-version (`links.go`), so `linked_from` follows a rebuild. Before, a local
+version and on the snapshot generation (`links.go`), so `linked_from` follows a rebuild. Before, a local
 rebuild kept its empty version and served the cached backlinks until a
 restart.
 
