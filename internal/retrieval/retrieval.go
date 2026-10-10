@@ -63,6 +63,11 @@ const DefaultIdleTimeout = 120 * time.Second
 // first, so one principal's churn ends its own sessions, never another's
 // until the overall cap is reached. An evicted session ends as an idle
 // one would (timeout, or gave_up if nothing was shown).
+//
+// The empty principal — callers with no verified subject, any number of
+// clients behind one name — is held to the overall cap only: a
+// per-principal cap on it would be a deployment-wide cap on every
+// deployment without auth.
 const (
 	DefaultMaxSessions             = 10000
 	DefaultMaxSessionsPerPrincipal = 64
@@ -73,7 +78,8 @@ const keySep = "\x00"
 
 // Key is the tracker key for session id of principal: a caller-chosen
 // id is only ever looked up within the principal that chose it. An empty
-// id is no session, and so is an empty key.
+// id is no session, and so is an empty key. An empty principal is a
+// caller with no verified subject (see the caps above).
 func Key(principal, id string) string {
 	if id == "" {
 		return ""
@@ -241,7 +247,7 @@ func (t *Tracker) Begin(ctx context.Context, key string) (context.Context, *Sess
 	var evicted []*Session
 	if !ok {
 		p := principalOf(key)
-		if t.maxPerPrincipal > 0 && t.perPrincipal[p] >= t.maxPerPrincipal {
+		if t.maxPerPrincipal > 0 && p != "" && t.perPrincipal[p] >= t.maxPerPrincipal {
 			if old := t.evictLRU(p, true); old != nil {
 				evicted = append(evicted, old)
 			}

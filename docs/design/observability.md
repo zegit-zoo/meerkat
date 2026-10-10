@@ -499,8 +499,9 @@ an idle window (`sessions.idle_timeout`, default 120 s), and within the
 caller's principal: the same `session_id` from two principals is two
 sessions (meerkat-mob#46). It ends on `mk_report_outcome`, on idle
 timeout, or when the MCP session goes away. At most 64 sessions per
-principal and 10,000 overall are live; past a cap the least recently
-used one ends as if idle.
+verified principal and 10,000 overall are live (callers with no
+subject are held to the overall cap only); past a cap the least
+recently used one ends as if idle.
 
 Definitions (`internal/retrieval`):
 

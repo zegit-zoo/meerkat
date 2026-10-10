@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,20 +34,31 @@ type bindFixture struct {
 
 func newBindFixture(t *testing.T, stateful bool, limits retrieval.Limits) *bindFixture {
 	t.Helper()
-	f := &bindFixture{issuer: authntest.NewIssuer(t)}
-	srv, err := NewHosted(context.Background(), HostedConfig{
-		Collections: threeCollectionRegistry(t),
-		Auth: &authz.Config{
+	return newBindFixtureWith(t, func(f *bindFixture, cfg *HostedConfig) {
+		cfg.Auth = &authz.Config{
 			Resource:  testResource,
 			Providers: []authz.Provider{{Issuer: f.issuer.URL, Audience: testAudience}},
 			Rules:     []authz.Rule{{Name: "all", Groups: []string{"staff"}, Collections: []string{"*"}}},
-		},
-		Version:    "test",
-		HTTPClient: f.issuer.Client(),
-		Logger:     slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Stateful:   stateful,
-		Outcome:    OutcomeOptions{Sessions: retrieval.New(0, limits)},
+		}
+		cfg.Stateful = stateful
+		cfg.Outcome = OutcomeOptions{Sessions: retrieval.New(0, limits)}
 	})
+}
+
+// newBindFixtureWith builds the fixture's server from a config that
+// configure completes; without Auth it is a deployment with no auth.
+func newBindFixtureWith(t *testing.T, configure func(*bindFixture, *HostedConfig)) *bindFixture {
+	t.Helper()
+	f := &bindFixture{issuer: authntest.NewIssuer(t)}
+	cfg := HostedConfig{
+		Collections: threeCollectionRegistry(t),
+		Version:     "test",
+		HTTPClient:  f.issuer.Client(),
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Outcome:     OutcomeOptions{Sessions: retrieval.New(0, retrieval.Limits{})},
+	}
+	configure(f, &cfg)
+	srv, err := NewHosted(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("NewHosted: %v", err)
 	}
@@ -76,7 +88,9 @@ func (f *bindFixture) rpc(t *testing.T, method, bearer, session, body string) (i
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+bearer)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	if session != "" {
 		req.Header.Set("Mcp-Session-Id", session)
 	}
@@ -331,5 +345,194 @@ func TestSessionBinder_StatefulCapsEvictTheOldest(t *testing.T) {
 	}
 	if !bytes.HasPrefix([]byte(b2), []byte(sessionIDPrefix)) {
 		t.Errorf("session ID %q lost its prefix", b2)
+	}
+}
+
+// --- the anonymous principal: overall caps only -----------------------------
+
+// anonCtx is the context of a caller with no verified subject.
+func anonCtx() context.Context {
+	return authz.NewContext(context.Background(), authz.NewGrants(authz.Identity{}, nil))
+}
+
+func TestPrincipal_SubjectlessCallersAreTheAnonymousPrincipal(t *testing.T) {
+	for name, ctx := range map[string]context.Context{
+		"no grants":          context.Background(),
+		"no subject":         anonCtx(),
+		"issuer, no subject": authz.NewContext(context.Background(), authz.NewGrants(authz.Identity{Issuer: "https://idp"}, nil)),
+	} {
+		if p := principal(ctx); p != anonymousPrincipal {
+			t.Errorf("%s: principal = %q, want the anonymous principal", name, p)
+		}
+	}
+	verified := authz.NewContext(context.Background(), authz.NewGrants(authz.Identity{Subject: "alice", Issuer: "https://idp"}, nil))
+	if principal(verified) == anonymousPrincipal {
+		t.Error("a verified subject is the anonymous principal")
+	}
+}
+
+// holdStreamsVia opens n concurrent GET streams through mw for the
+// caller in ctx. It returns once each stream is held open or refused;
+// the func it returns closes the held ones and reports every status.
+func holdStreamsVia(t *testing.T, mw func(http.Handler) http.Handler, ctx context.Context, n int) func() []int {
+	t.Helper()
+	codes := make([]int, n)
+	settled := make(chan struct{}, n)
+	release := make(chan struct{})
+	h := mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		settled <- struct{}{}
+		<-release
+	}))
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp", nil).WithContext(ctx))
+			codes[i] = rec.Code
+			if rec.Code != http.StatusOK {
+				settled <- struct{}{}
+			}
+		})
+	}
+	for range n {
+		<-settled
+	}
+	return func() []int {
+		close(release)
+		wg.Wait()
+		return codes
+	}
+}
+
+func TestSessionBinder_AnonymousStreamsAreNotHeldToThePerPrincipalCap(t *testing.T) {
+	b := newSessionBinder(false, DefaultMaxSessionsPerPrincipal, DefaultMaxSessions)
+	n := DefaultMaxSessionsPerPrincipal + 8
+	closeAnon := holdStreamsVia(t, b.middleware, anonCtx(), n)
+	// A verified principal is still held to its cap, at the same time.
+	alice := authz.NewContext(context.Background(), authz.NewGrants(authz.Identity{Subject: "alice", Issuer: "i"}, nil))
+	closeAlice := holdStreamsVia(t, b.middleware, alice, DefaultMaxSessionsPerPrincipal+1)
+	for i, c := range closeAnon() {
+		if c != http.StatusOK {
+			t.Errorf("anonymous stream %d of %d: %d, want 200", i+1, n, c)
+		}
+	}
+	refused := 0
+	for _, c := range closeAlice() {
+		if c == http.StatusTooManyRequests {
+			refused++
+		}
+	}
+	if refused != 1 {
+		t.Errorf("alice: %d of %d streams refused, want exactly 1", refused, DefaultMaxSessionsPerPrincipal+1)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.streams) != 0 {
+		t.Errorf("stream counts leaked: %v", b.streams)
+	}
+}
+
+func TestSessionBinder_AnonymousStatefulIDsAreHeldToTheOverallCapOnly(t *testing.T) {
+	const total = DefaultMaxSessionsPerPrincipal + 16
+	b := newSessionBinder(true, DefaultMaxSessionsPerPrincipal, total)
+	clock := time.Unix(0, 0)
+	b.now = func() time.Time { clock = clock.Add(time.Second); return clock }
+	anon := b.ResolveSessionIdManager(httptest.NewRequest(http.MethodPost, "/mcp", nil).WithContext(anonCtx()))
+	ids := make([]string, total)
+	for i := range ids {
+		ids[i] = anon.Generate()
+	}
+	for i, id := range ids {
+		if _, err := anon.Validate(id); err != nil {
+			t.Fatalf("anonymous ID %d of %d evicted below the overall cap: %v", i+1, total, err)
+		}
+	}
+	// One past the overall cap evicts the oldest overall, and only it.
+	extra := anon.Generate()
+	if _, err := anon.Validate(ids[0]); err == nil {
+		t.Error("the overall cap did not evict the oldest anonymous ID")
+	}
+	for _, id := range append(ids[1:], extra) {
+		if _, err := anon.Validate(id); err != nil {
+			t.Fatalf("an anonymous ID other than the oldest was evicted: %v", err)
+		}
+	}
+}
+
+func TestHosted_NoAuthStatefulClientsDoNotEvictEachOther(t *testing.T) {
+	f := newBindFixtureWith(t, func(_ *bindFixture, cfg *HostedConfig) { cfg.Stateful = true })
+	list := `{"jsonrpc":"2.0","id":3,"method":"tools/list"}`
+	n := DefaultMaxSessionsPerPrincipal + 8
+	sids := make([]string, n)
+	for i := range sids {
+		sids[i] = f.initialize(t, "")
+	}
+	for i, sid := range sids {
+		if code, _, body := f.rpc(t, http.MethodPost, "", sid, list); code != http.StatusOK {
+			t.Fatalf("client %d of %d on a server without auth: %d %s", i+1, n, code, body)
+		}
+	}
+}
+
+func TestHosted_UnregisterEndsTheRetrievalSessionOfItsOwner(t *testing.T) {
+	// mcp-go's idle sweeper unregisters a transport session with no
+	// request in context. The hook must still end the retrieval session
+	// keyed by that MCP session under its owner's principal.
+	tracker := retrieval.New(0, retrieval.Limits{})
+	f := newBindFixtureWith(t, func(f *bindFixture, cfg *HostedConfig) {
+		cfg.Auth = &authz.Config{
+			Resource:  testResource,
+			Providers: []authz.Provider{{Issuer: f.issuer.URL, Audience: testAudience}},
+			Rules:     []authz.Rule{{Name: "all", Groups: []string{"staff"}, Collections: []string{"*"}}},
+		}
+		cfg.Outcome = OutcomeOptions{Sessions: tracker}
+		cfg.SessionIdleTTL = time.Second
+		cfg.HeartbeatInterval = -1
+	})
+	alice := f.token(t, "alice")
+	sid := f.initialize(t, alice)
+
+	// Hold alice's GET stream open: that registers the transport session.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.http.URL+f.srv.EndpointPath(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+alice)
+	req.Header.Set("Mcp-Session-Id", sid)
+	resp, err := f.http.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET stream: %d", resp.StatusCode)
+	}
+
+	// A search without session_id is a retrieval session keyed by the
+	// MCP session.
+	if code, _, body := f.rpc(t, http.MethodPost, alice, sid,
+		toolCallBody(toolSearch, map[string]any{"query": "overview"})); code != http.StatusOK {
+		t.Fatalf("search: %d %s", code, body)
+	}
+	if tracker.Live() != 1 {
+		t.Fatalf("live retrieval sessions = %d, want 1", tracker.Live())
+	}
+
+	// The sweeper (1 s TTL, 1 s tick) unregisters the idle stream; the
+	// tracker's own idle timeout is two minutes away.
+	deadline := time.Now().Add(10 * time.Second)
+	for tracker.Live() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the swept stream's retrieval session was not ended")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	f.srv.sessions.mu.Lock()
+	defer f.srv.sessions.mu.Unlock()
+	if len(f.srv.sessions.owners) != 0 {
+		t.Errorf("owners leaked: %v", f.srv.sessions.owners)
 	}
 }

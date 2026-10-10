@@ -48,13 +48,35 @@ import (
 // The principal is memory.Namespace(identity): a hash of the token's
 // (iss, sub), the same value that owns personal memories. Every caller
 // with no subject — anonymous callers, and every caller of a deployment
-// without auth — is one principal, so such callers are separated from
-// authenticated ones, not from each other.
+// without auth or behind allow_unauthenticated — is the one anonymous
+// principal (""), so such callers are separated from authenticated ones,
+// not from each other.
+//
+// The anonymous principal stands for any number of clients, so the
+// per-principal caps below do not apply to it: it is held only to the
+// overall caps (the stateful registry's maxTotal here, the tracker's
+// overall cap, and the endpoint's own bound on open streams). Otherwise
+// a deployment without auth would have a per-principal cap as its
+// deployment-wide limit, and its clients would evict one another.
+
+// anonymousPrincipal is the principal of every caller with no verified
+// subject. memory.Namespace never returns it, so it cannot collide with
+// a verified principal; it is also retrieval's "no principal", which the
+// tracker likewise holds to its overall cap only.
+const anonymousPrincipal = ""
 
 // principal is the session-scoping principal of the caller in ctx.
 func principal(ctx context.Context) string {
-	return memory.Namespace(authz.FromContext(ctx).Identity())
+	id := authz.FromContext(ctx).Identity()
+	if id.Subject == "" {
+		return anonymousPrincipal
+	}
+	return memory.Namespace(id)
 }
+
+// perPrincipalCapped reports whether p is held to the per-principal
+// caps: every verified principal, never the anonymous one.
+func perPrincipalCapped(p string) bool { return p != anonymousPrincipal }
 
 // sessionKey is the retrieval-session key for a call: the explicit
 // session_id, else the MCP client session, else "" (no session) —
@@ -87,9 +109,9 @@ const sessionIDPrefix = "mcp-session-"
 
 // Defaults for the MCP session caps.
 const (
-	// DefaultMaxSessionsPerPrincipal caps the session IDs one principal
-	// holds in stateful mode, and the GET streams it holds open in either
-	// mode.
+	// DefaultMaxSessionsPerPrincipal caps the session IDs one verified
+	// principal holds in stateful mode, and the GET streams it holds
+	// open in either mode. The anonymous principal is not held to it.
 	DefaultMaxSessionsPerPrincipal = 32
 	// DefaultMaxSessions caps the session IDs held in stateful mode
 	// overall. (Open streams overall are the endpoint's concern.)
@@ -128,8 +150,9 @@ func boundTo(id, principal string) bool {
 
 // sessionBinder is the MCP session ID policy: it mints principal-bound
 // IDs (as mcp-go's SessionIdManagerResolver), refuses a foreign one (as
-// HTTP middleware, because mcp-go does not validate the ID on GET), and
-// caps live sessions per principal and, in stateful mode, overall.
+// HTTP middleware, because mcp-go does not validate the ID on GET), caps
+// live sessions per verified principal and, in stateful mode, overall,
+// and remembers whose each registered transport session is (owners).
 type sessionBinder struct {
 	stateful        bool
 	maxPerPrincipal int
@@ -143,6 +166,11 @@ type sessionBinder struct {
 	held map[string]int
 	// streams counts open GET streams per principal.
 	streams map[string]int
+	// owners maps a session registered with the MCP server (a GET
+	// stream) to its principal, so that the unregister hook can find the
+	// session's retrieval key even when it runs without a request — from
+	// mcp-go's idle sweeper. Bounded by the registered sessions.
+	owners map[string]string
 }
 
 type issued struct {
@@ -154,6 +182,7 @@ func newSessionBinder(stateful bool, maxPerPrincipal, maxTotal int) *sessionBind
 	return &sessionBinder{
 		stateful: stateful, maxPerPrincipal: maxPerPrincipal, maxTotal: maxTotal, now: time.Now,
 		ids: map[string]issued{}, held: map[string]int{}, streams: map[string]int{},
+		owners: map[string]string{},
 	}
 }
 
@@ -203,13 +232,14 @@ func (m *boundManager) Terminate(id string) (bool, error) {
 	return false, nil
 }
 
-// issue registers a stateful ID, evicting the principal's oldest, then
-// the oldest overall, to stay inside the caps. An evicted ID is answered
-// as unknown from then on, and its client initializes again.
+// issue registers a stateful ID, evicting the principal's oldest (a
+// verified principal only), then the oldest overall, to stay inside the
+// caps. An evicted ID is answered as unknown from then on, and its
+// client initializes again.
 func (b *sessionBinder) issue(id, principal string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.maxPerPrincipal > 0 && b.held[principal] >= b.maxPerPrincipal {
+	if b.maxPerPrincipal > 0 && perPrincipalCapped(principal) && b.held[principal] >= b.maxPerPrincipal {
 		b.evictOldest(principal, true)
 	}
 	if b.maxTotal > 0 && len(b.ids) >= b.maxTotal {
@@ -262,11 +292,12 @@ func (b *sessionBinder) forgetLocked(id string) {
 }
 
 // openStream admits one more GET stream for principal, or reports that
-// it already holds its cap.
+// a verified principal already holds its cap. The anonymous principal's
+// streams are bounded only by the endpoint's overall limit.
 func (b *sessionBinder) openStream(principal string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.maxPerPrincipal > 0 && b.streams[principal] >= b.maxPerPrincipal {
+	if b.maxPerPrincipal > 0 && perPrincipalCapped(principal) && b.streams[principal] >= b.maxPerPrincipal {
 		return false
 	}
 	b.streams[principal]++
@@ -281,6 +312,24 @@ func (b *sessionBinder) closeStream(principal string) {
 	} else {
 		b.streams[principal]--
 	}
+}
+
+// own records that the transport session id, just registered with the
+// MCP server, belongs to principal.
+func (b *sessionBinder) own(id, principal string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.owners[id] = principal
+}
+
+// disown forgets the owner of a transport session that is being
+// unregistered and returns it.
+func (b *sessionBinder) disown(id string) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	p, ok := b.owners[id]
+	delete(b.owners, id)
+	return p, ok
 }
 
 // middleware refuses a request that presents another principal's MCP

@@ -173,8 +173,9 @@ another principal's state.
 
 - **The principal** is `memory.Namespace(identity)`, the hash of the
   verified `(iss, sub)` that also owns personal memories. Every caller
-  with no subject (anonymous callers, and all callers of a deployment
-  without auth) is one principal.
+  with no subject (`anonymous:` callers, all callers behind
+  `allow_unauthenticated`, and all callers of a deployment without
+  auth) is one anonymous principal.
 - **Tool-level keys** are `principal + "\x00" + id`. Two principals that
   pick the same `session_id` get two sessions: neither can spend the
   other's limits, end it with `mk_report_outcome`, suppress its
@@ -188,12 +189,25 @@ another principal's state.
   presenting request, which comes from a verified token. Stateless
   replicas therefore still need no sticky routing. `--stateful`
   additionally answers `404` for any ID this process did not issue.
-- **Caps.** A principal may hold 32 open GET streams (`429` beyond) and,
-  in stateful mode, 32 issued IDs. The process holds at most 10,000 IDs,
-  and past either cap the oldest ID is evicted. The retrieval tracker
-  holds at most 64 live sessions per principal and 10,000 overall. When
-  a cap is reached the least recently used session goes, the principal's
-  own first, and ends as an idle one would.
+- **Caps.** A verified principal may hold 32 open GET streams (`429`
+  beyond) and, in stateful mode, 32 issued IDs. The process holds at
+  most 10,000 IDs, and past either cap the oldest ID is evicted. The
+  retrieval tracker holds at most 64 live sessions per verified
+  principal and 10,000 overall. When a cap is reached the least recently
+  used session goes, the principal's own first, and ends as an idle one
+  would.
+- **The anonymous principal has the overall caps only.** It stands for
+  any number of clients, so a per-principal cap on it would be a
+  deployment-wide cap on every server without auth, and its clients
+  would evict one another. Its stateful IDs and retrieval sessions count
+  against the 10,000 overall caps. Its GET streams are not held to the
+  32-stream cap; the endpoint's overall bound on in-flight work and open
+  streams (meerkat-mob#41) applies to them as to every caller.
+- **Ending a stream ends its retrieval session.** The transport session
+  behind a GET stream is recorded with its principal when it is
+  registered, and when it is unregistered (the client went away, or
+  mcp-go's idle sweeper reclaimed it) the retrieval session keyed by
+  that MCP session ID is ended as a timeout under that principal.
 
 DNS-rebinding protection (mcp-go's rejection of loopback requests whose
 `Host` is not a localhost value) stays on. `--trust-proxy-host` disables

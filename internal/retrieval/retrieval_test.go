@@ -2,6 +2,7 @@ package retrieval
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -285,6 +286,37 @@ func TestTracker_OverallCapEvictsTheOldest(t *testing.T) {
 	}
 	if New(0, Limits{}).maxTotal != DefaultMaxSessions || New(0, Limits{}).maxPerPrincipal != DefaultMaxSessionsPerPrincipal {
 		t.Error("New does not apply the default caps")
+	}
+}
+
+func TestTracker_EmptyPrincipalIsHeldToTheOverallCapOnly(t *testing.T) {
+	// Callers with no verified subject share the empty principal; with
+	// the default caps, more of them than the per-principal cap must not
+	// evict one another.
+	ctx := context.Background()
+	tr := New(0, Limits{})
+	clock, now := newClock(time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC))
+	tr.now = now
+	n := DefaultMaxSessionsPerPrincipal + 16
+	for i := range n {
+		*clock = clock.Add(time.Second)
+		tr.Begin(ctx, Key("", fmt.Sprintf("s%d", i)))
+	}
+	if tr.Live() != n {
+		t.Fatalf("live = %d, want all %d anonymous sessions", tr.Live(), n)
+	}
+	// The overall cap still applies to them.
+	small := New(0, Limits{}).WithCaps(3, 1)
+	small.now = now
+	for i := range 4 {
+		*clock = clock.Add(time.Second)
+		small.Begin(ctx, Key("", fmt.Sprintf("s%d", i)))
+	}
+	if small.Live() != 3 {
+		t.Fatalf("live = %d, want the overall cap of 3", small.Live())
+	}
+	if small.End(ctx, Key("", "s0"), OutcomeFound, nil) != nil {
+		t.Error("the oldest anonymous session survived the overall cap")
 	}
 }
 
