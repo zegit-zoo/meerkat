@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -254,13 +255,27 @@ func (e agentCLIExecutor) Exec(ctx context.Context, t Task, env ExecEnv) Result 
 	subCtx, cancel := context.WithTimeout(ctx, wallClock)
 	defer cancel()
 
-	instruction := buildInstruction(t, env.WorkdirKB, env.Branch)
+	// Every value the instruction spells into a git command line must be
+	// a plain path or name, and the commit message travels in a file, so
+	// nothing derived from content or callers is ever shell text
+	// (meerkat-mob#35).
+	if reason := checkTaskArgs(t, env.Branch); reason != "" {
+		r.FinishedAt, r.ExitStatus, r.FailReason = time.Now(), "failed", reason
+		return r
+	}
+	msgFile, cleanup, err := writeCommitMessage(commitMessage(t))
+	if err != nil {
+		r.FinishedAt, r.ExitStatus, r.FailReason = time.Now(), "failed", "commit message file: "+err.Error()
+		return r
+	}
+	defer cleanup()
+	instruction := buildInstruction(t, env.WorkdirKB, env.Branch, msgFile)
 	cmd := e.cli.buildCmd(subCtx, t, env, instruction)
 
 	var combined strings.Builder
 	cmd.Stdout = &combined
 	cmd.Stderr = &combined
-	err := cmd.Run()
+	err = cmd.Run()
 	r.FinishedAt = time.Now()
 
 	switch {
@@ -324,19 +339,94 @@ func roleFailure(t Task, pagePath, executor string) string {
 	return ""
 }
 
-// buildInstruction dispatches on the task's role.
-func buildInstruction(t Task, workdir, branch string) string {
+// buildInstruction dispatches on the task's role. msgFile holds the
+// commit message (writeCommitMessage); the instruction names the file,
+// never the message.
+func buildInstruction(t Task, workdir, branch, msgFile string) string {
 	switch t.Role {
 	case RoleResearcher, RoleValidator:
-		return buildRoleInstruction(t, workdir, branch)
+		return buildRoleInstruction(t, workdir, branch, msgFile)
 	case RoleLibrarian:
-		return buildRewriteInstruction(t, workdir, branch)
+		return buildRewriteInstruction(t, workdir, branch, msgFile)
 	}
-	return buildPerPageInstruction(t, workdir, branch)
+	return buildPerPageInstruction(t, workdir, branch, msgFile)
 }
 
-func buildRoleInstruction(t Task, workdir, branch string) string {
-	commitMsg := fmt.Sprintf("intake(%s): %s %s", t.Role, t.IntakeID, idBasename(t.PageID))
+// commitMessage is the message a task's agent commits with.
+func commitMessage(t Task) string {
+	switch t.Role {
+	case RoleResearcher, RoleValidator:
+		return fmt.Sprintf("intake(%s): %s %s", t.Role, t.IntakeID, idBasename(t.PageID))
+	case RoleLibrarian:
+		return rewriteCommitMessage(t)
+	}
+	return fmt.Sprintf("ingest(%s): %s", t.SourceID, idBasename(t.PageID))
+}
+
+// safeArgPattern is what a path, id or branch spelled into the agent's
+// git commands may contain.
+var safeArgPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// safeArg reports whether s can stand unquoted in a shell command: only
+// [A-Za-z0-9._/-], no leading "-" (it would read as an option) and no
+// ".." element.
+func safeArg(s string) bool {
+	if !safeArgPattern.MatchString(s) || strings.HasPrefix(s, "-") {
+		return false
+	}
+	for _, el := range strings.Split(s, "/") {
+		if el == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// checkTaskArgs returns why a task's values cannot go into the agent's
+// git commands, or "".
+func checkTaskArgs(t Task, branch string) string {
+	args := map[string]string{"page path": t.PagePath, "page id": t.PageID, "branch": branch}
+	if t.Role == RoleResearcher || t.Role == RoleValidator {
+		args["intake id"] = t.IntakeID
+	}
+	for _, name := range []string{"page path", "page id", "intake id", "branch"} {
+		v, ok := args[name]
+		if ok && !safeArg(v) {
+			return fmt.Sprintf("%s %q is outside [A-Za-z0-9._/-]; not run", name, v)
+		}
+	}
+	return ""
+}
+
+// writeCommitMessage writes msg to a fresh 0600 file outside the working
+// copy and returns its path (forward slashes) and a cleanup func. The
+// agent commits with `git commit -F <path>`, so the message is data git
+// reads, never shell text the agent re-types.
+func writeCommitMessage(msg string) (string, func(), error) {
+	f, err := os.CreateTemp("", "meerkat-commit-*.txt")
+	if err != nil {
+		return "", nil, err
+	}
+	name := f.Name()
+	cleanup := func() { _ = os.Remove(name) }
+	if _, err := f.WriteString(msg + "\n"); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	p := filepath.ToSlash(name)
+	if !safeArg(strings.TrimPrefix(p, filepath.ToSlash(filepath.VolumeName(name)))) {
+		cleanup()
+		return "", nil, fmt.Errorf("temp path %q is outside [A-Za-z0-9._/-]; set TMPDIR to a plain path", p)
+	}
+	return p, cleanup, nil
+}
+
+func buildRoleInstruction(t Task, workdir, branch, msgFile string) string {
 	return fmt.Sprintf(`You are the Meerkat %s agent for **one intake item**.
 Working directory: %s
 Candidate page: `+"`%s`"+` (id: `+"`%s`"+`, intake id `+"`%s`"+`)
@@ -344,13 +434,13 @@ The role prompt follows. Do exactly this one item, commit + push, then stop.
 **IMPORTANT: Do this work yourself. DO NOT use the Task tool to delegate.**
 After writing, run (in this order, with retry-on-conflict up to 3 times):
     git pull --rebase --quiet || true
-    git add %s
-    git commit -m "%s"
+    git add -- %s
+    git commit -F %s
     git push origin %s
 When done, print exactly: ITEM_DONE: %s
 Then stop. No further items.
 ---
-%s`, t.Role, workdir, t.PagePath, t.PageID, t.IntakeID, t.PagePath, commitMsg, branch, t.IntakeID, t.Prompt)
+%s`, t.Role, workdir, t.PagePath, t.PageID, t.IntakeID, t.PagePath, msgFile, branch, t.IntakeID, t.Prompt)
 }
 
 func isPathWithinBase(base, path string) bool {
@@ -378,8 +468,7 @@ func isPathWithinBase(base, path string) bool {
 // buildPerPageInstruction wraps the rendered Source.Prompt with a
 // minimal "do exactly this one page" header. This keeps each
 // opencode session bounded and lets us run many in parallel.
-func buildPerPageInstruction(t Task, workdir, branch string) string {
-	commitMsg := fmt.Sprintf("ingest(%s): %s", t.SourceID, idBasename(t.PageID))
+func buildPerPageInstruction(t Task, workdir, branch, msgFile string) string {
 	return fmt.Sprintf(`You are the Meerkat ingestion sub-agent for **one single page**.
 
 Working directory: %s
@@ -391,8 +480,8 @@ The detailed system prompt for this page type follows. Process exactly this one 
 
 After writing the page, run (in this order, with retry-on-conflict up to 3 times):
     git pull --rebase --quiet || true
-    git add %s
-    git commit -m "%s"
+    git add -- %s
+    git commit -F %s
     git push origin %s
 
 If you cannot complete the page, set frontmatter "status: ingest-failed" with a one-line "failure_reason:", commit + push that, and exit.
@@ -405,7 +494,7 @@ Then stop. No further pages.
 
 ---
 
-%s`, workdir, t.PagePath, t.PageID, t.PagePath, commitMsg, branch, t.PageID, t.Prompt)
+%s`, workdir, t.PagePath, t.PageID, t.PagePath, msgFile, branch, t.PageID, t.Prompt)
 }
 
 // readStatus reads the frontmatter status field without parsing

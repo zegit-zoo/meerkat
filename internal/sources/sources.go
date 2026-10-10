@@ -187,6 +187,9 @@ func Get(id string) (Source, error) {
 func Prompt(promptPath string) (string, error) {
 	// Tolerate either "prompts/policy.md" or just "policy.md".
 	rel := strings.TrimPrefix(promptPath, "prompts/")
+	if err := checkRegistryName(rel); err != nil {
+		return "", fmt.Errorf("read prompt %q: %w", promptPath, err)
+	}
 	body, err := fs.ReadFile(loadFS(), path.Join("etc", "prompts", rel))
 	if err != nil {
 		return "", fmt.Errorf("read prompt %q: %w", promptPath, err)
@@ -197,11 +200,29 @@ func Prompt(promptPath string) (string, error) {
 // Template returns the contents of an embedded page template.
 // templateName is the value of Source.Template, e.g. "policy.md".
 func Template(templateName string) (string, error) {
+	if err := checkRegistryName(templateName); err != nil {
+		return "", fmt.Errorf("read template %q: %w", templateName, err)
+	}
 	body, err := fs.ReadFile(loadFS(), path.Join("etc", "templates", templateName))
 	if err != nil {
 		return "", fmt.Errorf("read template %q: %w", templateName, err)
 	}
 	return string(body), nil
+}
+
+// checkRegistryName refuses a prompt: or template: name that would
+// leave its directory: path.Join would clean a ".." element away and
+// read another file of the loaded registry (meerkat-mob#35).
+func checkRegistryName(name string) error {
+	if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, "\\") {
+		return errors.New("not a relative name inside its directory")
+	}
+	for _, el := range strings.Split(name, "/") {
+		if el == ".." || el == "." {
+			return errors.New("a \".\" or \"..\" element is not allowed")
+		}
+	}
+	return nil
 }
 
 // FS returns the filesystem All/Prompt/Template currently read from —

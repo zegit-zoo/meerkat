@@ -99,9 +99,12 @@ func TestRewrites_PlanExecuteAndAcceptFieldOnlyEdits(t *testing.T) {
 			t.Errorf("prompt lacks %q", want)
 		}
 	}
-	instr := buildInstruction(hint, dir, "librarian/rewrites")
-	if !strings.Contains(instr, `git commit -m "librarian(rewrite): hint datadog for queries "datadgo alert routing", "rotate the datadog api key""`) || !strings.Contains(instr, "git push origin librarian/rewrites") {
+	instr := buildInstruction(hint, dir, "librarian/rewrites", "/tmp/msg.txt")
+	if !strings.Contains(instr, "git commit -F /tmp/msg.txt") || !strings.Contains(instr, "git push origin librarian/rewrites") {
 		t.Errorf("instruction:\n%s", instr)
+	}
+	if got := commitMessage(hint); got != `librarian(rewrite): hint datadog for queries "datadgo alert routing", "rotate the datadog api key"` {
+		t.Errorf("commit message = %s", got)
 	}
 	if tasks[1].Field != FieldDescription || tasks[1].PagePath != "wiki/concepts/drift.md" {
 		t.Errorf("description task = %+v", tasks[1])
