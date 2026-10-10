@@ -53,7 +53,7 @@ func escalateFixtureOn(t *testing.T, tokenEnv string) (*collections.Registry, *i
 	}
 	st := intake.New(ms)
 	raw := []byte(`---
-{"id":"hb1","question":"how do we rotate @everyone's deploy key","attempted":["root","handbook"],"outcome":"gave_up","reported_at":"2026-09-18T20:00:00Z"}
+{"id":"hb1","question":"how do we rotate @everyone's deploy key","attempted":["root","handbook"],"target_kb":"handbook","outcome":"gave_up","reported_at":"2026-09-18T20:00:00Z"}
 ---
 # Research
 `)
@@ -598,7 +598,7 @@ func TestParkedEntries_FallsBackToTheRawItem(t *testing.T) {
 	ctx := context.Background()
 	ms, _ := memory.OpenLocal(filepath.Join(t.TempDir(), "intake"))
 	st := intake.New(ms)
-	raw := []byte("---\n{\"id\":\"r1\",\"question\":\"q\",\"attempted\":[\"root\",\"platform/flux\"]}\n---\nbody\n")
+	raw := []byte("---\n{\"id\":\"r1\",\"question\":\"q\",\"attempted\":[\"root\",\"platform/flux\"],\"target_kb\":\"flux\"}\n---\nbody\n")
 	if _, err := st.PutRaw(ctx, "ns", time.Now(), "r1", raw); err != nil {
 		t.Fatal(err)
 	}
