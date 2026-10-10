@@ -148,9 +148,13 @@ func resolve(repoRoot string, src Source, out io.Writer) (root, commit string, e
 // the user's own git credential configuration (a full clone URL / SSH
 // spec, a credential helper, etc.) for private access.
 func resolveGit(src Source, out io.Writer) (root, commit string, err error) {
+	// No fallback to a shared temp directory: another local user could
+	// pre-create the clone there, configuration included. A build with
+	// no user cache directory (HOME and XDG_CACHE_HOME unset) fails and
+	// says how to fix it.
 	cacheRoot, err := os.UserCacheDir()
 	if err != nil {
-		cacheRoot = filepath.Join(os.TempDir(), "meerkat-cache")
+		return "", "", fmt.Errorf("type: git needs a user cache directory to clone into (set HOME or XDG_CACHE_HOME): %w", err)
 	}
 	// cacheDir is deliberately a plain local, NOT the named return `root`.
 	// Every error path below does `return "", "", err`, which zeroes the
@@ -188,7 +192,9 @@ func resolveGit(src Source, out io.Writer) (root, commit string, err error) {
 	}()
 
 	if !exists {
-		cloneArgs := append(append([]string{}, gitArgs...), "clone", "--quiet", authURL, cacheDir)
+		// "--" so the URL (content-source.yaml-derived) is never parsed as
+		// an option, like the submodule path and the checkout ref.
+		cloneArgs := append(append([]string{}, gitArgs...), "clone", "--quiet", "--", authURL, cacheDir)
 		if err := runGitEnv(out, "", gitEnv, cloneArgs...); err != nil {
 			return "", "", fmt.Errorf("clone %s: %w", redact(authURL), err)
 		}
@@ -562,7 +568,13 @@ func fallback(s, def string) string {
 	return s
 }
 func sanitize(s string) string {
-	return strings.NewReplacer("/", "_", ":", "_", " ", "_").Replace(s)
+	out := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_").Replace(s)
+	// A bare "." or ".." would name the cache directory itself or its
+	// parent rather than an entry inside it.
+	if out == "" || out == "." || out == ".." {
+		out = "_" + out
+	}
+	return out
 }
 
 // redact strips an embedded token from a URL for safe logging.

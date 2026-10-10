@@ -53,7 +53,44 @@ a hash of part hashes with a `-N` suffix for a multipart upload, and
 something else again under SSE-KMS. meerkat **never** interprets it: it
 compares it, caches under it, and sends it back in `If-Match`. If you
 want a content hash verified, pin `sha256:` on a bundle — it is checked
-before extraction exactly as for `type: url` and `type: gcs`.
+before extraction exactly as for `type: url` and `type: gcs`. The pin is
+part of the cache key, so an entry cached before the pin was added is
+never served as if it had been verified: the first fetch under the pin
+downloads and checks the bytes.
+
+An `etag:` pin is only as strong as the store that reports it: it stops
+meerkat from following a later overwrite on a store that enforces
+`If-Match` on reads, but a single-part ETag is an MD5 and a store you do
+not trust can report whatever it likes. Pin `sha256:` when the bytes
+themselves must be verified.
+
+## Endpoints and transport
+
+`endpoint:` must be `https://`. A plaintext `http://` endpoint is refused
+at load unless the source also sets `insecure: true` — for a local test
+store or a trusted private network — because over plaintext the signed
+requests (access key ID, session token), the content and the ETags
+meerkat compares are all visible to, and changeable by, the network
+path. This is the same rule `observability:` applies to its collector.
+
+## The on-disk cache
+
+Entries live under `<user cache dir>/meerkat/content/<scheme>/<location
+hash>/<version>/`, are filled in a hidden `.fetch-*` sibling, and become
+visible by one rename once a completion marker is written.
+
+- **A complete entry is never replaced.** When two processes fill the
+  same version at once (a CLI beside a server, replicas on one volume),
+  the second finds the entry complete and discards its staging copy, so
+  a tree another process is serving is never deleted under it.
+- **Old versions are pruned.** After a new version of a location is
+  installed, only the newest `cache.keep_versions` (default 2: the one
+  being served and the one it replaced) are kept. A pruned entry is
+  moved aside before it is deleted, so a half-deleted tree is never
+  visible at a version path.
+- **Interrupted fills are cleaned up.** `.fetch-*` and `.stale-*`
+  directories older than a day are removed the next time an entry is
+  filled in the same directory.
 
 Because an ETag is not guaranteed content-derived under every
 encryption mode, the prefix-mode listing fingerprint for S3 covers
@@ -115,9 +152,11 @@ do not read them as a "yes".
 ### What the Garage gap means
 
 Garage enforces the read precondition, so a `type: s3` **content
-source** on Garage has every guarantee the GCS source has: the bytes
-in a cache entry named `<etag>` are that ETag's bytes, and a pinned
-`etag:` can never be silently replaced.
+source** on Garage has the same read guarantee the GCS source has: the
+bytes in a cache entry named `<etag>` are the bytes the store served for
+that ETag, and a pinned `etag:` stops meerkat from following a later
+overwrite. Pin `sha256:` as well when the bytes must be verified
+independently of the store.
 
 Garage does not enforce write preconditions, so an S3 **memory store**
 on Garage cannot rely on the backend to refuse a stale update. Rather

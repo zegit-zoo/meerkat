@@ -237,6 +237,9 @@ type Source struct {
 	Region    string `yaml:"region,omitempty"`
 	PathStyle bool   `yaml:"path_style,omitempty"`
 	ETag      string `yaml:"etag,omitempty"`
+	// Insecure accepts a plaintext http:// Endpoint. Without it an
+	// http:// endpoint is refused at load.
+	Insecure bool `yaml:"insecure,omitempty"`
 
 	// Refresh opts this source into RUNTIME RECONCILIATION: a periodic,
 	// metadata-only probe of the backing object storage that swaps a new
@@ -400,6 +403,9 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 		if cfg.Intake.Refresh != nil {
 			return Config{}, fmt.Errorf("%s: intake takes no refresh: block — it is written, never served", displayPath)
 		}
+	}
+	if err := validateStoreOverlap(cfg, displayPath); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
 	}
 	if err := cfg.ManifestChildren.Validate("manifest_children"); err != nil {
 		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
