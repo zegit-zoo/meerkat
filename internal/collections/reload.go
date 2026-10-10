@@ -354,6 +354,14 @@ func (c *Collection) currentVersion() string {
 	return c.snap.version
 }
 
+// currentSnapshot reports the serving snapshot's version token and
+// generation.
+func (c *Collection) currentSnapshot() (version string, gen uint64) {
+	c.snapMu.RLock()
+	defer c.snapMu.RUnlock()
+	return c.snap.version, c.snap.gen
+}
+
 // hasFilesystem reports whether the collection reads through its own
 // filesystem rather than the process globals.
 //

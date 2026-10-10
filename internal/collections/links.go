@@ -147,12 +147,15 @@ func (r *Registry) base() *Registry {
 }
 
 // graphKey fingerprints the mounted set: every collection's name,
-// snapshot version and overlay generation. Any reload, memory save or
-// memory reconciliation moves it.
+// snapshot version, snapshot generation and overlay generation. Any
+// reload, lazy mount or eviction, memory save or memory reconciliation
+// moves it. The generation is what moves on a mount or eviction whose
+// source carries no version token.
 func (r *Registry) graphKey() string {
 	var b strings.Builder
 	for _, c := range r.base().list {
-		fmt.Fprintf(&b, "%s\x00%s\x00%d\n", c.Name, c.currentVersion(), c.overlayGen.Load())
+		version, gen := c.currentSnapshot()
+		fmt.Fprintf(&b, "%s\x00%s\x00%d\x00%d\n", c.Name, version, gen, c.overlayGen.Load())
 	}
 	return b.String()
 }
@@ -190,6 +193,10 @@ func (lc *linkCache) pagesOf(c *Collection) ([]kb.Page, error) {
 	s := c.acquire()
 	defer s.release()
 	if c.IsCold() {
+		// An evicted collection's list can never be reused: a remount
+		// installs a fresh snapshot generation. Keeping it would hold the
+		// pages the resident budget just released.
+		delete(lc.content, c.Name)
 		return nil, nil
 	}
 	cached, ok := lc.content[c.Name]
@@ -222,6 +229,15 @@ func (r *Registry) buildGraph(key string, lc *linkCache) *linkGraph {
 	}
 	for _, c := range r.list {
 		g.mounted[c.Name] = true
+	}
+	if lc != nil {
+		// A collection a reload dropped keeps no cached page list; a
+		// later one under the same name lists afresh.
+		for name := range lc.content {
+			if !g.mounted[name] {
+				delete(lc.content, name)
+			}
+		}
 	}
 	type located struct {
 		collection string

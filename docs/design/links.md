@@ -47,13 +47,15 @@ page to `pointer | skill | example | doc`.
 `internal/collections/links.go` builds a **link graph** over every page
 the registry holds — content and memory overlay alike — once per
 configuration of the mounted set, keyed by each collection's snapshot
-version and overlay generation. A reload, a memory save or a memory
-reconciliation invalidates it exactly once; a `mk_show` is a map
-lookup, never a walk. A rebuild re-lists a collection's content root
-only when that collection's snapshot changed. Each collection's content
-pages are cached per snapshot, so the rebuild after a memory save merges
-the live overlay over cached content and reads nothing from disk or the
-object store. Views (`Restrict`, `ViewedBy`) share the root's
+version, snapshot generation and overlay generation. A reload, a lazy
+mount or eviction, a memory save or a memory reconciliation invalidates
+it exactly once; a `mk_show` is a map lookup, never a walk. A rebuild
+re-lists a collection's content root only when that collection's
+snapshot changed. Each collection's content pages are cached per
+snapshot, so the rebuild after a memory save merges the live overlay
+over cached content and reads nothing from disk or the object store.
+The cache holds nothing for a collection that is cold or no longer in
+the registry. Views (`Restrict`, `ViewedBy`) share the root's
 graph and filter at read time, so a per-request authorized view never
 rebuilds anything.
 
