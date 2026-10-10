@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -179,7 +178,7 @@ func reportOutcomeTool(reg *collections.Registry) mcp.Tool {
 		mcp.WithArray("pages", mcp.Description("Qualified page IDs ('collection:id') that answered, if any."), mcp.WithStringItems()),
 		mcp.WithArray("attempted", mcp.Description("Collections searched, in order (names or tree paths)."), mcp.WithStringItems()),
 		mcp.WithObject("quality", mcp.Description("{accuracy, completeness, answer_quality: 0..1, notes?}")),
-		mcp.WithObject("fallback", mcp.Description("{kind: web|source|human|none, summary?, sources?: [urls]}")),
+		mcp.WithObject("fallback", mcp.Description("{kind: web|source|human|none, summary?, sources?: [https URLs to public hosts]}")),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
@@ -267,8 +266,8 @@ func parseOutcomeArgs(req mcp.CallToolRequest) (outcomeArgs, error) {
 				if !ok || strings.TrimSpace(s) == "" {
 					return a, errors.New("fallback.sources must be strings")
 				}
-				if u, err := url.Parse(s); err != nil || (u.Scheme != "https" && u.Scheme != "http" && u.Scheme != "git" && u.Scheme != "file") {
-					return a, fmt.Errorf("fallback.sources entry %q is not an http(s)/git/file URL", s)
+				if err := validateDepositSource(s); err != nil {
+					return a, err
 				}
 				a.fallback.Sources = append(a.fallback.Sources, s)
 			}

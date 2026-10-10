@@ -164,6 +164,17 @@ mk ingest --execute --trust-sources
 > if you trust every source repo in `sources.yaml` as much as code
 > you'd merge unreviewed. Meerkat prints a stderr warning before the
 > first agent spawns when this flag is set.
+>
+> The intake roles (`mk ingest --role researcher|validator|librarian`)
+> widen that: their prompts also carry text MCP callers sent, the
+> question, sources and research body of an intake deposit, and the
+> queries sessions typed for the librarian's rewrites. meerkat puts
+> that text inside fenced blocks labelled as untrusted data and accepts
+> only `https` sources on public hosts, but a label is not a sandbox.
+> So `--trust-sources` is refused on a `--role` run unless
+> `--trust-intake` is given too; pass both only if every identity that
+> can deposit (`intake-write`) or search is trusted like code you'd
+> merge unreviewed.
 
 The wrapped instruction prepends a small "do exactly this one
 page, commit + push, then stop" header so the sub-agent stays

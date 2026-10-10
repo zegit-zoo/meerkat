@@ -435,7 +435,8 @@ meerkat ingest [flags]
       --source string                  Restrict to one source id from sources.yaml (e.g. policies, adr, runbooks).
       --status strings                 Restrict to pages with these frontmatter statuses (default: placeholder,ingest-failed).
       --subagent string                OpenCode subagent type (default: general).
-      --trust-sources                  Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged.
+      --trust-intake                   With --role and --trust-sources: accept that text MCP callers sent (intake deposits, session queries) reaches an agent running without permission prompts.
+      --trust-sources                  Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged. With --role it also needs --trust-intake.
       --wall-clock-cap int             Per-page wall-clock cap in seconds. (default 300)
       --workdir-kb string              Content working copy to write to. Overrides the source resolved from content-source.yaml.
 ```

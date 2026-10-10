@@ -106,6 +106,7 @@ type ingestFlags struct {
 	maxConsecFail int
 	reverse       bool
 	trustSources  bool
+	trustIntake   bool
 	role          string
 	from          string
 	namespace     string
@@ -207,9 +208,7 @@ func runIngest(cmd *cobra.Command, args []string) error {
 		len(tasks), abs, branch, iflags.maxParallel, iflags.wallClockCap)
 
 	if iflags.trustSources {
-		fmt.Fprintln(cmd.ErrOrStderr(),
-			"warning: --trust-sources is set: agent permission prompts are disabled.\n"+
-				"Content from ingested sources will be executed without confirmation.")
+		fmt.Fprintln(cmd.ErrOrStderr(), trustWarning)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -252,11 +251,36 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// checkRoleTrust gates --trust-sources on a --role run (meerkat-mob#34).
+// A role run's prompts carry text an MCP caller deposited (researcher,
+// validator) or sessions typed (the librarian's rewrites), so turning
+// the agent's permission prompts off there needs a second, explicit
+// --trust-intake; with both it warns.
+func checkRoleTrust(cmd *cobra.Command, f ingestFlags) error {
+	if !f.trustSources {
+		return nil
+	}
+	if !f.trustIntake {
+		return errors.New("--trust-sources is refused for --role runs: their prompts carry text from MCP callers (intake deposits, session queries), " +
+			"which would then drive an agent with no permission prompts; add --trust-intake as well only if every identity that can deposit or search is trusted like code you merge unreviewed")
+	}
+	fmt.Fprintln(cmd.ErrOrStderr(), trustWarning+"\n"+
+		"With --role, that includes text MCP callers sent: intake deposits (question, sources, research body) and, for the librarian, session queries.")
+	return nil
+}
+
+// trustWarning is printed whenever --trust-sources takes effect.
+const trustWarning = "warning: --trust-sources is set: agent permission prompts are disabled.\n" +
+	"Content from ingested sources will be executed without confirmation."
+
 // runIngestRole is `mk ingest --role ...`: the intake pipeline's
 // researcher, validator and librarian (meerkat-mob issue H).
 func runIngestRole(cmd *cobra.Command) error {
 	role, err := ingest.ParseRole(iflags.role)
 	if err != nil {
+		return err
+	}
+	if err := checkRoleTrust(cmd, iflags); err != nil {
 		return err
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
