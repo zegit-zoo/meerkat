@@ -743,8 +743,9 @@ freshness: collection "notes" is behind-remote (the remote has commits this serv
   every item shows two.
 - **It is sent once per (session, collection, state)** (pin 2). The
   session is the key `mk_report_outcome` uses: an explicit
-  `session_id`, else the MCP session, else one bucket shared by every
-  sessionless call. A new state is a new advisory. A key suppresses for
+  `session_id`, else the MCP session, else one bucket shared by the
+  principal's sessionless calls. Every key is scoped to the caller's
+  principal (meerkat-mob#46). A new state is a new advisory. A key suppresses for
   30 minutes. At most 10,000 keys are kept (expired keys go first, then
   the oldest), and at most five advisories go on one result.
 - **It is bounded.** One line, at most 240 bytes, naming the collection
