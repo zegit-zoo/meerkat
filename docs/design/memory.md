@@ -104,6 +104,14 @@ sha256(issuer + "\x00" + subject)[:16]   , prefixed with a readable slug of the 
 - **Two issuers are two principals.** Same `sub` from a different `iss`
   is a different namespace, matching how the policy layer already treats
   them.
+- **It is a pseudonym, not a secret.** The slug shows up to 24
+  characters of the subject, and the hash is unkeyed and truncated to
+  64 bits, so anyone who can read the store, an intake key or an
+  intake page's `submitted_by` and can guess candidate subjects can
+  confirm whose namespace it is. The namespace is the on-store key
+  layout, so changing its derivation would strand every existing
+  personal memory; it stays as is until a migration is designed
+  (meerkat-mob#53). The traversal log does not carry it.
 
 ### Path safety
 
