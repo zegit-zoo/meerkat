@@ -449,3 +449,83 @@ func mustPolicy(t *testing.T, cfg *Config) *Policy {
 	}
 	return p
 }
+
+// TestConfig_Validate_PolicyFootguns covers the configurations that look
+// scoped but would let one provider's claims satisfy another's rules, and
+// the provider settings that need a second setting beside them.
+func TestConfig_Validate_PolicyFootguns(t *testing.T) {
+	two := []Provider{{Issuer: "https://a.example.com"}, {Issuer: "https://b.example.com"}}
+	one := two[:1]
+	cfg := func(providers []Provider, rules ...Rule) *Config {
+		return &Config{Resource: "https://m.example.com", Providers: providers, Rules: rules}
+	}
+	admin := func(r Rule) Rule { r.Collections = []string{"*"}; return r }
+	for _, tc := range []struct {
+		name    string
+		cfg     *Config
+		wantErr string
+	}{
+		{"groups without issuer across two providers", cfg(two, admin(Rule{Name: "ops", Groups: []string{"platform-admins"}})), "without issuer"},
+		{"emails without issuer across two providers", cfg(two, admin(Rule{Emails: []string{"a@example.com"}})), "emails without issuer"},
+		{"subjects without issuer across two providers", cfg(two, admin(Rule{Subjects: []string{"u1"}})), "subjects without issuer"},
+		{"groups with issuer across two providers", cfg(two, admin(Rule{Groups: []string{"g"}, Issuer: "https://a.example.com"})), ""},
+		{"no selector across two providers", cfg(two, admin(Rule{})), ""},
+		{"tenant-only across two providers", cfg(two, admin(Rule{Tenant: "t"})), ""},
+		{"groups without issuer, one provider", cfg(one, admin(Rule{Groups: []string{"g"}})), ""},
+		{"anonymous rule across two providers", cfg(two, Rule{Anonymous: true, Collections: []string{"pub"}}), ""},
+		{
+			"skip_issuer_check without require_tenant",
+			cfg([]Provider{{Issuer: "https://a.example.com", SkipIssuerCheck: true}}),
+			"skip_issuer_check requires",
+		},
+		{
+			"skip_issuer_check with require_tenant",
+			cfg([]Provider{{Issuer: "https://a.example.com", SkipIssuerCheck: true, RequireTenant: "t"}}),
+			"",
+		},
+		{"unknown token_type", cfg([]Provider{{Issuer: "https://a.example.com", TokenType: "id"}}), "token_type"},
+		{"token_type access", cfg([]Provider{{Issuer: "https://a.example.com", TokenType: TokenTypeAccess}}), ""},
+		{"empty allowed_azp value", cfg([]Provider{{Issuer: "https://a.example.com", AllowedAZP: []string{""}}}), "allowed_azp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("Validate() = %v, want nil", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("Validate() = nil, want error containing %q", tc.wantErr)
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("Validate() = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestEvaluate_UnverifiedEmailGrantsNothing: an identity whose provider
+// said the address is unverified is not matched by an emails: rule, though
+// the same address verified (or with no claim) is.
+func TestEvaluate_UnverifiedEmailGrantsNothing(t *testing.T) {
+	pol, err := NewPolicy(&Config{
+		Resource:  "https://m.example.com",
+		Providers: []Provider{{Issuer: "https://a.example.com"}},
+		Rules:     []Rule{{Name: "by-email", Emails: []string{"alice@example.com"}, Collections: []string{"runbooks"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := Identity{Subject: "u", Issuer: "https://a.example.com", Email: "Alice@Example.com"}
+	if !pol.Evaluate(id).CanRead("runbooks") {
+		t.Fatal("a verified (or unstated) email must still match")
+	}
+	id.EmailUnverified = true
+	if pol.Evaluate(id).CanRead("runbooks") {
+		t.Fatal("an unverified email matched an emails: rule")
+	}
+}
+
+func TestDenyAll(t *testing.T) {
+	g := DenyAll(Identity{Subject: "u"})
+	if g == nil || !g.Empty() || g.CanRead("anything") {
+		t.Fatalf("DenyAll must be non-nil and grant nothing, got %+v", g)
+	}
+}

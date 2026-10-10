@@ -307,7 +307,7 @@ auth:
   providers:
     - issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
       audience: api://meerkat
-      claims: { groups: groups, email: preferred_username, tenant: tid }
+      claims: { groups: groups, tenant: tid }
   rules:
     - name: sre
       groups: [sre, oncall]

@@ -154,6 +154,14 @@ func (cs CapabilitySet) Strings() []string {
 	return out
 }
 
+// DenyAll returns non-nil Grants that hold nothing, for id. It is the
+// fail-closed value for a code path that expected a policy and found none:
+// a nil *Grants means "no policy in force" and allows everything, so the
+// two must never be confused.
+func DenyAll(id Identity) *Grants {
+	return &Grants{byCollection: map[string]CapabilitySet{}, identity: id}
+}
+
 // Identity is a caller, as established by an authenticated token. It is
 // the input to policy evaluation and nothing else: it carries no
 // decisions, only verified assertions about who is asking.
@@ -168,6 +176,11 @@ type Identity struct {
 	// Email is the caller's email, from whichever claim the provider's
 	// claims.email mapping names. May be empty.
 	Email string
+	// EmailUnverified is true when the token carried an `email_verified`
+	// claim that was not true. Rules selecting on `emails:` never match
+	// such an identity. The zero value (claim absent, as at providers that
+	// do not emit it) is treated as verified.
+	EmailUnverified bool
 	// Groups is the caller's group/role membership, from the provider's
 	// claims.groups mapping. Values are compared case-insensitively by
 	// policy rules, since directory products disagree about the case of

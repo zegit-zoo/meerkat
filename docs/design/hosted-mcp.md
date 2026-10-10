@@ -249,7 +249,10 @@ auth:
       audience: api://meerkat          # defaults to auth.resource
       claims:
         groups: groups                 # "roles" for Entra app roles
-        email: preferred_username      # "email" by default
+        # email: leave at the default ("email"). Do NOT map it to
+        # preferred_username: Entra documents that claim as mutable and
+        # unfit for authorization, so an `emails:` rule would trust a value
+        # its owner can change. Select on `subjects:` (the stable oid/sub).
         tenant: tid                    # "tid" by default
       require_tenant: <tenant-id>      # optional; pins a multi-tenant issuer
 
@@ -272,6 +275,21 @@ auth:
       collections: [handbook]
       capabilities: [read]             # the only capability an anonymous rule may hold
 ```
+
+**With more than one provider**, a rule that selects on `subjects`,
+`emails` or `groups` must carry `issuer:` — validation refuses it
+otherwise, because a group name or email asserted by one identity
+provider is no evidence about another's (for Google, pin the directory
+with `claims.tenant: hd` plus `require_tenant`). An `emails:` rule never
+matches a token whose `email_verified` claim is present and not true, and
+`claims.email` should stay `email`: `preferred_username` (Entra) is
+mutable and unfit for authorization, so meerkat logs a warning if it is
+configured — select on `subjects:` (the stable `oid`/`sub`) instead.
+`skip_issuer_check` requires `require_tenant` and logs a warning at
+startup. Optional per-provider `token_type: access` (JWT `typ` of
+`at+jwt`, or an `scp`/`roles` claim) and `allowed_azp: [...]` (the
+token's `azp`/`appid`) stop an ID token issued to another application of
+a shared registration being used as an API token.
 
 **Selectors** are `subjects` (exact), `emails` (case-insensitive),
 `groups` (any-of, case-insensitive), `tenant`, `issuer` and `anonymous`.
