@@ -565,7 +565,11 @@ not_found | gave_up), `initial_query` (the agent's first query,
 verbatim), `pages` that answered, `attempted` collections in order,
 `quality` (accuracy, completeness, answer_quality in [0, 1], notes),
 and `fallback` (kind web | source | human | none, a summary of what the
-agent learned instead, its sources). `mk_search` accepts the same
+agent learned instead, its sources). A source must be an `https` URL to
+a public host: other schemes, credentials in the URL, and loopback,
+link-local, private or otherwise non-public literal addresses (and
+`localhost`) are refused, because the researcher agent is told to open
+every source it cites. Host names are not resolved at this point. `mk_search` accepts the same
 `session_id` so a stateless caller can group its calls; a caller with
 an MCP session need not pass one. The tool's description frames a miss
 as a contribution ("every report improves the next agent's
@@ -578,7 +582,7 @@ response (`{recorded, logged, intake, intake_id?}`):
 | Sink | Configured by | Carries |
 |---|---|---|
 | telemetry (always) | — | `meerkat.outcome.report` span with `result`, `fallback` (kinds), `pages`, `hops`, `tier_reached`, `has_quality`; `meerkat_retrieval_outcomes_total{outcome,fallback,recorded}` |
-| traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality; fallback; **the initial query in plaintext only with `query: plaintext`** |
+| traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality scores; fallback kind; hashed fallback sources and intake reference; **the initial query, fallback summary and sources, quality notes and intake reference in plaintext only with `query: plaintext`** |
 | intake store | `intake:` + the `intake-write` capability | the fallback summary as a raw page: `type: research-raw`, `status: unverified`, `source: agent-fallback`, with the question and the attempted path in its frontmatter |
 
 The disclosure rule holds exactly as before: the span and the metric
@@ -600,10 +604,26 @@ it is unset or shorter than 16 bytes. The librarian agent holds the key
 and joins the log against the manifest; nobody else can.
 
 What the log keeps in plaintext, by decision (2026-09-17): the outcome,
-timings, path shape, quality scores, the fallback kind, summary and
-sources, and the retrieval session's wrong-turn count and its searches
-by planner stage (`wrong_turns`, `stages{exact,fuzzy,prefix}`, counts
-only, present when the report closed a tracked session).
+timings, path shape, quality scores, the fallback kind, and the
+retrieval session's wrong-turn count and its searches by planner stage
+(`wrong_turns`, `stages{exact,fuzzy,prefix}`, counts only, present when
+the report closed a tracked session).
+
+Everything the caller writes as free text follows the query (below),
+not that list (meerkat-mob#53): without `query: plaintext` the fallback
+summary and the quality notes are dropped, each fallback source URL is
+HMAC-hashed (a URL can carry a token), and `intake_id` is hashed. With
+it they are stored as sent. Either way `intake_id` is stored without the
+depositor's namespace (`raw/<day>/<id>/page.md`); the id alone finds
+the intake item.
+
+**Pseudonymous, not anonymous.** The session hash is an HMAC of the MCP
+session ID (or of the caller's `session_id`), and the access log records
+that session ID in plaintext beside `sub`. An operator who holds the
+HMAC key and the access log can therefore join every entry, including
+any stored query, to the user who made it. The hashing keeps names and
+IDs out of a log that is shared more widely than the access log; it is
+not a guarantee against the operator.
 
 **The initial query is opt-in** (#124, MK-A-6; operator decision
 2026-10-02). It is what a librarian reads to judge how well the client
@@ -629,8 +649,9 @@ observability:
 ```
 
 **Data classification** (the company taxonomy, provisional until the
-asset catalogue, MK-A-4): a traversal-log entry is `internal`; with
-`query: plaintext` it also carries `personal-data: identifier`.
+asset catalogue, MK-A-4): a traversal-log entry is `internal` and
+pseudonymous (see above); with `query: plaintext` it also carries
+`personal-data: identifier`.
 
 Threat model:
 
@@ -639,7 +660,8 @@ Threat model:
   takes plaintext and never writes it; spans get only what the
   telemetry table above lists.
 - *The log itself leaks.* It contains hashes and, with
-  `query: plaintext`, queries. Without the key the hashes are opaque;
+  `query: plaintext`, queries and other caller text. Without the key the
+  hashes are opaque;
   the queries are what an agent typed and should be handled like a
   query log anywhere: keep the bucket private, rotate the key when a
   librarian leaves (old entries become unjoinable, which is the
@@ -650,12 +672,24 @@ Threat model:
   and anonymous callers can report but never write intake.
 - *Retention.* An application job, not bucket lifecycle (Garage has
   none): `retention_days` deletes day prefixes older than the window,
-  on startup and at most hourly on the write path. The default is
-  **90 days** (#124). It was unbounded before, because this log is the
-  self-improving loop's training data; `retention_days: 0` still keeps
-  everything, for an operator who wants that. The window covers every
-  object under the prefix, the cache's temperature records included;
-  warm start reads only the last `cache.warm_start_days`.
+  on startup, then hourly on a background ticker for as long as the
+  process runs, and at most hourly from the write paths (session
+  reports and temperature flushes) as a backstop. A day that cannot be
+  deleted (a policy without delete permission, a transient error) is
+  logged to stderr, counted, and retried on the next pass; it does not
+  hold up later days. A failure on the startup pass still fails
+  startup. The S3 sink pages through the day listing, so no day is
+  missed past the first 1,000. The default is **90 days** (#124). It
+  was unbounded before, because this log is the self-improving loop's
+  training data; `retention_days: 0` still keeps everything, for an
+  operator who wants that. The window covers every object under the
+  prefix, the cache's temperature records included.
+- *Warm start reads only temperatures.* `cache.warm_start_days` reads
+  the temperature records (`*-temperature.json`) of the last days and
+  nothing else: session entries in the same day prefixes are filtered
+  out by name before anything is fetched, so their number does not
+  affect startup. Each object read back is capped at 4 MiB on both
+  sinks.
 
 Not in this change: a session span that parents the per-call spans and
 the SLI histograms (issue F), the warm-start feed that pre-mounts the

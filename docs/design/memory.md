@@ -104,6 +104,14 @@ sha256(issuer + "\x00" + subject)[:16]   , prefixed with a readable slug of the 
 - **Two issuers are two principals.** Same `sub` from a different `iss`
   is a different namespace, matching how the policy layer already treats
   them.
+- **It is a pseudonym, not a secret.** The slug shows up to 24
+  characters of the subject, and the hash is unkeyed and truncated to
+  64 bits, so anyone who can read the store, an intake key or an
+  intake page's `submitted_by` and can guess candidate subjects can
+  confirm whose namespace it is. The namespace is the on-store key
+  layout, so changing its derivation would strand every existing
+  personal memory; it stays as is until a migration is designed
+  (meerkat-mob#53). The traversal log does not carry it.
 
 ### Path safety
 
@@ -578,7 +586,26 @@ neither            →  create-only
 Not every S3 implementation enforces write preconditions (Garage 2.4
 does not), so `OpenS3` probes for the property before trusting it and
 refuses to open a shared store on a provider that lacks it; see
-`docs/design/object-stores.md`.
+`docs/design/object-stores.md`. The probe compares against an ETag
+built to differ from the real one in its first character, and refuses
+a provider that returns no ETag on a write (an update could never be
+made conditional there).
+
+**`single_writer: true` means one writing process, counting every
+command.** Its lock is a mutex inside one process. `mk mcp serve` writes
+a collection's memory store and the intake store, and so does
+`mk ingest --role librarian` (filing, parking, promotions) — usually
+from cron, while the server runs. Both are writers. On a provider that
+ignores write preconditions (Garage), two of them overlapping can lose
+an update, file a needs-human issue twice, or resurrect a parked marker
+after it was cleared. A deployment that declares `single_writer: true`
+must therefore make sure only one of them writes at a time: run the
+librarian while the server is stopped or has no `intake:`/`memory:`
+write path, serialise librarian runs (no overlapping cron), or move the
+stores to a provider that enforces conditional writes (AWS S3, Versity
+Gateway, GCS), where none of this applies. meerkat does not take a
+lease: on the providers that need `single_writer`, a create-only lease
+object is exactly the write they do not enforce.
 
 A failed precondition is a `*ConflictError` wrapping `ErrConflict`,
 carrying the revision that is actually there, and the tool renders it as
