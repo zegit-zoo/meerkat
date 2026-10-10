@@ -435,7 +435,8 @@ meerkat ingest [flags]
       --source string                  Restrict to one source id from sources.yaml (e.g. policies, adr, runbooks).
       --status strings                 Restrict to pages with these frontmatter statuses (default: placeholder,ingest-failed).
       --subagent string                OpenCode subagent type (default: general).
-      --trust-sources                  Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged.
+      --trust-intake                   With --role and --trust-sources: accept that text MCP callers sent (intake deposits, session queries) reaches an agent running without permission prompts.
+      --trust-sources                  Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged. With --role it also needs --trust-intake.
       --wall-clock-cap int             Per-page wall-clock cap in seconds. (default 300)
       --workdir-kb string              Content working copy to write to. Overrides the source resolved from content-source.yaml.
 ```
@@ -739,7 +740,12 @@ allow_unauthenticated.
 
 With NO auth: block configured the server is unauthenticated and every
 mounted collection is readable by any caller — the same posture as
-'mcp serve'. Bind loopback (the default) or put a gateway in front.
+'mcp serve'. Bind loopback (the default) or put a gateway in front: the
+server REFUSES to start on a non-loopback address with no authentication
+unless --insecure-no-auth is given (or the auth: block says
+allow_unauthenticated: true). An auth: block that names no providers, or
+carries a key meerkat does not know, is a startup error rather than a
+silent "no auth".
 
 A collection whose content-source.yaml entry carries a "refresh:" block
 is re-checked while the server runs: a metadata-only probe every
@@ -789,6 +795,7 @@ meerkat mcp serve-http [flags]
 ```text
       --auth-config string   Path to a standalone YAML policy file with a top-level auth: block. Overrides the auth: block in content-source.yaml.
       --host string          Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
+      --insecure-no-auth     Allow binding a non-loopback address with no authentication configured. Without it the server refuses to start in that state; use it only when a gateway in front authenticates every request.
       --path string          Path the MCP Streamable HTTP endpoint is mounted at (default "/mcp")
       --port int             Bind port (default 4005)
       --security-txt         Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
@@ -879,6 +886,10 @@ frontmatter (front): trust_tier (unverified | machine-confirmed |
 human-reviewed, derived from front.verified — SPEC.md §5.3) and stale
 (whether today is on/after front.stale_after — SPEC.md §5.5), plus the
 collection the page was served from.
+
+Text output has terminal control characters (C0 and C1, except newline
+and tab) removed, so content from a remote collection cannot drive the
+terminal; --json carries the stored values exactly.
 ```
 
 #### Usage

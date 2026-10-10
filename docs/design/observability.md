@@ -230,11 +230,17 @@ staging discipline.
 
 ## Context propagation
 
-- **Inbound.** W3C `traceparent` is extracted from every request. A
-  malformed header yields an invalid parent span context, which is the
-  same thing as none: the request is served identically and a fresh root
-  trace is started. A caller cannot change a response, or suppress
-  instrumentation, with a broken header.
+- **Inbound.** The root span is created before authentication, so a
+  caller's `traceparent` is **not** trusted by default: it is honoured
+  (trace ID and sampled flag continued) only when the request's TCP peer
+  is listed in `traces.trusted_sources` (CIDRs or IPs; the peer address,
+  never `X-Forwarded-For`). Everyone else gets a fresh root span with a
+  meerkat-chosen trace ID, sampled at `sample_ratio`, so a caller cannot
+  force sampling, crowd out real spans or file spans under another
+  trace. Behind a gateway, list the gateway's address. A malformed header
+  from a trusted peer yields an invalid parent, which is the same thing
+  as none: the request is served identically. A caller cannot change a
+  response, or suppress instrumentation, with a broken header.
 - **Outbound.** OIDC discovery and JWKS fetches go through
   `Telemetry.HTTPClient`, which injects `traceparent` and emits a client
   span — so "the IdP took 400ms" and "meerkat took 400ms" stop looking
@@ -246,8 +252,12 @@ staging discipline.
   would push their key/value pairs to the identity provider. Not
   carrying it is a stronger statement than carrying it carefully.
 - **Sampling is parent-based.** `sample_ratio` governs traces this
-  process *starts*. A trace a gateway already sampled is not re-sampled
-  here, because half a trace is worse than none.
+  process *starts*. A trace a trusted gateway already sampled is not
+  re-sampled here, because half a trace is worse than none.
+- **Span rate cap.** A token bucket in front of the exporter queue
+  admits at most `traces.max_spans_per_second` ended spans per second
+  (default 1000, burst of one second; negative lifts the cap). The excess
+  is dropped and counted in `meerkat_otel_spans_dropped_total`.
 
 ## Configuration and precedence
 
@@ -257,8 +267,6 @@ observability:
   environment: production
 
   logs:
-    level: info
-    format: json
     include_trace_context: true
 
   metrics:
@@ -268,6 +276,8 @@ observability:
   traces:
     enabled: true
     sample_ratio: 0.10
+    # trusted_sources: [10.0.0.0/8]   # peers whose traceparent is honoured; default none
+    # max_spans_per_second: 1000
 
   otlp:
     endpoint: otel-collector.observability.svc:4317
@@ -292,7 +302,10 @@ A field **written** in the block wins. A field **left out** falls back
 to the standard OpenTelemetry variable for that setting, then to
 meerkat's default. The fallback is per **field**, not per block: a file
 that sets only `traces.enabled: true` still picks its endpoint up from
-`OTEL_EXPORTER_OTLP_ENDPOINT`.
+`OTEL_EXPORTER_OTLP_ENDPOINT`. A file `otlp.endpoint:` beats the
+signal-specific `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and
+`..._METRICS_ENDPOINT` as well; those apply only when the file names no
+endpoint.
 
 The direction makes both audiences right. The file is the artifact under
 review — an operator who wrote `sample_ratio: 0.1` and reads the
@@ -346,7 +359,9 @@ headers) is refused at config load.
 
 `observability:` is validated in `parseConfig`, beside `auth:`, so a
 plaintext `http://` endpoint with no explicit `insecure: true`, an
-unsupported protocol, a sample ratio outside `[0,1]`, an unsupported
+unsupported protocol, `headers_env` (or `OTEL_EXPORTER_OTLP_HEADERS`)
+together with `insecure: true` towards a non-loopback endpoint, an invalid
+`trusted_sources` entry, a sample ratio outside `[0,1]`, an unsupported
 `OTEL_TRACES_SAMPLER`, or a malformed `headers_env` all fail the process
 where an operator is looking at the file — rather than producing a
 server that exports nothing and says so nowhere.
@@ -550,7 +565,11 @@ not_found | gave_up), `initial_query` (the agent's first query,
 verbatim), `pages` that answered, `attempted` collections in order,
 `quality` (accuracy, completeness, answer_quality in [0, 1], notes),
 and `fallback` (kind web | source | human | none, a summary of what the
-agent learned instead, its sources). `mk_search` accepts the same
+agent learned instead, its sources). A source must be an `https` URL to
+a public host: other schemes, credentials in the URL, and loopback,
+link-local, private or otherwise non-public literal addresses (and
+`localhost`) are refused, because the researcher agent is told to open
+every source it cites. Host names are not resolved at this point. `mk_search` accepts the same
 `session_id` so a stateless caller can group its calls; a caller with
 an MCP session need not pass one. The tool's description frames a miss
 as a contribution ("every report improves the next agent's
@@ -563,7 +582,7 @@ response (`{recorded, logged, intake, intake_id?}`):
 | Sink | Configured by | Carries |
 |---|---|---|
 | telemetry (always) | — | `meerkat.outcome.report` span with `result`, `fallback` (kinds), `pages`, `hops`, `tier_reached`, `has_quality`; `meerkat_retrieval_outcomes_total{outcome,fallback,recorded}` |
-| traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality; fallback; **the initial query in plaintext only with `query: plaintext`** |
+| traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality scores; fallback kind; hashed fallback sources and intake reference; **the initial query, fallback summary and sources, quality notes and intake reference in plaintext only with `query: plaintext`** |
 | intake store | `intake:` + the `intake-write` capability | the fallback summary as a raw page: `type: research-raw`, `status: unverified`, `source: agent-fallback`, with the question and the attempted path in its frontmatter |
 
 The disclosure rule holds exactly as before: the span and the metric
@@ -585,10 +604,26 @@ it is unset or shorter than 16 bytes. The librarian agent holds the key
 and joins the log against the manifest; nobody else can.
 
 What the log keeps in plaintext, by decision (2026-09-17): the outcome,
-timings, path shape, quality scores, the fallback kind, summary and
-sources, and the retrieval session's wrong-turn count and its searches
-by planner stage (`wrong_turns`, `stages{exact,fuzzy,prefix}`, counts
-only, present when the report closed a tracked session).
+timings, path shape, quality scores, the fallback kind, and the
+retrieval session's wrong-turn count and its searches by planner stage
+(`wrong_turns`, `stages{exact,fuzzy,prefix}`, counts only, present when
+the report closed a tracked session).
+
+Everything the caller writes as free text follows the query (below),
+not that list (meerkat-mob#53): without `query: plaintext` the fallback
+summary and the quality notes are dropped, each fallback source URL is
+HMAC-hashed (a URL can carry a token), and `intake_id` is hashed. With
+it they are stored as sent. Either way `intake_id` is stored without the
+depositor's namespace (`raw/<day>/<id>/page.md`); the id alone finds
+the intake item.
+
+**Pseudonymous, not anonymous.** The session hash is an HMAC of the MCP
+session ID (or of the caller's `session_id`), and the access log records
+that session ID in plaintext beside `sub`. An operator who holds the
+HMAC key and the access log can therefore join every entry, including
+any stored query, to the user who made it. The hashing keeps names and
+IDs out of a log that is shared more widely than the access log; it is
+not a guarantee against the operator.
 
 **The initial query is opt-in** (#124, MK-A-6; operator decision
 2026-10-02). It is what a librarian reads to judge how well the client
@@ -614,8 +649,9 @@ observability:
 ```
 
 **Data classification** (the company taxonomy, provisional until the
-asset catalogue, MK-A-4): a traversal-log entry is `internal`; with
-`query: plaintext` it also carries `personal-data: identifier`.
+asset catalogue, MK-A-4): a traversal-log entry is `internal` and
+pseudonymous (see above); with `query: plaintext` it also carries
+`personal-data: identifier`.
 
 Threat model:
 
@@ -624,7 +660,8 @@ Threat model:
   takes plaintext and never writes it; spans get only what the
   telemetry table above lists.
 - *The log itself leaks.* It contains hashes and, with
-  `query: plaintext`, queries. Without the key the hashes are opaque;
+  `query: plaintext`, queries and other caller text. Without the key the
+  hashes are opaque;
   the queries are what an agent typed and should be handled like a
   query log anywhere: keep the bucket private, rotate the key when a
   librarian leaves (old entries become unjoinable, which is the
@@ -635,12 +672,24 @@ Threat model:
   and anonymous callers can report but never write intake.
 - *Retention.* An application job, not bucket lifecycle (Garage has
   none): `retention_days` deletes day prefixes older than the window,
-  on startup and at most hourly on the write path. The default is
-  **90 days** (#124). It was unbounded before, because this log is the
-  self-improving loop's training data; `retention_days: 0` still keeps
-  everything, for an operator who wants that. The window covers every
-  object under the prefix, the cache's temperature records included;
-  warm start reads only the last `cache.warm_start_days`.
+  on startup, then hourly on a background ticker for as long as the
+  process runs, and at most hourly from the write paths (session
+  reports and temperature flushes) as a backstop. A day that cannot be
+  deleted (a policy without delete permission, a transient error) is
+  logged to stderr, counted, and retried on the next pass; it does not
+  hold up later days. A failure on the startup pass still fails
+  startup. The S3 sink pages through the day listing, so no day is
+  missed past the first 1,000. The default is **90 days** (#124). It
+  was unbounded before, because this log is the self-improving loop's
+  training data; `retention_days: 0` still keeps everything, for an
+  operator who wants that. The window covers every object under the
+  prefix, the cache's temperature records included.
+- *Warm start reads only temperatures.* `cache.warm_start_days` reads
+  the temperature records (`*-temperature.json`) of the last days and
+  nothing else: session entries in the same day prefixes are filtered
+  out by name before anything is fetched, so their number does not
+  affect startup. Each object read back is capped at 4 MiB on both
+  sinks.
 
 Not in this change: a session span that parents the per-call spans and
 the SLI histograms (issue F), the warm-start feed that pre-mounts the
@@ -654,8 +703,9 @@ pipeline that validates and places intake pages (issue H).
   the access log) is met, and shipping the logs themselves needs the
   OTel log SDK plus an slog bridge — a materially larger dependency and
   test surface for a signal most deployments already collect from
-  stderr. The `logs:` config block is present and honoured for level,
-  format and correlation.
+  stderr. Of the `logs:` block only `include_trace_context` has an effect;
+  `level` and `format` are deprecated, ignored, and warned about at
+  startup.
 - **Per-collection operational spans.** A search fans out across
   collections, and the only per-collection thing a span could add is the
   collection's name, which may not be exported. Per-collection detail

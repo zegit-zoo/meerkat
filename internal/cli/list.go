@@ -109,14 +109,15 @@ Default output is "id  title  status". --json adds frontmatter.`,
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 			}
 
+			out := textOut(cmd)
 			for _, r := range refs {
 				st := r.Page.Front.Status
 				if st == "" {
 					st = "-"
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%-55s  %-12s  %s\n", displayID(reg, r), st, r.Page.Title)
+				fmt.Fprintf(out, "%-55s  %-12s  %s\n", displayID(reg, r), st, r.Page.Title)
 				if r.Page.Front.FailureReason != "" {
-					fmt.Fprintf(cmd.OutOrStdout(), "%-55s  %-12s  ↳ %s\n", "", "", r.Page.Front.FailureReason)
+					fmt.Fprintf(out, "%-55s  %-12s  ↳ %s\n", "", "", r.Page.Front.FailureReason)
 				}
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "\n%d pages\n", len(refs))
@@ -180,14 +181,15 @@ func listCollections(cmd *cobra.Command, reg *collections.Registry, asJSON bool)
 	if asJSON {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 	}
+	w := textOut(cmd)
 	for _, e := range out {
 		label := e.Name
 		if e.Path != "" {
 			label = e.Path
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%-28s  %-8s  %5d pages  %s\n", label, e.Type, e.Pages, e.Source)
+		fmt.Fprintf(w, "%-28s  %-8s  %5d pages  %s\n", label, e.Type, e.Pages, e.Source)
 		if e.PageErrors != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "%-28s  %s\n", "", "↳ "+e.PageErrors)
+			fmt.Fprintf(w, "%-28s  %s\n", "", "↳ "+e.PageErrors)
 		}
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "\n%d collections\n", len(out))

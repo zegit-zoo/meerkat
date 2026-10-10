@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -179,7 +178,7 @@ func reportOutcomeTool(reg *collections.Registry) mcp.Tool {
 		mcp.WithArray("pages", mcp.Description("Qualified page IDs ('collection:id') that answered, if any."), mcp.WithStringItems()),
 		mcp.WithArray("attempted", mcp.Description("Collections searched, in order (names or tree paths)."), mcp.WithStringItems()),
 		mcp.WithObject("quality", mcp.Description("{accuracy, completeness, answer_quality: 0..1, notes?}")),
-		mcp.WithObject("fallback", mcp.Description("{kind: web|source|human|none, summary?, sources?: [urls]}")),
+		mcp.WithObject("fallback", mcp.Description("{kind: web|source|human|none, summary?, sources?: [https URLs to public hosts]}")),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithDestructiveHintAnnotation(false),
 		mcp.WithIdempotentHintAnnotation(true),
@@ -267,8 +266,8 @@ func parseOutcomeArgs(req mcp.CallToolRequest) (outcomeArgs, error) {
 				if !ok || strings.TrimSpace(s) == "" {
 					return a, errors.New("fallback.sources must be strings")
 				}
-				if u, err := url.Parse(s); err != nil || (u.Scheme != "https" && u.Scheme != "http" && u.Scheme != "git" && u.Scheme != "file") {
-					return a, fmt.Errorf("fallback.sources entry %q is not an http(s)/git/file URL", s)
+				if err := validateDepositSource(s); err != nil {
+					return a, err
 				}
 				a.fallback.Sources = append(a.fallback.Sources, s)
 			}
@@ -393,7 +392,7 @@ func reportOutcomeHandler(reg *collections.Registry, opts transportOptions) mcps
 			case !g.CanIntake():
 				resp["intake"] = "not_permitted"
 			default:
-				id, err := writeIntake(ctx, opts.Outcome.Intake, g, args, started)
+				id, err := writeIntake(ctx, opts.Outcome.Intake, g, depositArgs(g, view, args), started)
 				if err != nil {
 					telemetry.Record(ctx).RetrievalOutcome(args.outcome, args.fallback.Kind, telemetry.OutcomeError)
 					telemetry.Fail(span, telemetry.OutcomeError)
@@ -480,6 +479,7 @@ func writeIntake(ctx context.Context, store memory.Store, g *authz.Grants, a out
 		"fallback_kind":    a.fallback.Kind,
 		"question":         a.initialQuery,
 		"attempted":        a.attempted,
+		"target_kb":        depositTarget(a.attempted),
 		"reported_at":      now.UTC().Format(time.RFC3339),
 		"session_id":       a.sessionID,
 		"submitted_by":     memory.Namespace(g.Identity()),

@@ -59,8 +59,9 @@ Examples:
 				return nil
 			}
 
+			out := textOut(cmd)
 			for i, r := range results {
-				fmt.Fprintf(cmd.OutOrStdout(),
+				fmt.Fprintf(out,
 					"%d. %s  (score %.2f)\n   %s\n",
 					i+1, displayID(reg, collections.PageRef{Collection: r.Collection, Page: r.Page}), r.Score, r.Page.Title,
 				)
@@ -71,19 +72,19 @@ Examples:
 					} else if !r.TargetResolved {
 						target += " (unresolved)"
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "   -> %s", target)
+					fmt.Fprintf(out, "   -> %s", target)
 					if r.Hint != "" {
-						fmt.Fprintf(cmd.OutOrStdout(), " — %s", r.Hint)
+						fmt.Fprintf(out, " — %s", r.Hint)
 					}
-					fmt.Fprintln(cmd.OutOrStdout())
+					fmt.Fprintln(out)
 				}
 				if r.Snippet != "" {
-					fmt.Fprintf(cmd.OutOrStdout(), "   %s\n", oneLine(r.Snippet))
+					fmt.Fprintf(out, "   %s\n", oneLine(r.Snippet))
 				}
 				if showBody {
-					fmt.Fprintln(cmd.OutOrStdout(), strings.Repeat("-", 60))
-					fmt.Fprintln(cmd.OutOrStdout(), r.Page.Body)
-					fmt.Fprintln(cmd.OutOrStdout(), strings.Repeat("-", 60))
+					fmt.Fprintln(out, strings.Repeat("-", 60))
+					fmt.Fprintln(out, r.Page.Body)
+					fmt.Fprintln(out, strings.Repeat("-", 60))
 				}
 			}
 			return nil

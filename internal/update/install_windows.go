@@ -43,11 +43,11 @@ func swapWithBackupSudo(_, _ string) (string, error) {
 func reExec(currentExe string) error {
 	// #nosec G204 -- currentExe is os.Executable() resolved through
 	// EvalSymlinks; same trust boundary as the running process.
-	cmd := exec.Command(currentExe, os.Args[1:]...)
+	cmd := exec.Command(currentExe, reExecArgv(currentExe)[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
+	cmd.Env = reExecEnv(os.Environ())
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf(

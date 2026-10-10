@@ -189,8 +189,9 @@ func (n *TreeNode) ChildNode(name string) (*TreeNode, bool) {
 }
 
 // LazySource returns the source a cold child is mounted from, and the
-// config path relative local paths resolve against; nil for a node
-// that was resolved at startup.
+// path relative local paths resolve against (the declaring manifest; a
+// local child's path is already absolute by then); nil for a node that
+// was resolved at startup.
 func (n *TreeNode) LazySource() (*Source, string) {
 	if n == nil {
 		return nil, ""
@@ -306,6 +307,9 @@ func (m Manifest) Validate() error {
 		if err := refuseManifestTokenEnv(ManifestFile+": contract", m.Contract); err != nil {
 			return err
 		}
+		if m.Contract.DeclaredMethod() == UpdateDirect {
+			return fmt.Errorf("%s: contract: method: %s is refused in %s: it tells agents to write into the source, so only the operator's content-source.yaml may declare it", ManifestFile, UpdateDirect, ManifestFile)
+		}
 	}
 	seen := make(map[string]bool, len(m.Children))
 	for i, c := range m.Children {
@@ -333,6 +337,9 @@ func (m Manifest) Validate() error {
 			return err
 		}
 		if err := refuseManifestTokenEnv(p+".source.update", src.Update); err != nil {
+			return err
+		}
+		if err := refuseManifestOnlyKeys(p+".source", src); err != nil {
 			return err
 		}
 	}
@@ -394,18 +401,41 @@ func sourceKey(s Source, cfgPath string) string {
 // ResolveTree resolves `tree:` — the root source — into the flat list of
 // mounted collections (root first, then children in manifest order,
 // depth-first) and the tree they form.
+//
+// ResolveTree applies no `manifest_children:` allowlist: every child
+// location a manifest names is accepted, subject only to the refusals
+// that hold whatever the operator allows (manifest-only keys, a local
+// child inside meerkat's cache). It is for callers that build the tree
+// themselves and trust every manifest in it. A content-source.yaml
+// `tree:` goes through ResolveRuntimeCollections, which applies the
+// operator's policy (see manifest_policy.go).
 func ResolveTree(ctx context.Context, root Source, cfgPath string) ([]ResolvedCollection, *Tree, error) {
+	return resolveTree(ctx, root, cfgPath, &childRules{unrestricted: true})
+}
+
+// resolveTree is ResolveTree under explicit child rules.
+func resolveTree(ctx context.Context, root Source, cfgPath string, rules *childRules) ([]ResolvedCollection, *Tree, error) {
 	t := &Tree{Nodes: map[string]*TreeNode{}}
 	seenSource := map[string]string{}
 	var out []ResolvedCollection
-	err := resolveTreeNode(ctx, root, cfgPath, "", "", 0, MaxTreeDepth, MountEager, t, seenSource, &out)
+	w := &treeWalk{t: t, seenSource: seenSource, out: &out, rules: rules}
+	err := w.node(ctx, root, cfgPath, "", "", 0, MaxTreeDepth, MountEager)
 	if err != nil {
 		return nil, nil, err
 	}
 	return out, t, nil
 }
 
-func resolveTreeNode(ctx context.Context, src Source, cfgPath, parent, parentPath string, depth, limit int, mount string, t *Tree, seenSource map[string]string, out *[]ResolvedCollection) error {
+// treeWalk is the state one ResolveTree walk threads through the tree.
+type treeWalk struct {
+	t          *Tree
+	seenSource map[string]string
+	out        *[]ResolvedCollection
+	rules      *childRules
+}
+
+func (w *treeWalk) node(ctx context.Context, src Source, cfgPath, parent, parentPath string, depth, limit int, mount string) error {
+	t, seenSource, out := w.t, w.seenSource, w.out
 	if depth > MaxTreeDepth {
 		return fmt.Errorf("tree: knowledge base under %q would be at depth %d, over the hard cap of %d levels (root = 0) — flatten the tree or move it under a shallower hub", parentPath, depth, MaxTreeDepth)
 	}
@@ -487,6 +517,15 @@ func resolveTreeNode(ctx context.Context, src Source, cfgPath, parent, parentPat
 		csrc.Layout = MergeLayout(csrc.Layout)
 		csrc.Update.Normalize()
 		csrc.defaultRefresh()
+		// The child's location is checked against the operator's policy
+		// before anything is resolved or recorded, lazy children included.
+		// A relative local path resolves against the directory this
+		// manifest sits in, never the operator's config directory.
+		csrc, err = w.rules.admit(fmt.Sprintf("tree: %s of %q: child %q", ManifestFile, m.Name, c.Name), csrc, rc.Dir)
+		if err != nil {
+			return err
+		}
+		manifestPath := filepath.Join(rc.Dir, ManifestFile)
 		ref := ChildRef{Name: c.Name, Mount: cm, SourceType: c.Source.Type}
 		if cm == MountLazy {
 			// Declared, not mounted: recorded so the tree is complete and
@@ -499,7 +538,7 @@ func resolveTreeNode(ctx context.Context, src Source, cfgPath, parent, parentPat
 				return fmt.Errorf("tree: knowledge base %q would be at depth %d, over the cap", cpath, depth+1)
 			}
 			lazy := csrc
-			coldNode := &TreeNode{Name: c.Name, Path: cpath, Depth: depth + 1, Parent: m.Name, Mounted: false, Mount: cm, Placement: PlacementShared, SourceType: c.Source.Type, source: &lazy, configPath: cfgPath}
+			coldNode := &TreeNode{Name: c.Name, Path: cpath, Depth: depth + 1, Parent: m.Name, Mounted: false, Mount: cm, Placement: PlacementShared, SourceType: c.Source.Type, source: &lazy, configPath: manifestPath}
 			t.Nodes[c.Name] = coldNode
 			if node.childNodes == nil {
 				node.childNodes = map[string]*TreeNode{}
@@ -512,7 +551,7 @@ func resolveTreeNode(ctx context.Context, src Source, cfgPath, parent, parentPat
 			continue
 		}
 		before := len(*out)
-		if err := resolveTreeNode(ctx, csrc, cfgPath, m.Name, path, depth+1, childLimit, cm, t, seenSource, out); err != nil {
+		if err := w.node(ctx, csrc, manifestPath, m.Name, path, depth+1, childLimit, cm); err != nil {
 			return err
 		}
 		mounted := (*out)[before]

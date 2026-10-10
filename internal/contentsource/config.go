@@ -126,6 +126,10 @@ type Config struct {
 	Cache *CacheSpec `yaml:"cache,omitempty"`
 	// Sessions bounds retrieval sessions in time. See sessions.go.
 	Sessions *SessionsSpec `yaml:"sessions,omitempty"`
+	// ManifestChildren is the operator's allowlist for the child sources
+	// a tree's manifests may declare. Only meaningful with tree:. See
+	// manifest_policy.go.
+	ManifestChildren *ChildPolicy `yaml:"manifest_children,omitempty"`
 }
 
 // Collection is one named entry of a `collections:` list — a Source
@@ -281,6 +285,10 @@ type Source struct {
 	// entirely. See update.go and docs/design/update-contract.md.
 	Update *UpdateSpec `yaml:"update,omitempty"`
 
+	// manifest is set on a source a manifest.yaml declared (see
+	// manifest_policy.go); nil for every operator-declared source.
+	manifest *manifestOrigin
+
 	// Memory declares a WRITABLE memory store for this collection: where
 	// the hosted MCP server's mk_save_memory tool saves personal, team
 	// and global memory documents. Absent (the default, and what every
@@ -350,6 +358,9 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 	if err := yaml.Unmarshal(body, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse %s: %w", displayPath, err)
 	}
+	if err := checkAuthSubtree(body); err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", displayPath, err)
+	}
 	if cfg.Content.Type == "" {
 		cfg.Content.Type = TypeNone
 	}
@@ -389,6 +400,12 @@ func parseConfig(body []byte, displayPath string) (Config, error) {
 		if cfg.Intake.Refresh != nil {
 			return Config{}, fmt.Errorf("%s: intake takes no refresh: block — it is written, never served", displayPath)
 		}
+	}
+	if err := cfg.ManifestChildren.Validate("manifest_children"); err != nil {
+		return Config{}, fmt.Errorf("%s: %w", displayPath, err)
+	}
+	if cfg.ManifestChildren != nil && cfg.Tree == nil {
+		return Config{}, fmt.Errorf("%s: manifest_children: applies to a tree: deployment only — there are no manifests to restrict", displayPath)
 	}
 	if cfg.Tree != nil {
 		if cfg.Content.Type != TypeNone || len(cfg.Collections) > 0 {

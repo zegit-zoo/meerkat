@@ -17,11 +17,17 @@ import (
 // equivalent. There the caller falls back to telling the user to
 // re-run from an elevated PowerShell.
 func installStagedWithSudo(stagedPath, currentExe string) error {
-	backupPath, err := swapWithBackupSudo(stagedPath, currentExe)
+	// mk update only needs the backup transiently, so it gets an
+	// unguessable name: nothing can have been pre-planted there.
+	suffix, err := randomHexSuffix()
+	if err != nil {
+		return fmt.Errorf("generate backup suffix: %w", err)
+	}
+	backupPath, err := swapWithBackupSudoAt(stagedPath, currentExe, currentExe+".old-"+suffix)
 	if err != nil {
 		return err
 	}
-	_ = runCommand("sudo", "rm", "-f", backupPath)
+	_ = runCommand("sudo", "rm", "-f", "--", backupPath)
 	return nil
 }
 
@@ -35,6 +41,24 @@ func installStagedWithSudo(stagedPath, currentExe string) error {
 // already verified before the swap ran); InstallAtomic in
 // bootstrap.go keeps it until its own post-install check passes.
 func swapWithBackupSudo(stagedPath, currentExe string) (backupPath string, err error) {
+	// This variant keeps the stable "<exe>.old" name because
+	// meerkat-bootstrap's RemoveBackup/RestoreBackup look for it.
+	// `mv f link-to-dir` would move f *into* the directory a planted
+	// symlink points at, so the name is first cleared with `rm -f`
+	// (which unlinks a symlink without following it, and refuses a real
+	// directory) before the move.
+	backupPath = currentExe + ".old"
+	if err := runCommand("sudo", "rm", "-f", "--", backupPath); err != nil {
+		return "", fmt.Errorf("sudo clear backup path: %w", err)
+	}
+	return swapWithBackupSudoAt(stagedPath, currentExe, backupPath)
+}
+
+// swapWithBackupSudoAt does the sudo stage/backup/promote sequence with
+// the backup at backupPath. Every mv/cp/rm passes "--" so no path can
+// be read as an option, and callers choose a backupPath that cannot be
+// a pre-planted directory symlink (random name, or cleared first).
+func swapWithBackupSudoAt(stagedPath, currentExe, backupPath string) (string, error) {
 	// Same rationale as installStaged's copyFileToNewTemp in
 	// install.go: the staging path must not be a fixed, guessable
 	// name, because a pre-planted symlink there would make `sudo cp`
@@ -43,34 +67,34 @@ func swapWithBackupSudo(stagedPath, currentExe string) (backupPath string, err e
 	// call os.CreateTemp here (this process may not have write access
 	// to currentExe's directory at all, which is exactly why sudo is
 	// needed), so instead we pick an unguessable name ourselves and
-	// have the privileged `cp` create it fresh. The backup path keeps
-	// its fixed name: it's only ever written via `mv`/rename, which
-	// replaces the directory entry itself rather than following it,
-	// so a pre-planted symlink there can't be written through.
+	// have the privileged `cp` create it fresh.
 	suffix, err := randomHexSuffix()
 	if err != nil {
 		return "", fmt.Errorf("generate staging suffix: %w", err)
 	}
 	stagingPath := currentExe + ".new-" + suffix
-	backupPath = currentExe + ".old"
 
-	if err := runCommand("sudo", "cp", stagedPath, stagingPath); err != nil {
+	if err := runCommand("sudo", "cp", "--", stagedPath, stagingPath); err != nil {
 		return "", fmt.Errorf("sudo cp staged binary: %w", err)
 	}
-	if err := runCommand("sudo", "chmod", "0755", stagingPath); err != nil {
-		_ = runCommand("sudo", "rm", "-f", stagingPath)
+	if err := runCommand("sudo", "chmod", "0755", "--", stagingPath); err != nil {
+		_ = runCommand("sudo", "rm", "-f", "--", stagingPath)
 		return "", fmt.Errorf("sudo chmod staged binary: %w", err)
 	}
-	if err := runCommand("sudo", "mv", currentExe, backupPath); err != nil {
-		_ = runCommand("sudo", "rm", "-f", stagingPath)
+	if err := runCommand("sudo", "mv", "-f", "--", currentExe, backupPath); err != nil {
+		_ = runCommand("sudo", "rm", "-f", "--", stagingPath)
 		return "", fmt.Errorf("sudo backup current binary: %w", err)
 	}
-	if err := runCommand("sudo", "mv", stagingPath, currentExe); err != nil {
-		_ = runCommand("sudo", "mv", backupPath, currentExe)
+	if err := runCommand("sudo", "mv", "-f", "--", stagingPath, currentExe); err != nil {
+		_ = runCommand("sudo", "mv", "-f", "--", backupPath, currentExe)
 		return "", fmt.Errorf("sudo install new binary: %w", err)
 	}
 	return backupPath, nil
 }
+
+// execFn is syscall.Exec; a var so tests can observe the hand-off
+// without replacing the test process.
+var execFn = syscall.Exec
 
 // reExec replaces the current process image with the newly-installed
 // binary using syscall.Exec, so the same shell session immediately
@@ -83,7 +107,7 @@ func reExec(currentExe string) error {
 	// who could rewrite it could just as easily replace the binary
 	// itself and skip the syscall.Exec round-trip. The taint is
 	// real but not exploitable in this context.
-	if err := syscall.Exec(currentExe, append([]string{currentExe}, os.Args[1:]...), os.Environ()); err != nil {
+	if err := execFn(currentExe, reExecArgv(currentExe), reExecEnv(os.Environ())); err != nil {
 		return fmt.Errorf("re-exec: %w (the upgrade succeeded — run `mk version` to confirm)", err)
 	}
 	return nil // unreachable on success

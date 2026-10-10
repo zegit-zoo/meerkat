@@ -29,6 +29,30 @@ an agent sees only its own deposits (`--namespace`), a librarian sees
 all. Every key is unique and written create-only, so the store is
 single-writer-per-key on every provider.
 
+## Caller-supplied text
+
+meerkat-mob#34. Everything in a raw item was written by the depositing
+MCP caller, so:
+
+- `mk_report_outcome` accepts only `https` sources on public hosts
+  (see `intake.CheckSource`); the researcher plan drops any other source
+  an older deposit carries and says how many it dropped.
+- The question, the attempted path and the sources reach the researcher
+  prompt only as `{{question}}`, `{{attempted}}` and `{{sources}}`, each
+  rendered as a fenced block labelled as untrusted data, one entry per
+  line with control characters flattened, behind a fence longer than
+  any backtick run in the text. A content-repo prompt override gets the
+  same blocks. The built-in prompts tell the researcher and validator
+  to treat the deposit and the candidate as material to check, never
+  as instructions.
+- A deposit whose question, sources or body matches a built-in secret
+  pattern (private key headers, cloud and forge tokens, bearer tokens,
+  JWTs) is not researched, and a candidate that matches one is not
+  staged and is removed from the working copy. The patterns are a
+  tripwire; the content repo's own secret scanning stays the gate.
+- `--trust-sources` on a `--role` run also needs `--trust-intake`
+  ([INGESTION.md](../INGESTION.md)).
+
 ## Roles
 
 `mk ingest --role <researcher|validator|librarian> --from intake`.
@@ -78,8 +102,18 @@ verified it is not evidence:
   (`agent:validator:<model>`, the run's time) with
   `status: machine-confirmed`.
 
-Target collection: the deepest collection the reporting agent tried
-(the last of `attempted`), or `unrouted` for the librarian to place.
+Target collection (meerkat-mob#38): `mk_report_outcome` keeps only the
+`attempted` entries that resolve to a collection in the caller's own
+view, which the caller holds `intake-write` on or can read, and
+records the deepest (last) of them as the raw item's `target_kb`, or
+`unrouted` when none qualifies. The researcher stages the candidate
+under that recorded target, never under a name taken from `attempted`;
+a deposit made before targets were recorded is `unrouted`. `--apply`
+re-checks the target against the raw item before it files a candidate
+into a collection or files an issue on a collection's forge, and skips
+the item with the reason when they differ. Intake keys are built only
+from single safe segments: `.`, `..` and anything with a path separator
+or control character are refused.
 
 ## Escalation
 
@@ -258,13 +292,22 @@ finding whose page is in that working copy, one executor task with the
 overridable as `ingestion/prompts/librarian-rewrite.md`): the file, the
 one field it may change, the queries and the words no text mentions.
 Pages served from another repo or from a memory overlay are skipped
-with the reason. The commit message cites the queries. Rewrites go to
+with the reason. The commit message cites the queries.
+
+The queries are what sessions typed, so they reach the brief only
+cleaned (control characters flattened, backticks and `$` removed, each
+capped at 200 bytes) and inside a fenced block the brief labels as
+untrusted data; the words derived from them are fenced the same way.
+The commit message travels in a file (`git commit -F`), never on the
+command line (meerkat-mob#35). Rewrites go to
 `--branch`, default `librarian/rewrites`, never the content branch: a
 rewrite is confirmed by review of that branch before it serves.
 
 After the run each page is checked against its pre-run snapshot; any
-change beyond the one field restores the snapshot and reports the task
-as rejected (the agent's commit on the review branch is the operator's
+change beyond the one field, or a new value carrying a URL, a shell or
+template construct (backticks, `$(`, `${`, `{{`, `&&`, `||`, a pipe
+into a shell), markup or a command name such as `curl`, restores the
+snapshot and reports the task as rejected (the agent's commit on the review branch is the operator's
 to discard). `meerkat_librarian_rewrites_total{action}` counts
 rewritten, unchanged, rejected and failed.
 

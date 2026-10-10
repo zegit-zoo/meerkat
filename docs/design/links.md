@@ -69,9 +69,17 @@ Per page (`Registry.LinksOf`):
 - `pointer` / `pointer_error` — for a pointer page, its resolved target,
   or why it is not a valid pointer.
 
-Resolution status is viewer-independent: whether `flux:drift` exists
-does not depend on who asks, and the ID was already in the source
-page's own frontmatter.
+Resolution status is decided per view. In a restricted view, a link
+into a collection the caller cannot read gets `collection "x" is not
+mounted`, and a link to a page the caller's viewer may not see (another
+principal's personal memory) gets `page "y" not found in collection
+"x"`. Both read word for word like a link to something that does not
+exist. A pointer's `pointer` block and a search hit's `target_resolved`
+follow the same rule, and `PointersTo` lists only pointer pages the view
+can see. The link text sits in a page the caller can read, but whether
+its target exists is still about the target, which may be hidden.
+`LinkReport` (`mk lint`, `/readyz` health) stays an operator view over
+the whole mounted set.
 
 ### Dangling is a warning, never an outage
 
