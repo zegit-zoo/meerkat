@@ -176,11 +176,9 @@ All other request data lives only in memory for the duration of the request.
    namespace. The log is pseudonymous, not anonymous: the session hash is an HMAC of the MCP session
    ID, which the access log records in plaintext beside `sub`, so an operator who holds the HMAC
    key and the access log can join every entry to a user. Entries expire after 90 days unless
-   admitted `mk_report_outcome`: the caller must be a principal (not an anonymous admission), only
-   a retrieval session's first report is stored, and each principal is rate limited (#45). Collection names and page IDs are HMAC-hashed and the session ID is hashed.
-   The caller's initial query is stored only with `query: plaintext`. A librarian deployment
-   needs it, because it is the training signal. Entries expire after 90 days unless
-   `retention_days` says otherwise (#124).
+   `retention_days` says otherwise (#124). A report is stored only when the outcome gate admits it:
+   the caller must be a principal (not an anonymous admission), only a retrieval session's first
+   report is stored, and each principal is rate limited (#45).
 2. **Intake raw pages** (an intake store, opt-in). Each fallback research report is written as one
    page. Its frontmatter carries the initial query as `question`, the `session_id` as sent, and the
    submitter's namespace hash; its body carries the agent's summary and sources. The pages wait for

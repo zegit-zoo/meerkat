@@ -587,7 +587,6 @@ response (`{recorded, logged, log, intake, intake_id?}`):
 |---|---|---|
 | telemetry (always) | — | `meerkat.outcome.report` span with `result`, `fallback` (kinds), `pages`, `hops`, `tier_reached`, `has_quality`; `meerkat_retrieval_outcomes_total{outcome,fallback,recorded}` |
 | traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality scores; fallback kind; hashed fallback sources and intake reference; **the initial query, fallback summary and sources, quality notes and intake reference in plaintext only with `query: plaintext`** |
-| traversal log | `observability.traversal_log`, and the gate below | one object per admitted report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality; fallback; **the initial query in plaintext only with `query: plaintext`** |
 | intake store | `intake:` + the `intake-write` capability | the fallback summary as a raw page: `type: research-raw`, `status: unverified`, `source: agent-fallback`, with the question and the attempted path in its frontmatter |
 
 A report reaches the traversal log only when the gate admits it
