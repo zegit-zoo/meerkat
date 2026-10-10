@@ -235,7 +235,9 @@ func TestReportOutcome_LogCarriesSessionStagesAndWrongTurns(t *testing.T) {
 	ctx := context.Background()
 	f := newOutcomeFixture(t)
 	f.opts.Outcome.Sessions = retrieval.New(0, retrieval.Limits{})
-	_, s := f.opts.Outcome.Sessions.Begin(ctx, "sess-stages")
+	// Sessions are keyed per principal (meerkat-mob#46): the caller's
+	// own key for "sess-stages" is what its searches would have used.
+	_, s := f.opts.Outcome.Sessions.Begin(ctx, sessionKey(ctx, "sess-stages"))
 	_ = s.Search("flux", 0, 1, true, "exact")
 	_ = s.Search("other", 0, 0, true, "fuzzy")
 	_ = s.Search("flux", 0, 1, true, "fuzzy")
