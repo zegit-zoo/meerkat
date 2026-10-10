@@ -732,6 +732,12 @@ so top-level is what round-trips; `kb.MarshalFrontmatter` would have
 nested them one level deeper than they parse back out. Hence a small
 local frontmatter struct rather than a reuse of `kb.Frontmatter`.
 
+`memory_subject` and `memory_issuer` are written on **personal**
+documents only. A team or global document, and a staged proposal for
+one, is read by people other than its author, and some identity
+providers use an email address as the subject, so there
+`memory_namespace` alone records who wrote it.
+
 `memory_namespace` is **provenance, not policy**. It records whose
 memory this is so a document copied out of the store is still
 self-describing, but no read path consults it: visibility comes from the
