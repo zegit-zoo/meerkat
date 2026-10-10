@@ -42,9 +42,13 @@ no arguments it prints `--help` and exits 0 — a quick way to sanity-check
 a pull.
 
 ```bash
-# HTTP/OpenAPI server (for OpenWebUI) — see docs/INTEGRATION-OPENWEBUI.md
-docker run --rm -p 4004:4004 \
-  -e MEERKAT_API_KEY=change-me \
+# HTTP/OpenAPI server (for OpenWebUI) — see docs/INTEGRATION-OPENWEBUI.md.
+# The key is at least 16 characters; keep it in a 0600 env file, not on the
+# command line or in shell history, and publish the port on the host's
+# loopback unless a TLS-terminating proxy or trusted network needs it.
+(umask 077; printf 'MEERKAT_API_KEY=%s\n' "$(openssl rand -hex 32)" > meerkat.env)
+docker run --rm -p 127.0.0.1:4004:4004 \
+  --env-file meerkat.env \
   ghcr.io/zegit-zoo/meerkat:1.2.3 \
   http serve --host 0.0.0.0
 
@@ -56,7 +60,14 @@ docker run --rm -i \
 
 `--host 0.0.0.0` is required for the HTTP server: its default,
 `127.0.0.1`, is unreachable from outside the container's network
-namespace. The default port is `4004` (`--port` to change it).
+namespace. That makes the server reachable on every interface the
+container has, so publish it deliberately: `-p 127.0.0.1:4004:4004`
+reaches it from the host only, and a bare `-p 4004:4004` exposes it to
+the network. The API key must be at least 16 characters, and the server
+refuses to start with a shorter one. In an orchestrator, supply it from
+a secret (`MEERKAT_API_KEY` from a secret, or `--api-key-file` pointing at
+a mounted secret file) rather than a literal in a manifest. The default
+port is `4004` (`--port` to change it).
 
 ## Read-only root filesystem
 
@@ -68,7 +79,7 @@ to use unconditionally, not just permitted:
 
 ```bash
 docker run --rm --read-only --user 65532:65532 \
-  -p 4004:4004 -e MEERKAT_API_KEY=change-me \
+  -p 127.0.0.1:4004:4004 --env-file meerkat.env \
   ghcr.io/zegit-zoo/meerkat:1.2.3 \
   http serve --host 0.0.0.0
 ```
@@ -102,8 +113,8 @@ docker run --rm --read-only --user 65532:65532 \
   -v meerkat-cache:/home/nonroot/.cache \
   -v ./content-source.yaml:/home/nonroot/.config/content-source.yaml:ro \
   -e MEERKAT_CONTENT_SOURCE=/home/nonroot/.config/content-source.yaml \
-  -e MEERKAT_API_KEY=change-me \
-  -p 4004:4004 \
+  --env-file meerkat.env \
+  -p 127.0.0.1:4004:4004 \
   ghcr.io/zegit-zoo/meerkat:1.2.3 \
   http serve --host 0.0.0.0
 ```

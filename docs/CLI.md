@@ -350,10 +350,13 @@ freshness. For a server that follows its sources, use
 "mk mcp serve-http".
 
 Authentication: all data endpoints require an Authorization: Bearer
-header carrying the configured API key. The key is supplied via
---api-key or the MEERKAT_API_KEY env var (env wins if both set).
-The server refuses to start without a key — there is no anonymous
-mode.
+header carrying the configured API key. Supply the key in a file
+(--api-key-file, preferably mode 0600; surrounding whitespace is
+trimmed) or in the MEERKAT_API_KEY env var; the env var wins if both
+are set. --api-key also works, but a value on the command line is
+visible to other local users in the process list. The server refuses to
+start without a key — there is no anonymous mode — or with one shorter
+than 16 characters; 'openssl rand -hex 32' makes a good one.
 
 Register http://<host>:<port>/openapi.json with OpenWebUI as a Tool
 Server.
@@ -368,10 +371,11 @@ meerkat http serve [flags]
 #### Flags
 
 ```text
-      --api-key string   Static bearer token. Required (or set MEERKAT_API_KEY).
-      --host string      Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
-      --port int         Bind port (default 4004)
-      --security-txt     Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
+      --api-key string        Static bearer token (min 16 characters). Visible to other local users in the process list: prefer --api-key-file or MEERKAT_API_KEY.
+      --api-key-file string   Read the static bearer token from this file (min 16 characters; surrounding whitespace is trimmed). Keep it mode 0600. MEERKAT_API_KEY, if set, takes precedence.
+      --host string           Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
+      --port int              Bind port (default 4004)
+      --security-txt          Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
 ```
 
 #### Inherited flags

@@ -16,10 +16,14 @@ mk http serve --port 4004
 
 Required:
 
-- `--api-key <key>` flag **or** `MEERKAT_API_KEY` env (env wins if
-  both are set, with a startup warning). Prefer the env var — a
-  value passed via `--api-key` is visible to other local users via
-  `ps`.
+- An API key of **at least 16 characters** (the server refuses a
+  shorter one; `openssl rand -hex 32` is the recommended way to make
+  one), from `MEERKAT_API_KEY` or `--api-key-file <path>` (the file's
+  surrounding whitespace is trimmed; keep it mode 0600). The env var
+  wins if both are set, with a startup warning. Avoid `--api-key
+  <key>`: a value on the command line is visible to other local users
+  via `ps` and lands in shell history, and the server warns when it is
+  used.
 - The server refuses to start with no key configured. There is no
   anonymous mode.
 
@@ -72,7 +76,11 @@ After=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/meerkat/env        # contains MEERKAT_API_KEY=...
+# /etc/meerkat/env holds one line, MEERKAT_API_KEY=<64 hex characters>.
+# systemd reads it as root before dropping privileges, so keep it
+# root-owned and private: sudo install -m 600 -o root -g root /dev/stdin /etc/meerkat/env
+# (systemd does not allow a trailing comment after a setting on the same line.)
+EnvironmentFile=/etc/meerkat/env
 ExecStart=/usr/local/bin/meerkat http serve --host 127.0.0.1 --port 4004
 Restart=on-failure
 RestartSec=5
@@ -154,8 +162,13 @@ curl -sS -X POST $HOST/show \
 ## Auth model
 
 - One static bearer token per server instance.
-- Verified with `subtle.ConstantTimeCompare` (no early-exit timing
-  side-channel).
+- Verified by comparing SHA-256 digests of the presented and the
+  configured key with `subtle.ConstantTimeCompare`, so neither the
+  content nor the length of the key shows in the response time. The
+  `Bearer` scheme is matched case-insensitively (RFC 7235).
+- There is no rate limiting. That is why the key must be long and
+  random (16 characters minimum, enforced), and why a server reachable
+  beyond loopback belongs behind a reverse proxy that can throttle.
 - Rotate by restarting the process with a new value.
 - For multi-user / per-tool revocation, sit behind an authenticating
   reverse proxy (oauth2-proxy, Pomerium, etc.) instead of trying to
