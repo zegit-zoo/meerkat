@@ -195,9 +195,14 @@ forge issue` heading, each write conditioned on the version just read:
    minutes for clock skew; `GET /repos/{owner}/{repo}/issues?since=…`,
    which GitHub and Gitea both answer from their database, not a search
    index) and **adopts** the lowest-numbered issue whose body starts
-   with the item's marker line, reporting `adopted`. Only when there is
-   none does it file. The listing reads at most ten pages; past that the
-   run files and says it could not rule out an earlier issue.
+   with the item's marker line **and whose author is the token's own
+   account** (`GET /user`), reporting `adopted`. The marker is no secret
+   (the depositor is told the intake ID), so an issue anyone else opened
+   with that first line is ignored. Only when there is none does it
+   file. The listing reads at most ten pages, and a token that cannot
+   name its own account (a GitHub App installation token) adopts
+   nothing; in both cases the run files and says it could not rule out
+   an earlier issue.
 4. Two runs can still both file when one takes over a claim the other
    is still acting on (a run slower than 15 minutes between claiming and
    recording). The first issue recorded wins; the other run reports

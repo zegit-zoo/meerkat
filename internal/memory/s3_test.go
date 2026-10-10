@@ -25,6 +25,9 @@ type fakeS3 struct {
 	// enforce controls whether conditional writes are honoured; a test
 	// flips it to model a provider that ignores preconditions.
 	enforce bool
+	// etagOf, when set, replaces fakeETag: a test models a provider whose
+	// ETags look different (SSE-KMS's random ones, or none at all).
+	etagOf func(body []byte) string
 }
 
 type fakeS3Object struct {
@@ -89,6 +92,9 @@ func (f *fakeS3) Write(_ context.Context, _, key string, body []byte, createOnly
 		}
 	}
 	etag := fakeETag(body)
+	if f.etagOf != nil {
+		etag = f.etagOf(body)
+	}
 	f.objects[key] = fakeS3Object{body: append([]byte(nil), body...), etag: etag}
 	f.writes++
 	return etag, nil
@@ -382,5 +388,46 @@ func TestOpenS3_ValidatesAndUsesTheDefaultChainClient(t *testing.T) {
 	}
 	if len(lax.objects) != 0 {
 		t.Errorf("the refused open left %d probe objects behind", len(lax.objects))
+	}
+}
+
+// TestS3_ProbeHandlesAnyETag pins meerkat-mob#61 item 1: the probe's
+// "stale" ETag always differs from the real one, so a conforming backend
+// whose ETag happens to start with "0" opens; and a backend that returns
+// no ETag is refused with an explanation instead of a panic.
+func TestS3_ProbeHandlesAnyETag(t *testing.T) {
+	ctx := context.Background()
+
+	s, api := newFakeS3Store(t)
+	api.etagOf = func(b []byte) string { return "0" + fakeETag(b)[1:] }
+	if err := s.verifyConditionalWrites(ctx); err != nil {
+		t.Errorf("probe refused a conforming backend whose ETag starts with 0: %v", err)
+	}
+
+	s, api = newFakeS3Store(t)
+	api.etagOf = func([]byte) string { return "" }
+	var err error
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("probe panicked on an empty ETag: %v", p)
+			}
+		}()
+		err = s.verifyConditionalWrites(ctx)
+	}()
+	if err == nil || !strings.Contains(err.Error(), "no ETag") {
+		t.Errorf("probe on a backend without ETags = %v, want a refusal naming the missing ETag", err)
+	}
+}
+
+func TestStaleETag(t *testing.T) {
+	for _, etag := range []string{"0abc", "1abc", "fabc", "0", "x", "d41d8cd98f00b204e9800998ecf8427e-2"} {
+		got, err := staleETag(etag)
+		if err != nil || got == etag || len(got) != len(etag) {
+			t.Errorf("staleETag(%q) = %q, %v; want a different ETag of the same length", etag, got, err)
+		}
+	}
+	if _, err := staleETag(""); err == nil {
+		t.Error("staleETag(\"\") succeeded")
 	}
 }
