@@ -654,12 +654,24 @@ Threat model:
   and anonymous callers can report but never write intake.
 - *Retention.* An application job, not bucket lifecycle (Garage has
   none): `retention_days` deletes day prefixes older than the window,
-  on startup and at most hourly on the write path. The default is
-  **90 days** (#124). It was unbounded before, because this log is the
-  self-improving loop's training data; `retention_days: 0` still keeps
-  everything, for an operator who wants that. The window covers every
-  object under the prefix, the cache's temperature records included;
-  warm start reads only the last `cache.warm_start_days`.
+  on startup, then hourly on a background ticker for as long as the
+  process runs, and at most hourly from the write paths (session
+  reports and temperature flushes) as a backstop. A day that cannot be
+  deleted (a policy without delete permission, a transient error) is
+  logged to stderr, counted, and retried on the next pass; it does not
+  hold up later days. A failure on the startup pass still fails
+  startup. The S3 sink pages through the day listing, so no day is
+  missed past the first 1,000. The default is **90 days** (#124). It
+  was unbounded before, because this log is the self-improving loop's
+  training data; `retention_days: 0` still keeps everything, for an
+  operator who wants that. The window covers every object under the
+  prefix, the cache's temperature records included.
+- *Warm start reads only temperatures.* `cache.warm_start_days` reads
+  the temperature records (`*-temperature.json`) of the last days and
+  nothing else: session entries in the same day prefixes are filtered
+  out by name before anything is fetched, so their number does not
+  affect startup. Each object read back is capped at 4 MiB on both
+  sinks.
 
 Not in this change: a session span that parents the per-call spans and
 the SLI histograms (issue F), the warm-start feed that pre-mounts the
