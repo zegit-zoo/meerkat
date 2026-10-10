@@ -218,7 +218,9 @@ it for a same-host proxy that preserves the original `Host`; rewriting
 
 Generic OIDC, via `github.com/coreos/go-oidc/v3`. An issuer URL is
 discovered at `<issuer>/.well-known/openid-configuration`, its JWKS is
-fetched and cached, and each bearer token's signature, `iss`, `aud` and
+fetched and cached (re-fetched only for a key ID not seen before, and at
+most once per 30 s, so a flood of forged tokens cannot make the server
+hammer the provider), and each bearer token's signature, `iss`, `aud` and
 `exp` are verified. **Entra ID, Google Workspace and Okta are
 configuration, not code** — there is no provider-specific branch
 anywhere in `internal/authn`, only a per-provider claim mapping for the

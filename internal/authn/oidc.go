@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
 )
@@ -67,9 +68,17 @@ type Options struct {
 	// client with a sane timeout rather than http.DefaultClient, so a
 	// hung IdP can't wedge startup forever.
 	HTTPClient *http.Client
-	// Now overrides the clock used for expiry checks. Tests set it; a
-	// nil value means time.Now.
+	// Now overrides the clock used for expiry checks and for the JWKS
+	// refresh interval. Tests set it; a nil value means time.Now.
 	Now func() time.Time
+	// JWKSMinRefresh is the shortest interval between two fetches of a
+	// provider's signing keys; zero means DefaultJWKSMinRefresh. A key
+	// the cache has never seen triggers at most one fetch per interval,
+	// however many tokens ask.
+	JWKSMinRefresh time.Duration
+	// Metrics, when set, receives the JWKS fetch counters
+	// (meerkat_oidc_jwks_fetches_total, meerkat_oidc_jwks_refetch_throttled_total).
+	Metrics prometheus.Registerer
 }
 
 // NewVerifier performs OIDC discovery for every configured provider and
@@ -79,7 +88,8 @@ type Options struct {
 // request: an unreachable or misconfigured issuer should fail the
 // process at startup — where a deployment notices — not surface as
 // intermittent 401s under load. JWKS refresh after that point is
-// go-oidc's remote key set, which re-fetches on an unknown key ID.
+// meerkat's own key set (keyset.go): it re-fetches only for a key ID it
+// has not seen, and at most once per Options.JWKSMinRefresh.
 func NewVerifier(ctx context.Context, opts Options) (*Verifier, error) {
 	cfg := opts.Config
 	if err := cfg.Validate(); err != nil {
@@ -99,11 +109,18 @@ func NewVerifier(ctx context.Context, opts Options) (*Verifier, error) {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	ctx = oidc.ClientContext(ctx, client)
+	ksMetrics := newKeySetMetrics(opts.Metrics)
 
 	for _, p := range cfg.Providers {
 		provider, perr := oidc.NewProvider(ctx, p.Issuer)
 		if perr != nil {
 			return nil, fmt.Errorf("oidc discovery for issuer %q: %w", p.Issuer, perr)
+		}
+		var disc struct {
+			JWKSURI string `json:"jwks_uri"`
+		}
+		if cerr := provider.Claims(&disc); cerr != nil || disc.JWKSURI == "" {
+			return nil, fmt.Errorf("oidc discovery for issuer %q: no jwks_uri in the discovery document", p.Issuer)
 		}
 		audience := p.Audience
 		if audience == "" {
@@ -125,7 +142,7 @@ func NewVerifier(ctx context.Context, opts Options) (*Verifier, error) {
 		v.providers = append(v.providers, &providerVerifier{
 			cfg:      p,
 			claims:   p.Claims.Defaulted(),
-			verifier: provider.Verifier(oc),
+			verifier: oidc.NewVerifier(p.Issuer, newJWKSKeySet(disc.JWKSURI, client, opts.JWKSMinRefresh, opts.Now, ksMetrics), oc),
 		})
 	}
 	return v, nil

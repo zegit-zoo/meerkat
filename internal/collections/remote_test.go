@@ -396,32 +396,25 @@ func TestRemote_FlagLookupCappedIsUnknown(t *testing.T) {
 	}
 }
 
-// A pull runs inside the repository, so the repository's own insteadOf
-// applies to it while ls-remote (outside) reads the real remote. If the
-// pull lands on a commit other than the tip ls-remote reported, the
-// verdict is unknown, not current (review of #116, leftover b, and N3).
-func TestRemote_PullLandingOffTheTipIsUnknown(t *testing.T) {
+// A pull runs inside the repository, so a repository whose own config
+// rewrites URLs (url.*.insteadOf) could send it somewhere other than the
+// remote ls-remote read. Such a repository is refused before git runs
+// (meerkat-mob#31): the tree stays where it was and the pull is reported
+// as failed against the real tip.
+func TestRemote_PullRefusesARepositoryThatRewritesURLs(t *testing.T) {
 	f := newRemoteFixture(t, refresh.DivergencePull)
-	// A second remote that shares history with the real one, then moves
-	// somewhere else.
-	evil := filepath.Join(t.TempDir(), "evil.git")
-	gitT(t, t.TempDir(), "clone", "-q", "--bare", f.bare, evil)
-	pusher := filepath.Join(t.TempDir(), "evil-pusher")
-	gitT(t, t.TempDir(), "clone", "-q", evil, pusher)
-	writeLocalPage(t, pusher, "notes/elsewhere", "Somewhere else.")
-	gitT(t, pusher, "add", ".")
-	gitT(t, pusher, "commit", "-q", "-m", "elsewhere")
-	gitT(t, pusher, "push", "-q", "origin", "main")
-	elsewhere := gitT(t, pusher, "rev-parse", "HEAD")
-
+	before := gitT(t, f.dir, "rev-parse", "HEAD")
 	tip := f.pushPage(t, "notes/zebrafish", "About zebrafish.")
-	gitT(t, f.dir, "config", "url."+evil+".insteadOf", f.bare)
+	gitT(t, f.dir, "config", "url."+filepath.Join(t.TempDir(), "elsewhere.git")+".insteadOf", f.bare)
 
-	_, fr := f.check(t)
-	if got := gitT(t, f.dir, "rev-parse", "HEAD"); got != elsewhere {
-		t.Fatalf("precondition: the pull followed the local rewrite to %s, got %s", elsewhere, got)
+	out, fr := f.check(t)
+	if got := gitT(t, f.dir, "rev-parse", "HEAD"); got != before {
+		t.Fatalf("a refused pull moved HEAD to %s, want %s", got, before)
 	}
-	if fr.State != FreshUnknown || fr.Note != notePulledElse || fr.Remote != tip {
-		t.Errorf("pulled off the tip: %+v, want unknown noted %q with remote %s", fr, notePulledElse, tip)
+	if fr.Note != notePullFailed || fr.Remote != tip {
+		t.Errorf("refused pull: %+v, want noted %q with remote %s", fr, notePullFailed, tip)
+	}
+	if !strings.Contains(out.Note, "refused") {
+		t.Errorf("log note = %q, want the refusal", out.Note)
 	}
 }
