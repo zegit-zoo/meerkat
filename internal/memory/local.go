@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -299,7 +300,10 @@ func (s *LocalStore) write(key string, body []byte) error {
 	// The temp file is a SIBLING of the target: os.Rename is only atomic
 	// within one filesystem, and the store root may well be a mount of
 	// its own.
-	tmp := tempName(key)
+	tmp, err := tempName(key)
+	if err != nil {
+		return err
+	}
 	f, err := s.root.OpenFile(filepath.FromSlash(tmp), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create temp file for %q: %w", key, err)
@@ -329,12 +333,20 @@ func (s *LocalStore) write(key string, body []byte) error {
 }
 
 // tempName is the in-place staging name for a write to key. It carries
-// a dot prefix so a crash leaves something obviously transient, and the
-// process ID so two processes sharing a directory do not fight over one
-// temp name even though they cannot serialise the write itself.
-func tempName(key string) string {
+// a dot prefix so a crash leaves something obviously transient (Load
+// skips it: it does not end in .md), and a random suffix so that a temp
+// file a crash left behind never collides with a later write. A suffix
+// derived from the process ID did: in a container the PID is usually 1
+// on every start, so one stale temp file made every later write to that
+// key fail on O_EXCL until somebody removed it by hand (meerkat-mob#62).
+// It also keeps two processes sharing a directory off one temp name.
+func tempName(key string) (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("temp name for %q: %w", key, err)
+	}
 	dir, base := path.Split(key)
-	return path.Join(dir, fmt.Sprintf(".%s.%d.tmp", base, os.Getpid()))
+	return path.Join(dir, "."+base+"."+hex.EncodeToString(b[:])+".tmp"), nil
 }
 
 // hashVersion is the local backend's version token: a truncated sha256

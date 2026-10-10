@@ -87,7 +87,7 @@ func TestTree_ColdChildMountsOnFirstRequest(t *testing.T) {
 	if err != nil || len(hits) == 0 || hits[0].Collection != "vendors" {
 		t.Fatalf("Search(vendors) = %v %v, want a mounted answer", hits, err)
 	}
-	if v.IsCold() || !v.Tree.Mounted {
+	if v.IsCold() {
 		t.Error("vendors must be warm after the request")
 	}
 	if _, n := reg.Resident(); n != 1 {
@@ -345,5 +345,63 @@ func TestTree_DeclaredOnlyNodeNeedsTheViewsGrant(t *testing.T) {
 	}
 	if e := withEdge.TreeEntries(); len(e) != 2 || e[1].Name != "edge" || e[1].Mounted {
 		t.Errorf("entries = %+v", e)
+	}
+}
+
+// TestTree_MountLeavesTheSharedNodeAlone pins item 4 of meerkat-mob#63:
+// a lazy mount and a cull change residency (IsCold) without writing the
+// collection's TreeNode, which surfaces read without a lock. Run under
+// -race, the concurrent reader below is what would catch a write.
+func TestTree_MountLeavesTheSharedNodeAlone(t *testing.T) {
+	reg := openTree(t)
+	v, _ := reg.Get("vendors")
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 20 {
+			if err := reg.ensureMounted(ctx, v); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := reg.Evict(ctx, "vendors"); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			if node := *v.Tree; node.Mounted {
+				t.Error("the declaration flag must not track residency")
+			}
+			return
+		default:
+			_ = *v.Tree // what a listing reads, field by field
+		}
+	}
+}
+
+// TestTree_ShowAndPagesMountUnderTheRequestContext pins item 3 of
+// meerkat-mob#63: a lazy mount triggered by a page lookup or listing is
+// bounded by the caller's context, as one triggered by a search is.
+func TestTree_ShowAndPagesMountUnderTheRequestContext(t *testing.T) {
+	reg := openTree(t)
+	v, _ := reg.Get("vendors")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := reg.ShowContext(ctx, "vendors", "vendors"); !errors.Is(err, context.Canceled) {
+		t.Errorf("ShowContext(cancelled) = %v, want context.Canceled", err)
+	}
+	if _, err := reg.PagesContext(ctx, "vendors"); !errors.Is(err, context.Canceled) {
+		t.Errorf("PagesContext(cancelled) = %v, want context.Canceled", err)
+	}
+	if !v.IsCold() {
+		t.Fatal("a cancelled request must not leave the collection mounted")
+	}
+	ref, err := reg.ShowContext(context.Background(), "vendors", "vendors")
+	if err != nil || ref.Collection != "vendors" || v.IsCold() {
+		t.Errorf("ShowContext = %+v %v, want a mounted answer", ref, err)
 	}
 }
