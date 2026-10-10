@@ -12,7 +12,10 @@
 //
 //   - session: every tool call sharing a key — an explicit session_id,
 //     or the MCP client session — within an idle window. It ends on
-//     mk_report_outcome or on idle timeout.
+//     mk_report_outcome or on idle timeout. The key is SCOPED TO THE
+//     CALLER'S PRINCIPAL (Key): two principals that pick the same
+//     session_id get two sessions, so neither can spend, end or observe
+//     the other's (meerkat-mob#46).
 //   - first_context: the first search with >= 1 hit, or the first show.
 //   - first_relevant_context: the last show that was not followed by
 //     another search (the proxy from brief Q1); a found report confirms
@@ -33,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +55,47 @@ const (
 
 // DefaultIdleTimeout ends a session that has been quiet this long.
 const DefaultIdleTimeout = 120 * time.Second
+
+// Caps on live sessions (meerkat-mob#46). A session is a map entry and
+// a root span, created by any caller who picks a new key; without a cap
+// the tracker grows with request rate times the idle window. When a cap
+// is reached the least recently used session goes — the principal's own
+// first, so one principal's churn ends its own sessions, never another's
+// until the overall cap is reached. An evicted session ends as an idle
+// one would (timeout, or gave_up if nothing was shown).
+//
+// The empty principal — callers with no verified subject, any number of
+// clients behind one name — is held to the overall cap only: a
+// per-principal cap on it would be a deployment-wide cap on every
+// deployment without auth.
+const (
+	DefaultMaxSessions             = 10000
+	DefaultMaxSessionsPerPrincipal = 64
+)
+
+// keySep separates the principal from the caller's session ID in a key.
+const keySep = "\x00"
+
+// Key is the tracker key for session id of principal: a caller-chosen
+// id is only ever looked up within the principal that chose it. An empty
+// id is no session, and so is an empty key. An empty principal is a
+// caller with no verified subject (see the caps above).
+func Key(principal, id string) string {
+	if id == "" {
+		return ""
+	}
+	return principal + keySep + id
+}
+
+// principalOf is the principal part of a Key; a key built without one
+// is its own principal.
+func principalOf(key string) string {
+	p, _, ok := strings.Cut(key, keySep)
+	if !ok {
+		return key
+	}
+	return p
+}
 
 // Limits are the per-session traversal restraints (issue D's manifest
 // `limits:`): 0 means unlimited.
@@ -83,16 +128,83 @@ type Tracker struct {
 	limits Limits
 	now    func() time.Time
 
+	maxTotal, maxPerPrincipal int
+
 	mu       sync.Mutex
 	sessions map[string]*Session
+	// perPrincipal counts live sessions by principal, for the cap.
+	perPrincipal map[string]int
 }
 
-// New builds a tracker. idle <= 0 means DefaultIdleTimeout.
+// New builds a tracker. idle <= 0 means DefaultIdleTimeout. Live
+// sessions are capped at DefaultMaxSessions overall and
+// DefaultMaxSessionsPerPrincipal per principal; see WithCaps.
 func New(idle time.Duration, limits Limits) *Tracker {
 	if idle <= 0 {
 		idle = DefaultIdleTimeout
 	}
-	return &Tracker{idle: idle, limits: limits, now: time.Now, sessions: map[string]*Session{}}
+	return &Tracker{
+		idle: idle, limits: limits, now: time.Now,
+		maxTotal: DefaultMaxSessions, maxPerPrincipal: DefaultMaxSessionsPerPrincipal,
+		sessions: map[string]*Session{}, perPrincipal: map[string]int{},
+	}
+}
+
+// WithCaps sets the live-session caps (<= 0 means uncapped) and returns
+// the tracker. Call it before the tracker is shared.
+func (t *Tracker) WithCaps(total, perPrincipal int) *Tracker {
+	t.maxTotal, t.maxPerPrincipal = total, perPrincipal
+	return t
+}
+
+// remove forgets key. The caller holds t.mu.
+func (t *Tracker) remove(key string) {
+	if _, ok := t.sessions[key]; !ok {
+		return
+	}
+	delete(t.sessions, key)
+	p := principalOf(key)
+	if t.perPrincipal[p] <= 1 {
+		delete(t.perPrincipal, p)
+	} else {
+		t.perPrincipal[p]--
+	}
+}
+
+// evictLRU removes and returns the least recently used session — among
+// principal's when scoped, else among all. The caller holds t.mu.
+func (t *Tracker) evictLRU(principal string, scoped bool) *Session {
+	var (
+		oldKey string
+		old    *Session
+		oldAt  time.Time
+	)
+	for key, s := range t.sessions {
+		if scoped && principalOf(key) != principal {
+			continue
+		}
+		s.mu.Lock()
+		last := s.last
+		s.mu.Unlock()
+		if old == nil || last.Before(oldAt) {
+			oldKey, old, oldAt = key, s, last
+		}
+	}
+	if old != nil {
+		t.remove(oldKey)
+	}
+	return old
+}
+
+// endIdle ends s the way the idle sweep would.
+func (s *Session) endIdle(ctx context.Context) {
+	outcome := OutcomeTimeout
+	s.mu.Lock()
+	if s.shows == 0 {
+		outcome = OutcomeGaveUp
+	}
+	s.mu.Unlock()
+	s.end(ctx, outcome, nil)
 }
 
 // Session is one retrieval session.
@@ -132,7 +244,19 @@ func (t *Tracker) Begin(ctx context.Context, key string) (context.Context, *Sess
 	}
 	t.mu.Lock()
 	s, ok := t.sessions[key]
+	var evicted []*Session
 	if !ok {
+		p := principalOf(key)
+		if t.maxPerPrincipal > 0 && p != "" && t.perPrincipal[p] >= t.maxPerPrincipal {
+			if old := t.evictLRU(p, true); old != nil {
+				evicted = append(evicted, old)
+			}
+		}
+		if t.maxTotal > 0 && len(t.sessions) >= t.maxTotal {
+			if old := t.evictLRU("", false); old != nil {
+				evicted = append(evicted, old)
+			}
+		}
 		now := t.now()
 		// The session span is a ROOT: detached from whatever request
 		// span is current, so that every later call's span can hang
@@ -141,8 +265,12 @@ func (t *Tracker) Begin(ctx context.Context, key string) (context.Context, *Sess
 		spanCtx, span := telemetry.Span(root, telemetry.SpanRetrievalSession)
 		s = &Session{tracker: t, key: key, started: now, last: now, span: span, spanCtx: spanCtx, shown: map[string]bool{}, hot: true, tierReached: -1}
 		t.sessions[key] = s
+		t.perPrincipal[p]++
 	}
 	t.mu.Unlock()
+	for _, old := range evicted {
+		old.endIdle(ctx)
+	}
 	return trace.ContextWithSpan(ctx, s.span), s
 }
 
@@ -271,7 +399,7 @@ func (t *Tracker) End(ctx context.Context, key, outcome string, q *Quality) *Sum
 	t.mu.Lock()
 	s, ok := t.sessions[key]
 	if ok {
-		delete(t.sessions, key)
+		t.remove(key)
 	}
 	t.mu.Unlock()
 	if !ok {
@@ -344,18 +472,12 @@ func (t *Tracker) Sweep(ctx context.Context) int {
 		s.mu.Unlock()
 		if idle {
 			expired = append(expired, s)
-			delete(t.sessions, key)
+			t.remove(key)
 		}
 	}
 	t.mu.Unlock()
 	for _, s := range expired {
-		outcome := OutcomeTimeout
-		s.mu.Lock()
-		if s.shows == 0 {
-			outcome = OutcomeGaveUp
-		}
-		s.mu.Unlock()
-		s.end(ctx, outcome, nil)
+		s.endIdle(ctx)
 	}
 	return len(expired)
 }
@@ -380,7 +502,7 @@ func (t *Tracker) Run(ctx context.Context) {
 			rest := make([]*Session, 0, len(t.sessions))
 			for k, s := range t.sessions {
 				rest = append(rest, s)
-				delete(t.sessions, k)
+				t.remove(k)
 			}
 			t.mu.Unlock()
 			for _, s := range rest {
