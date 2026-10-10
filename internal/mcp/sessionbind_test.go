@@ -172,7 +172,7 @@ func TestSessionBinding_UnboundOrForgedIDsAreUnknown(t *testing.T) {
 		"garbage":                  "q1",
 		"bound to someone else":    newSessionID(aliceNS),
 		"tag truncated":            newSessionID(aliceNS)[:40],
-		"anonymous principal's ID": newSessionID(memory.Namespace(authz.Identity{})),
+		"anonymous principal's ID": newSessionID(anonymousPrincipal),
 	} {
 		if code, _, _ := f.rpc(t, http.MethodPost, bob, sid, list); code != http.StatusNotFound {
 			t.Errorf("%s: %d, want 404", name, code)
