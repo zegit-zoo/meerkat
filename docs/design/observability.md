@@ -495,13 +495,9 @@ agent took to get context for one question, how many hops it needed,
 or where it gave up. A **retrieval session** can: every tool call
 sharing a key — an explicit `session_id` passed to `mk_search`,
 `mk_show` and `mk_report_outcome`, or the MCP client session — within
-an idle window (`sessions.idle_timeout`, default 120 s), and within the
-caller's principal: the same `session_id` from two principals is two
-sessions (meerkat-mob#46). It ends on `mk_report_outcome`, on idle
-timeout, or when the MCP session goes away. At most 64 sessions per
-verified principal and 10,000 overall are live (callers with no
-subject are held to the overall cap only); past a cap the least
-recently used one ends as if idle.
+an idle window (`sessions.idle_timeout`, default 120 s). It ends on
+`mk_report_outcome`, on idle timeout, or when the MCP session goes
+away.
 
 Definitions (`internal/retrieval`):
 
@@ -569,7 +565,11 @@ not_found | gave_up), `initial_query` (the agent's first query,
 verbatim), `pages` that answered, `attempted` collections in order,
 `quality` (accuracy, completeness, answer_quality in [0, 1], notes),
 and `fallback` (kind web | source | human | none, a summary of what the
-agent learned instead, its sources). `mk_search` accepts the same
+agent learned instead, its sources). A source must be an `https` URL to
+a public host: other schemes, credentials in the URL, and loopback,
+link-local, private or otherwise non-public literal addresses (and
+`localhost`) are refused, because the researcher agent is told to open
+every source it cites. Host names are not resolved at this point. `mk_search` accepts the same
 `session_id` so a stateless caller can group its calls; a caller with
 an MCP session need not pass one. The tool's description frames a miss
 as a contribution ("every report improves the next agent's
@@ -577,31 +577,13 @@ retrieval") because the most valuable signal in the design is an agent
 that gave up on meerkat and did base research.
 
 Three sinks, each independently configured and each named in the
-response (`{recorded, logged, log, intake, intake_id?}`):
+response (`{recorded, logged, intake, intake_id?}`):
 
 | Sink | Configured by | Carries |
 |---|---|---|
 | telemetry (always) | — | `meerkat.outcome.report` span with `result`, `fallback` (kinds), `pages`, `hops`, `tier_reached`, `has_quality`; `meerkat_retrieval_outcomes_total{outcome,fallback,recorded}` |
-| traversal log | `observability.traversal_log`, and the gate below | one object per admitted report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality; fallback; **the initial query in plaintext only with `query: plaintext`** |
+| traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality scores; fallback kind; hashed fallback sources and intake reference; **the initial query, fallback summary and sources, quality notes and intake reference in plaintext only with `query: plaintext`** |
 | intake store | `intake:` + the `intake-write` capability | the fallback summary as a raw page: `type: research-raw`, `status: unverified`, `source: agent-fallback`, with the question and the attempted path in its frontmatter |
-
-A report reaches the traversal log only when the gate admits it
-(meerkat-mob#45). The `log` field gives the verdict:
-
-- `written`: logged.
-- `not_permitted`: the caller was admitted anonymously under a policy.
-  There is no principal to account the write to, so the report counts in
-  telemetry and goes no further. This mirrors intake's `not_permitted`.
-  A process with no policy (stdio, or no `auth:` block) is the trusted
-  local shape and is logged.
-- `duplicate`: the retrieval session was already reported. Only a
-  session's first report is logged, and a report that closes a live
-  session is always the first. A reported key is remembered for an hour.
-- `rate_limited`: the caller's principal is out of tokens: a burst of 20,
-  then one per 30 s (`OutcomeOptions.Reports`). On a hosted server with
-  no `auth:` block every caller is the one anonymous principal, so they
-  all share a single bucket.
-- `not_configured`: there is no traversal log.
 
 The disclosure rule holds exactly as before: the span and the metric
 labels carry closed-set values and counts. The disclosure test
@@ -622,10 +604,26 @@ it is unset or shorter than 16 bytes. The librarian agent holds the key
 and joins the log against the manifest; nobody else can.
 
 What the log keeps in plaintext, by decision (2026-09-17): the outcome,
-timings, path shape, quality scores, the fallback kind, summary and
-sources, and the retrieval session's wrong-turn count and its searches
-by planner stage (`wrong_turns`, `stages{exact,fuzzy,prefix}`, counts
-only, present when the report closed a tracked session).
+timings, path shape, quality scores, the fallback kind, and the
+retrieval session's wrong-turn count and its searches by planner stage
+(`wrong_turns`, `stages{exact,fuzzy,prefix}`, counts only, present when
+the report closed a tracked session).
+
+Everything the caller writes as free text follows the query (below),
+not that list (meerkat-mob#53): without `query: plaintext` the fallback
+summary and the quality notes are dropped, each fallback source URL is
+HMAC-hashed (a URL can carry a token), and `intake_id` is hashed. With
+it they are stored as sent. Either way `intake_id` is stored without the
+depositor's namespace (`raw/<day>/<id>/page.md`); the id alone finds
+the intake item.
+
+**Pseudonymous, not anonymous.** The session hash is an HMAC of the MCP
+session ID (or of the caller's `session_id`), and the access log records
+that session ID in plaintext beside `sub`. An operator who holds the
+HMAC key and the access log can therefore join every entry, including
+any stored query, to the user who made it. The hashing keeps names and
+IDs out of a log that is shared more widely than the access log; it is
+not a guarantee against the operator.
 
 **The initial query is opt-in** (#124, MK-A-6; operator decision
 2026-10-02). It is what a librarian reads to judge how well the client
@@ -651,8 +649,9 @@ observability:
 ```
 
 **Data classification** (the company taxonomy, provisional until the
-asset catalogue, MK-A-4): a traversal-log entry is `internal`; with
-`query: plaintext` it also carries `personal-data: identifier`.
+asset catalogue, MK-A-4): a traversal-log entry is `internal` and
+pseudonymous (see above); with `query: plaintext` it also carries
+`personal-data: identifier`.
 
 Threat model:
 
@@ -661,7 +660,8 @@ Threat model:
   takes plaintext and never writes it; spans get only what the
   telemetry table above lists.
 - *The log itself leaks.* It contains hashes and, with
-  `query: plaintext`, queries. Without the key the hashes are opaque;
+  `query: plaintext`, queries and other caller text. Without the key the
+  hashes are opaque;
   the queries are what an agent typed and should be handled like a
   query log anywhere: keep the bucket private, rotate the key when a
   librarian leaves (old entries become unjoinable, which is the
@@ -672,12 +672,24 @@ Threat model:
   and anonymous callers can report but never write intake.
 - *Retention.* An application job, not bucket lifecycle (Garage has
   none): `retention_days` deletes day prefixes older than the window,
-  on startup and at most hourly on the write path. The default is
-  **90 days** (#124). It was unbounded before, because this log is the
-  self-improving loop's training data; `retention_days: 0` still keeps
-  everything, for an operator who wants that. The window covers every
-  object under the prefix, the cache's temperature records included;
-  warm start reads only the last `cache.warm_start_days`.
+  on startup, then hourly on a background ticker for as long as the
+  process runs, and at most hourly from the write paths (session
+  reports and temperature flushes) as a backstop. A day that cannot be
+  deleted (a policy without delete permission, a transient error) is
+  logged to stderr, counted, and retried on the next pass; it does not
+  hold up later days. A failure on the startup pass still fails
+  startup. The S3 sink pages through the day listing, so no day is
+  missed past the first 1,000. The default is **90 days** (#124). It
+  was unbounded before, because this log is the self-improving loop's
+  training data; `retention_days: 0` still keeps everything, for an
+  operator who wants that. The window covers every object under the
+  prefix, the cache's temperature records included.
+- *Warm start reads only temperatures.* `cache.warm_start_days` reads
+  the temperature records (`*-temperature.json`) of the last days and
+  nothing else: session entries in the same day prefixes are filtered
+  out by name before anything is fetched, so their number does not
+  affect startup. Each object read back is capped at 4 MiB on both
+  sinks.
 
 Not in this change: a session span that parents the per-call spans and
 the SLI histograms (issue F), the warm-start feed that pre-mounts the
