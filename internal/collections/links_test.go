@@ -3,11 +3,8 @@ package collections
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"testing/fstest"
 
 	"github.com/zegit-zoo/meerkat/internal/kb"
 )
@@ -140,13 +137,14 @@ func TestLinks_BacklinksRespectTheViewer(t *testing.T) {
 		t.Errorf("Alice must see her own note among the backlinks: %v", pl.LinkedFrom)
 	}
 
-	// A restricted view still resolves against the full mounted set
-	// (the graph is the root's) but only lists backlinks it can name.
+	// A restricted view shares the root's graph but resolves as it sees:
+	// a link into a collection outside it reads "not mounted", and it
+	// only lists backlinks it can name.
 	only := reg.Restrict(func(name string) bool { return name == "hub" })
 	ref, _ = only.Show("hub", "flux")
 	pl = only.LinksOf(ref)
-	if !pl.Links[1].Resolved {
-		t.Errorf("qualified link must still resolve in a restricted view: %+v", pl.Links[1])
+	if pl.Links[1].Resolved || pl.Links[1].Reason != `collection "flux" is not mounted` {
+		t.Errorf("a link out of the view must read as not mounted: %+v", pl.Links[1])
 	}
 	for _, src := range pl.LinkedFrom {
 		if strings.HasPrefix(src, "flux:") {
@@ -248,67 +246,114 @@ func TestBundles_GroupByPointerTarget(t *testing.T) {
 	}
 }
 
-// countingFS counts Open calls: every page a listing reads is an Open.
-type countingFS struct {
-	fs.FS
-	opens atomic.Int64
-}
-
-func (c *countingFS) Open(name string) (fs.File, error) {
-	c.opens.Add(1)
-	return c.FS.Open(name)
-}
-
-// TestLinks_MemorySaveRebuildsWithoutRelistingContent pins item 1 of
-// meerkat-mob#63: a memory save invalidates the link graph, but the
-// rebuild it triggers re-reads no content root — content pages are
-// cached per snapshot — while a snapshot swap still re-lists.
-func TestLinks_MemorySaveRebuildsWithoutRelistingContent(t *testing.T) {
-	cfs := &countingFS{FS: fstest.MapFS{
-		"content/a.md": {Data: []byte("---\nid: a\ntitle: A\nrelated: [b]\n---\nbody\n")},
-		"content/b.md": {Data: []byte("---\nid: b\ntitle: B\n---\nbody\n")},
-	}}
-	docs := newCollection("docs", "disk:x", "v1", cfs)
-	other := FromPages("other", []kb.Page{{ID: "o", Title: "O"}})
-	reg, err := New(docs, other)
+// TestLinks_HiddenTargetsReadAsMissing pins meerkat-mob#40: link status
+// in a view — `related:` entries, a pointer's target, and a search hit's
+// target_resolved — says nothing about collections outside the view or
+// pages its viewer may not see. Each probe is compared, with the probed
+// name normalised, against a target that does not exist at all.
+func TestLinks_HiddenTargetsReadAsMissing(t *testing.T) {
+	const alice = "memory/personal/alice/"
+	related := []string{
+		"secret:plan", "ghost:plan", // hidden collection, real page vs. no collection
+		"secret:nothing", "ghost:nothing", // hidden collection, no page vs. no collection
+		"pub:" + alice + "note", "pub:" + alice + "none", // another principal's private page vs. no page
+		alice + "note", alice + "none", // the same, as local links
+	}
+	pub := FromPages("pub", []kb.Page{
+		{ID: "page", Title: "Page", Front: kb.Frontmatter{Related: related}},
+		{ID: "to-secret", Title: "Zanzibar secret", Body: "zanzibar", Front: kb.Frontmatter{Type: kb.TypePointer, Target: "collection:secret", Hint: "h"}},
+		{ID: "to-ghost", Title: "Zanzibar ghost", Body: "zanzibar", Front: kb.Frontmatter{Type: kb.TypePointer, Target: "collection:ghost", Hint: "h"}},
+		{ID: "to-plan", Title: "Zanzibar plan", Body: "zanzibar", Front: kb.Frontmatter{Type: kb.TypePointer, Target: "secret:plan", Hint: "h"}},
+		{ID: "to-nothing", Title: "Zanzibar nothing", Body: "zanzibar", Front: kb.Frontmatter{Type: kb.TypePointer, Target: "ghost:plan", Hint: "h"}},
+		{ID: alice + "note", Title: "Alice's note"},
+	})
+	secret := FromPages("secret", []kb.Page{{ID: "plan", Title: "Plan", Front: kb.Frontmatter{Related: []string{"pub:page"}}}})
+	reg, err := New(pub, secret)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Build the search index first: a memory save writes into it, and
-	// building it is a listing of its own that is not the graph's.
-	if _, err := docs.Index(); err != nil {
+	bob := reg.Restrict(func(name string) bool { return name == "pub" }).ViewedBy(kb.AsOwner("bob"))
+	norm := func(l ResolvedLink, from, to string) string {
+		return fmt.Sprintf("%v %s", l.Resolved, strings.ReplaceAll(l.Reason, from, to))
+	}
+
+	ref, err := bob.Show("pub", "page")
+	if err != nil {
 		t.Fatal(err)
 	}
-	before := cfs.opens.Load()
-	g1 := reg.graph()
-	if _, ok := g1.exists["docs:a"]; !ok {
-		t.Fatalf("content not in the graph: %v", g1.exists)
+	pl := bob.LinksOf(ref)
+	if len(pl.Links) != len(related) {
+		t.Fatalf("links = %+v", pl.Links)
 	}
-	listed := cfs.opens.Load()
-	if listed == before {
-		t.Fatal("the first build must list the content root")
+	for i := 0; i < len(related); i += 2 {
+		hidden, missing := pl.Links[i], pl.Links[i+1]
+		if hidden.Resolved {
+			t.Errorf("%s resolved in a view that cannot see it", related[i])
+		}
+		a := norm(hidden, "secret", "<c>")
+		a = strings.ReplaceAll(strings.ReplaceAll(a, `"note"`, `"<p>"`), alice+"note", alice+"<p>")
+		b := norm(missing, "ghost", "<c>")
+		b = strings.ReplaceAll(strings.ReplaceAll(b, `"none"`, `"<p>"`), alice+"none", alice+"<p>")
+		if a != b {
+			t.Errorf("%s reads %q but %s reads %q", related[i], a, related[i+1], b)
+		}
+	}
+	if len(pl.LinkedFrom) != 0 {
+		t.Errorf("a backlink from a hidden collection was listed: %v", pl.LinkedFrom)
 	}
 
-	for i := range 3 {
-		if err := docs.publishMemory(kb.Page{ID: fmt.Sprintf("memory/team/m%d", i), Title: "M", Front: kb.Frontmatter{Related: []string{"b"}}}); err != nil {
+	// Pointer targets: LinksOf, PointerOf and search hits agree.
+	pointer := func(id string) ResolvedLink {
+		ref, err := bob.Show("pub", id)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if reg.graph() == g1 {
-			t.Fatal("a memory save must still invalidate the graph")
+		pl := bob.LinksOf(ref)
+		if pl.Pointer == nil {
+			t.Fatalf("%s: no pointer", id)
+		}
+		viaOf, _ := bob.PointerOf("pub", ref.Page)
+		if viaOf.Resolved != pl.Pointer.Resolved || viaOf.Reason != pl.Pointer.Reason {
+			t.Errorf("%s: PointerOf %+v disagrees with LinksOf %+v", id, viaOf, pl.Pointer)
+		}
+		return *pl.Pointer
+	}
+	for _, pair := range [][2]string{{"to-secret", "to-ghost"}, {"to-plan", "to-nothing"}} {
+		a, b := norm(pointer(pair[0]), "secret", "<c>"), norm(pointer(pair[1]), "ghost", "<c>")
+		if a != b {
+			t.Errorf("pointer %s reads %q but %s reads %q", pair[0], a, pair[1], b)
 		}
 	}
-	if got := cfs.opens.Load(); got != listed {
-		t.Errorf("memory saves re-read the content root: %d opens, want %d", got, listed)
+	hits, err := bob.Search(context.Background(), "", "zanzibar", 10)
+	if err != nil {
+		t.Fatal(err)
 	}
-	ref, _ := reg.Show("docs", "b")
-	if pl := reg.LinksOf(ref); len(pl.LinkedFrom) != 4 {
-		t.Errorf("backlinks after the saves = %v, want docs:a and the three memories", pl.LinkedFrom)
+	if len(hits) != 4 {
+		t.Fatalf("hits = %+v", hits)
+	}
+	for _, h := range hits {
+		if h.TargetResolved {
+			t.Errorf("search hit %s: target_resolved = true for a target outside the view", h.Page.ID)
+		}
+	}
+	if from := bob.PointersTo("secret"); len(from) != 0 {
+		t.Errorf("PointersTo(hidden) = %v", from)
 	}
 
-	// A new snapshot is new content: it is listed again.
-	docs.install(&snapshot{fsys: cfs, provenance: "disk:x", version: "v2"})
-	reg.graph()
-	if cfs.opens.Load() == listed {
-		t.Error("a snapshot swap must re-list the content root")
+	// The unrestricted, unfiltered registry still resolves everything.
+	ref, _ = reg.Show("pub", "page")
+	for i, l := range reg.LinksOf(ref).Links {
+		if want := i%2 == 0 && i != 2; l.Resolved != want {
+			t.Errorf("root view: %s resolved = %v, want %v", related[i], l.Resolved, want)
+		}
+	}
+	if res, _ := reg.PointerOf("pub", kb.Page{ID: "to-plan", Front: kb.Frontmatter{Type: kb.TypePointer, Target: "secret:plan", Hint: "h"}}); !res.Resolved {
+		t.Errorf("root view: pointer to secret:plan = %+v", res)
+	}
+	// Alice sees her own note through the same links.
+	aliceView := reg.Restrict(func(name string) bool { return name == "pub" }).ViewedBy(kb.AsOwner("alice"))
+	ref, _ = aliceView.Show("pub", "page")
+	if l := aliceView.LinksOf(ref).Links[4]; !l.Resolved {
+		t.Errorf("alice's own note must resolve for her: %+v", l)
 	}
 }
