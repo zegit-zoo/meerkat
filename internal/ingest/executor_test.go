@@ -166,7 +166,7 @@ func hasArg(args []string, want string) bool {
 }
 
 func TestBuildPerPageInstruction_PushesResolvedBranch(t *testing.T) {
-	instr := buildPerPageInstruction(Task{PageID: "adr/x", SourceID: "adr", PagePath: "wiki/adr/x.md"}, "/wd", "trunk")
+	instr := buildPerPageInstruction(Task{PageID: "adr/x", SourceID: "adr", PagePath: "wiki/adr/x.md"}, "/wd", "trunk", "/tmp/msg.txt")
 	if !strings.Contains(instr, "git push origin trunk") {
 		t.Errorf("instruction should push to the resolved branch; got:\n%s", instr)
 	}

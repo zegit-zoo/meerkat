@@ -54,6 +54,10 @@ import (
 // exactly one meerkat process writes this store, and the store then
 // enforces preconditions itself — a mutex plus a HeadObject compare —
 // which is precisely the guarantee the local backend gives and no more.
+// One process means every writing command: a librarian run (`mk ingest
+// --role librarian`) that overlaps the server is a second writer this
+// lock cannot see, and no lease can be taken on a provider that ignores
+// the conditional writes a lease would need.
 // The probe is skipped, and the conditional headers are still sent (a
 // provider that starts honouring them costs nothing).
 // docs/design/object-stores.md records what each provider does, and the
@@ -195,9 +199,9 @@ func (s *S3Store) verifyConditionalWrites(ctx context.Context) error {
 			ErrConditionalWritesNotEnforced, s.Describe())
 	}
 	// If-Match against an ETag that is not current.
-	stale := "0" + etag[1:]
-	if etag == "" {
-		stale = "deadbeef"
+	stale, err := staleETag(etag)
+	if err != nil {
+		return fmt.Errorf("probe write to %s: %w", s.Describe(), err)
 	}
 	if _, err := s.api.Write(ctx, s.bucket, key, []byte("probe 3\n"), false, stale, s.sse); !errors.Is(err, errS3Precondition) {
 		if err != nil {
@@ -210,6 +214,27 @@ func (s *S3Store) verifyConditionalWrites(ctx context.Context) error {
 			ErrConditionalWritesNotEnforced, s.Describe())
 	}
 	return nil
+}
+
+// staleETag returns an ETag that is guaranteed to differ from etag: its
+// first character flipped. (Replacing it with a fixed "0" equalled the
+// real ETag whenever that already began with "0", which with SSE-KMS's
+// random ETags is one start in sixteen, and made the probe refuse a
+// conforming backend.)
+//
+// An empty ETag is an error rather than something to build on: a
+// backend that names no revision on PutObject gives the store nothing to
+// condition an update on, so Put could never succeed against it either.
+func staleETag(etag string) (string, error) {
+	if etag == "" {
+		return "", errors.New("the backend returned no ETag for a successful write, " +
+			"so updates cannot be made conditional on a revision; this store needs a provider that returns ETags on PutObject")
+	}
+	flipped := byte('0')
+	if etag[0] == '0' {
+		flipped = '1'
+	}
+	return string(flipped) + etag[1:], nil
 }
 
 // Describe implements Store.
