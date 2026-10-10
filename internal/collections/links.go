@@ -25,9 +25,13 @@ import (
 // Backlinks shown to a viewer include only source pages that viewer
 // can see, so a private memory page that links to a public page never
 // reveals itself through the public page's `linked_from`. Resolution
-// status is viewer-independent: whether `flux:drift` exists does not
-// depend on who asks, and the ID was already in the source page's own
-// frontmatter.
+// status is decided per view as well (resolveIn): a link into a
+// collection outside the view reads "not mounted" and a link to a page
+// the viewer cannot see reads "not found", word for word what a link to
+// a collection or page that does not exist reads. The link text is in a
+// page the caller can read, so a viewer-independent status would let
+// anyone who can write such a page probe for hidden collections and for
+// other principals' private memories.
 
 // ResolvedLink is a parsed link plus what the registry knows about it.
 type ResolvedLink struct {
@@ -254,26 +258,55 @@ func linkRaw(err error) string {
 	return s
 }
 
-// resolve decides whether one link's target exists.
+// resolve decides whether one link's target exists in the whole
+// mounted set, unfiltered: what the graph's report and backlinks are
+// built from.
 func (g *linkGraph) resolve(from string, l kb.Link) ResolvedLink {
+	return resolveLink(from, l,
+		func(collection string) bool { return g.mounted[collection] },
+		func(collection, id string) bool { _, ok := g.exists[qualify(collection, id)]; return ok })
+}
+
+// resolveIn decides whether one link's target exists AS THIS VIEW SEES
+// IT: a collection outside the view is not mounted, and a page the
+// view's viewer may not see is not found. On an unrestricted, unfiltered
+// registry the answer is exactly resolve's.
+func (r *Registry) resolveIn(g *linkGraph, from string, l kb.Link) ResolvedLink {
+	v := r.viewerOf()
+	return resolveLink(from, l,
+		func(collection string) bool { _, ok := r.by[collection]; return ok },
+		func(collection, id string) bool {
+			c, ok := r.by[collection]
+			if !ok {
+				return false
+			}
+			p, ok := g.exists[qualify(collection, id)]
+			return ok && c.viewerFor(v).CanSee(p)
+		})
+}
+
+// resolveLink is the one resolution rule, over whichever notion of
+// "mounted" and "exists" the caller supplies. Keeping the wording in one
+// place is what makes a hidden target read exactly as a missing one.
+func resolveLink(from string, l kb.Link, mounted func(string) bool, exists func(collection, id string) bool) ResolvedLink {
 	switch l.Kind {
 	case kb.LinkExternal:
 		return ResolvedLink{Link: l, Resolved: true}
 	case kb.LinkCollection:
-		if !g.mounted[l.Collection] {
+		if !mounted(l.Collection) {
 			return ResolvedLink{Link: l, Reason: fmt.Sprintf("collection %q is not mounted", l.Collection)}
 		}
 		return ResolvedLink{Link: l, Resolved: true}
 	case kb.LinkQualified:
-		if !g.mounted[l.Collection] {
+		if !mounted(l.Collection) {
 			return ResolvedLink{Link: l, Reason: fmt.Sprintf("collection %q is not mounted", l.Collection)}
 		}
-		if _, ok := g.exists[qualify(l.Collection, l.ID)]; !ok {
+		if !exists(l.Collection, l.ID) {
 			return ResolvedLink{Link: l, Reason: fmt.Sprintf("page %q not found in collection %q", l.ID, l.Collection)}
 		}
 		return ResolvedLink{Link: l, Resolved: true}
 	default: // local
-		if _, ok := g.exists[qualify(from, l.ID)]; !ok {
+		if !exists(from, l.ID) {
 			return ResolvedLink{Link: l, Reason: fmt.Sprintf("page %q not found in collection %q", l.ID, from)}
 		}
 		return ResolvedLink{Link: l, Resolved: true}
@@ -293,8 +326,9 @@ func (l ResolvedLink) targetKey(from string) string {
 }
 
 // LinksOf returns what this registry view knows about ref's links:
-// its `related:` entries resolved, its backlinks (viewer-filtered),
-// and — for a pointer — its target.
+// its `related:` entries and — for a pointer — its target, resolved as
+// this view sees them (see resolveIn), and its backlinks, filtered to
+// source pages this view can see.
 func (r *Registry) LinksOf(ref PageRef) PageLinks {
 	g := r.graph()
 	v := r.viewerOf()
@@ -306,39 +340,50 @@ func (r *Registry) LinksOf(ref PageRef) PageLinks {
 		out.Invalid = append(out.Invalid, err.Error())
 	}
 	for _, l := range links {
-		out.Links = append(out.Links, g.resolve(ref.Collection, l))
+		out.Links = append(out.Links, r.resolveIn(g, ref.Collection, l))
 	}
 	for _, src := range g.backlinks[from] {
-		coll, _, _ := strings.Cut(src, ":")
-		c, ok := r.by[coll]
-		if !ok {
-			continue // outside this view
+		if r.canSeeQualified(g, v, src) {
+			out.LinkedFrom = append(out.LinkedFrom, src)
 		}
-		p, ok := g.exists[src]
-		if !ok || !c.viewerFor(v).CanSee(p) {
-			continue
-		}
-		out.LinkedFrom = append(out.LinkedFrom, src)
 	}
 	if ref.Page.IsPointer() {
 		if msg, bad := g.pointerErr[from]; bad {
 			out.PointerError = msg
 		} else if res, ok := g.pointers[from]; ok {
+			res = r.resolveIn(g, ref.Collection, res.Link)
 			out.Pointer = &res
 		}
 	}
 	return out
 }
 
-// PointerOf returns the resolved target of a pointer page in this view,
-// or false when the page is not a (valid) pointer. It is the cheap form
-// search hits use.
+// canSeeQualified reports whether the page at a qualified ID is in this
+// view: its collection is, and the view's viewer may see the page.
+func (r *Registry) canSeeQualified(g *linkGraph, v kb.Viewer, qid string) bool {
+	coll, _, _ := strings.Cut(qid, ":")
+	c, ok := r.by[coll]
+	if !ok {
+		return false // outside this view
+	}
+	p, ok := g.exists[qid]
+	return ok && c.viewerFor(v).CanSee(p)
+}
+
+// PointerOf returns the target of a pointer page resolved as this view
+// sees it (so a search hit's `target_resolved` says nothing about
+// collections or pages outside the view), or false when the page is not
+// a (valid) pointer. It is the cheap form search hits use.
 func (r *Registry) PointerOf(collection string, p kb.Page) (ResolvedLink, bool) {
 	if !p.IsPointer() {
 		return ResolvedLink{}, false
 	}
-	res, ok := r.graph().pointers[qualify(collection, p.ID)]
-	return res, ok
+	g := r.graph()
+	res, ok := g.pointers[qualify(collection, p.ID)]
+	if !ok {
+		return res, false
+	}
+	return r.resolveIn(g, collection, res.Link), true
 }
 
 // PointersTo lists the qualified IDs (`<collection>:<id>`) of every
@@ -346,10 +391,18 @@ func (r *Registry) PointerOf(collection string, p kb.Page) (ResolvedLink, bool) 
 // answers "is this collection reachable by a pointer, and from where?"
 // — what the librarian's promotion pass needs to know before proposing
 // another one (meerkat-mob issue #20).
+//
+// Only pointer pages this view can see are listed, and a collection
+// outside the view has none.
 func (r *Registry) PointersTo(collection string) []string {
+	if _, ok := r.by[collection]; !ok {
+		return nil
+	}
 	var out []string
-	for from, res := range r.graph().pointers {
-		if res.Kind == kb.LinkCollection && res.Collection == collection {
+	g := r.graph()
+	v := r.viewerOf()
+	for from, res := range g.pointers {
+		if res.Kind == kb.LinkCollection && res.Collection == collection && r.canSeeQualified(g, v, from) {
 			out = append(out, from)
 		}
 	}
@@ -359,7 +412,9 @@ func (r *Registry) PointersTo(collection string) []string {
 
 // LinkReport returns the registry-wide link health. It is what
 // Registry.Check folds into each collection's Health and what
-// `mk lint` prints.
+// `mk lint` prints. It is an OPERATOR view over the whole mounted set,
+// computed from the root's graph regardless of the view it is called
+// on; no per-caller surface returns it.
 func (r *Registry) LinkReport() LinkReport { return r.graph().report }
 
 // danglingFor returns the dangling entries of one collection.

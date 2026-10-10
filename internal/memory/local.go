@@ -49,6 +49,9 @@ type LocalStore struct {
 	// single lock is a property you can check by reading one function
 	// instead of an invariant about a map of locks.
 	mu sync.Mutex
+
+	// quota bounds each owner's partition; see Quota.
+	quota Quota
 }
 
 // OpenLocal opens (creating it if needed) a local memory store at dir.
@@ -72,7 +75,7 @@ func OpenLocal(dir string) (*LocalStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open memory directory %q: %w", abs, err)
 	}
-	return &LocalStore{root: root, dir: abs}, nil
+	return &LocalStore{root: root, dir: abs, quota: DefaultQuota()}, nil
 }
 
 // Close releases the store's directory handle.
@@ -94,7 +97,9 @@ func (s *LocalStore) Location(key string) string {
 }
 
 // Load implements Store: every live .md document under the root, in key
-// order, with StagingPrefix skipped.
+// order, with StagingPrefix skipped. Like the object-store backends it
+// refuses a store holding more than maxMemoryObjects live documents
+// rather than reading an unbounded tree into memory.
 func (s *LocalStore) Load(_ context.Context) ([]Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -116,6 +121,9 @@ func (s *LocalStore) Load(_ context.Context) ([]Record, error) {
 		// kb.ListFS.
 		if !d.Type().IsRegular() || !strings.HasSuffix(p, ".md") {
 			return nil
+		}
+		if len(out) >= maxMemoryObjects {
+			return fmt.Errorf("holds more than %d live documents; refusing", maxMemoryObjects)
 		}
 		body, rerr := s.readFile(p)
 		if rerr != nil {
@@ -167,6 +175,9 @@ func (s *LocalStore) Put(_ context.Context, key string, body []byte, pre Precond
 	case !pre.Absent && current != pre.Version:
 		return "", &ConflictError{Key: key, Current: current}
 	}
+	if err := s.admit(key, len(body)); err != nil {
+		return "", err
+	}
 	if err := s.write(key, body); err != nil {
 		return "", err
 	}
@@ -184,6 +195,9 @@ func (s *LocalStore) Stage(_ context.Context, key string, body []byte) (string, 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.admit(key, len(body)); err != nil {
+		return "", err
+	}
 	if err := s.write(key, body); err != nil {
 		return "", err
 	}
@@ -202,6 +216,47 @@ func (s *LocalStore) Delete(_ context.Context, key string) error {
 		return fmt.Errorf("delete memory %q: %w", key, err)
 	}
 	return nil
+}
+
+// admit checks a write against the store's Quota. The caller holds
+// s.mu, so for this backend the check and the write are one step.
+func (s *LocalStore) admit(key string, size int) error {
+	prefix, _, ok := quotaPartition(key)
+	if !ok {
+		return nil
+	}
+	used, err := s.partition(prefix)
+	if err != nil {
+		return err
+	}
+	return s.quota.admit(key, size, used)
+}
+
+// partition lists the documents under one partition prefix, with their
+// sizes. A partition that does not exist yet is empty.
+func (s *LocalStore) partition(prefix string) ([]storedObject, error) {
+	var out []storedObject
+	err := fs.WalkDir(s.root.FS(), strings.TrimSuffix(prefix, "/"), func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() || !countsTowardQuota(p) {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		out = append(out, storedObject{Key: p, Size: info.Size()})
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("measure memory partition: %w", err)
+	}
+	return out, nil
 }
 
 // currentVersion reports the version of key on disk right now.

@@ -41,7 +41,11 @@ IDs to choose from, never a silent pick:
 frontmatter (front): trust_tier (unverified | machine-confirmed |
 human-reviewed, derived from front.verified — SPEC.md §5.3) and stale
 (whether today is on/after front.stale_after — SPEC.md §5.5), plus the
-collection the page was served from.`,
+collection the page was served from.
+
+Text output has terminal control characters (C0 and C1, except newline
+and tab) removed, so content from a remote collection cannot drive the
+terminal; --json carries the stored values exactly.`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completePageIDs(false),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -56,26 +60,27 @@ collection the page was served from.`,
 			if asJSON {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(newShowResult(reg, ref))
 			}
+			out := textOut(cmd)
 			if ref.Page.IsPointer() {
 				// A pointer's payload is where to go and why; the body,
 				// if any, is the how-to.
 				links := reg.LinksOf(ref)
 				switch {
 				case links.PointerError != "":
-					fmt.Fprintf(cmd.OutOrStdout(), "pointer (invalid): %s\n", links.PointerError)
+					fmt.Fprintf(out, "pointer (invalid): %s\n", links.PointerError)
 				case links.Pointer != nil && !links.Pointer.Resolved:
-					fmt.Fprintf(cmd.OutOrStdout(), "pointer -> %s (unresolved: %s)\n", links.Pointer.String(), links.Pointer.Reason)
+					fmt.Fprintf(out, "pointer -> %s (unresolved: %s)\n", links.Pointer.String(), links.Pointer.Reason)
 				case links.Pointer != nil:
-					fmt.Fprintf(cmd.OutOrStdout(), "pointer -> %s\n", links.Pointer.String())
+					fmt.Fprintf(out, "pointer -> %s\n", links.Pointer.String())
 				}
 				if ref.Page.Front.Hint != "" {
-					fmt.Fprintf(cmd.OutOrStdout(), "hint: %s\n", ref.Page.Front.Hint)
+					fmt.Fprintf(out, "hint: %s\n", ref.Page.Front.Hint)
 				}
 				if strings.TrimSpace(ref.Page.Body) != "" {
-					fmt.Fprintln(cmd.OutOrStdout())
+					fmt.Fprintln(out)
 				}
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), ref.Page.Body)
+			fmt.Fprintln(out, ref.Page.Body)
 			return nil
 		},
 	}

@@ -177,7 +177,7 @@ intake item), which is what the researcher role turns into pages.
 |---|---|
 | draft pages from the capability map | `mk ingest --role researcher --from intake` (target KB `<authority>`) |
 | confirm each page against the live server | `mk ingest --role validator --from intake` twice, distinct models (Q7) |
-| file confirmed pages | `mk ingest --role librarian --apply` through the authority KB's contract |
+| file confirmed pages | `mk ingest --role librarian --apply` through the authority KB's contract (a `direct` contract also needs `--file-confirmed`) |
 | check shape and links | `mk lint` in the authority KB's CI (invalid pointer, dangling `related:`) |
 
 The validator's brief for an authority KB (a content-repo override,
@@ -269,7 +269,8 @@ authority's tools get wrong.
 
 The librarian never applies without `--apply`, and `--apply` never
 does more than the contract allows (`none` names the change for a
-human to place).
+human to place); a candidate page reaches a `direct` contract only with
+`--file-confirmed` as well.
 
 ## Acceptance
 

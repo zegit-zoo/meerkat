@@ -137,7 +137,7 @@ func TestGCSFingerprint_ListFailureSurfaces(t *testing.T) {
 // failingListAPI is a gcsMemoryAPI whose List always fails.
 type failingListAPI struct{ gcsMemoryAPI }
 
-func (f *failingListAPI) List(context.Context, string, string) ([]gcsObject, error) {
+func (f *failingListAPI) List(context.Context, string, string, func(string) bool) ([]gcsObject, error) {
 	return nil, errFakeNotExist
 }
 

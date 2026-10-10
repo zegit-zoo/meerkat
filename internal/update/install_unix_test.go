@@ -76,11 +76,11 @@ func TestInstallStagedWithSudoUsesOnlyFinalCopyMoveCommands_Unix(t *testing.T) {
 	// staging path out of the first command so the rest of the
 	// sequence can be checked for internal consistency.
 	wantPrefixes := []string{
-		"sudo cp " + staged + " " + current + ".new-",
-		"sudo chmod 0755 " + current + ".new-",
-		"sudo mv " + current + " " + current + ".old",
-		"sudo mv " + current + ".new-",
-		"sudo rm -f " + current + ".old",
+		"sudo cp -- " + staged + " " + current + ".new-",
+		"sudo chmod 0755 -- " + current + ".new-",
+		"sudo mv -f -- " + current + " " + current + ".old-",
+		"sudo mv -f -- " + current + ".new-",
+		"sudo rm -f -- " + current + ".old-",
 	}
 	for i, wantPrefix := range wantPrefixes {
 		if !strings.HasPrefix(got[i], wantPrefix) {
@@ -91,10 +91,10 @@ func TestInstallStagedWithSudoUsesOnlyFinalCopyMoveCommands_Unix(t *testing.T) {
 	// prone name: neither the cp nor the chmod command may target
 	// exactly "<current>.new" (as opposed to "<current>.new-<hex>").
 	legacyStagingPath := current + ".new"
-	if got[0] == "sudo cp "+staged+" "+legacyStagingPath {
+	if got[0] == "sudo cp -- "+staged+" "+legacyStagingPath {
 		t.Errorf("cp command uses the old fixed/predictable staging path: %q", got[0])
 	}
-	if got[1] == "sudo chmod 0755 "+legacyStagingPath {
+	if got[1] == "sudo chmod 0755 -- "+legacyStagingPath {
 		t.Errorf("chmod command uses the old fixed/predictable staging path: %q", got[1])
 	}
 
@@ -110,7 +110,7 @@ func TestInstallStagedWithSudoUsesOnlyFinalCopyMoveCommands_Unix(t *testing.T) {
 	}
 	// got[3] is "sudo mv <stagingPath> <current>" — the staging path
 	// is the source (middle field), not the last one.
-	wantMv := "sudo mv " + stagingPath + " " + current
+	wantMv := "sudo mv -f -- " + stagingPath + " " + current
 	if got[3] != wantMv {
 		t.Errorf("final mv command = %q, want %q", got[3], wantMv)
 	}
@@ -130,8 +130,8 @@ func TestInstallStagedWithSudo_StagingPathIsUnpredictable(t *testing.T) {
 
 	var stagingPaths []string
 	runCommand = func(name string, args ...string) error {
-		if name == "sudo" && len(args) >= 3 && args[0] == "cp" {
-			stagingPaths = append(stagingPaths, args[2])
+		if name == "sudo" && len(args) >= 4 && args[0] == "cp" {
+			stagingPaths = append(stagingPaths, args[3])
 		}
 		return nil
 	}
@@ -173,12 +173,135 @@ func TestPermissionDeniedError_MessageShape_Unix(t *testing.T) {
 		"permission denied writing to",
 		"in-place atomic swap",
 		"sudo mk update",
-		"cosign-signature-verified",
+		"the cosign: line",
 		"/usr/local/bin",
 		"docs/INSTALL.md#updating",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("expected %q in error message", want)
 		}
+	}
+}
+
+// TestInstallStagedWithSudo_BackupNameIsUnpredictableAndGuarded covers
+// the sudo backup `mv`: a fixed "<exe>.old" could be a pre-planted
+// symlink to a directory, in which case `mv f link` moves f *into* the
+// target as root. The backup name must be random per run, and every
+// privileged command must pass "--" so no path can be read as an
+// option. (The sudo path itself is checked manually; see
+// docs/INSTALL.md "Checking the sudo update path".)
+func TestInstallStagedWithSudo_BackupNameIsUnpredictableAndGuarded(t *testing.T) {
+	oldRunCommand := runCommand
+	t.Cleanup(func() { runCommand = oldRunCommand })
+
+	var backups []string
+	runCommand = func(name string, args ...string) error {
+		if name != "sudo" {
+			t.Fatalf("unexpected command %q", name)
+		}
+		hasDD := false
+		for _, a := range args {
+			hasDD = hasDD || a == "--"
+		}
+		if !hasDD {
+			t.Errorf("sudo %v: missing \"--\" end-of-options marker", args)
+		}
+		if args[0] == "mv" && args[3] == filepath.Join("x", "meerkat") {
+			backups = append(backups, args[4])
+		}
+		return nil
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := installStagedWithSudo("staged", filepath.Join("x", "meerkat")); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	if len(backups) != 3 {
+		t.Fatalf("captured backups = %v", backups)
+	}
+	seen := map[string]bool{}
+	for _, b := range backups {
+		if b == filepath.Join("x", "meerkat.old") || !strings.HasPrefix(b, filepath.Join("x", "meerkat.old-")) {
+			t.Errorf("backup path %q is not a random name", b)
+		}
+		if seen[b] {
+			t.Errorf("backup path %q reused", b)
+		}
+		seen[b] = true
+	}
+}
+
+// swapWithBackupSudo (the bootstrap flavour) keeps the stable ".old"
+// name, so it must clear that name with `rm -f --` (unlinking a planted
+// symlink without following it) before the move.
+func TestSwapWithBackupSudo_ClearsStableBackupNameFirst(t *testing.T) {
+	oldRunCommand := runCommand
+	t.Cleanup(func() { runCommand = oldRunCommand })
+	var got []string
+	runCommand = func(name string, args ...string) error {
+		got = append(got, name+" "+strings.Join(args, " "))
+		return nil
+	}
+	cur := filepath.Join("x", "meerkat")
+	bp, err := swapWithBackupSudo("staged", cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bp != cur+".old" {
+		t.Errorf("backup = %q", bp)
+	}
+	if got[0] != "sudo rm -f -- "+cur+".old" {
+		t.Errorf("first command = %q, want rm -f of the backup name", got[0])
+	}
+	if got[3] != "sudo mv -f -- "+cur+" "+cur+".old" {
+		t.Errorf("backup mv = %q", got[3])
+	}
+}
+
+func TestReExecArgvAndEnv(t *testing.T) {
+	if got := reExecArgv("/bin/mk"); len(got) != 2 || got[0] != "/bin/mk" || got[1] != "version" {
+		t.Errorf("argv = %v, want [/bin/mk version]", got)
+	}
+	env := reExecEnv([]string{"A=1", UpdatedGuardEnv + "=0", "B=2"})
+	n := 0
+	for _, e := range env {
+		if strings.HasPrefix(e, UpdatedGuardEnv+"=") {
+			n++
+			if e != UpdatedGuardEnv+"=1" {
+				t.Errorf("guard = %q", e)
+			}
+		}
+	}
+	if n != 1 || len(env) != 3 {
+		t.Errorf("env = %v", env)
+	}
+}
+
+// With a fake "binary" (the exec is stubbed so the test process
+// survives), the hand-off must run `<exe> version` with the guard set,
+// never the original `update --force --yes` argv.
+func TestReExec_RunsVersionWithGuard(t *testing.T) {
+	oldExec, oldArgs := execFn, os.Args
+	t.Cleanup(func() { execFn, os.Args = oldExec, oldArgs })
+	os.Args = []string{"mk", "update", "--force", "--yes"}
+	var gotPath string
+	var gotArgv, gotEnv []string
+	execFn = func(path string, argv, env []string) error {
+		gotPath, gotArgv, gotEnv = path, argv, env
+		return nil
+	}
+	if err := reExec("/fake/meerkat"); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/fake/meerkat" || strings.Join(gotArgv, " ") != "/fake/meerkat version" {
+		t.Errorf("exec %q %v", gotPath, gotArgv)
+	}
+	found := false
+	for _, e := range gotEnv {
+		found = found || e == UpdatedGuardEnv+"=1"
+	}
+	if !found {
+		t.Error("guard env not set on re-exec")
 	}
 }

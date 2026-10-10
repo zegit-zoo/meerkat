@@ -126,8 +126,8 @@ func TestVerifyChecksumSignature_OK(t *testing.T) {
 // TestDownloadToTemp writes the response body to a tempfile.
 func TestDownloadToTemp(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer tok" {
-			http.Error(w, "no", http.StatusUnauthorized)
+		if r.Header.Get("Authorization") != "" {
+			http.Error(w, "token must not be sent when anonymous works", http.StatusBadRequest)
 			return
 		}
 		_, _ = w.Write([]byte("hello"))

@@ -5,13 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
+	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
+	"github.com/zegit-zoo/meerkat/internal/kbdir"
 	"github.com/zegit-zoo/meerkat/internal/mcp"
 	"github.com/zegit-zoo/meerkat/internal/retrieval"
 	"github.com/zegit-zoo/meerkat/internal/traversal"
@@ -97,6 +101,7 @@ func newMCPServeHTTPCmd() *cobra.Command {
 		stateful       bool
 		trustProxyHost bool
 		securityTxt    bool
+		insecureNoAuth bool
 	)
 	cmd := &cobra.Command{
 		Use:   "serve-http",
@@ -172,7 +177,12 @@ allow_unauthenticated.
 
 With NO auth: block configured the server is unauthenticated and every
 mounted collection is readable by any caller — the same posture as
-'mcp serve'. Bind loopback (the default) or put a gateway in front.
+'mcp serve'. Bind loopback (the default) or put a gateway in front: the
+server REFUSES to start on a non-loopback address with no authentication
+unless --insecure-no-auth is given (or the auth: block says
+allow_unauthenticated: true). An auth: block that names no providers, or
+carries a key meerkat does not know, is a startup error rather than a
+silent "no auth".
 
 A collection whose content-source.yaml entry carries a "refresh:" block
 is re-checked while the server runs: a metadata-only probe every
@@ -223,6 +233,7 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				}
 				auth = loaded
 			}
+			warnSuppressedAuth(cmd, authConfigPath, auth)
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
@@ -242,6 +253,16 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 			if listener != nil && (cmd.Flags().Changed("host") || cmd.Flags().Changed("port")) {
 				fmt.Fprintln(cmd.ErrOrStderr(),
 					"warning: socket-activated by systemd; --host and --port are ignored")
+			}
+			bind := host
+			if listener != nil {
+				bind = listener.Addr().String()
+			}
+			if err := checkUnauthenticatedBind(bind, auth, insecureNoAuth); err != nil {
+				if listener != nil {
+					_ = listener.Close()
+				}
+				return err
 			}
 
 			cfg := mcp.HostedConfig{
@@ -301,10 +322,68 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 		"Disable DNS-rebinding protection (which rejects loopback requests whose Host header is not "+
 			"a localhost value). Only for a same-host reverse proxy that preserves the original Host "+
 			"header; prefer rewriting Host at the proxy instead.")
+	cmd.Flags().BoolVar(&insecureNoAuth, "insecure-no-auth", false,
+		"Allow binding a non-loopback address with no authentication configured. Without it the "+
+			"server refuses to start in that state; use it only when a gateway in front authenticates every request.")
 	cmd.Flags().BoolVar(&securityTxt, "security-txt", true,
 		"Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. "+
 			"Turn it off when the host serves a security.txt of its own")
 	return cmd
+}
+
+// checkUnauthenticatedBind refuses to serve with no authentication on an
+// address other hosts can reach. bind is a host or a host:port (the
+// address of a socket-activated listener). An auth: block with
+// allow_unauthenticated: true is the explicit, in-file opt-in for a
+// gateway-fronted deployment; --insecure-no-auth is the command-line one.
+func checkUnauthenticatedBind(bind string, auth *authz.Config, insecureNoAuth bool) error {
+	if auth != nil && auth.Enabled() {
+		return nil
+	}
+	if insecureNoAuth || isLoopbackBind(bind) {
+		return nil
+	}
+	return fmt.Errorf("mcp serve-http: refusing to serve on %q with no authentication: every mounted collection would be "+
+		"readable by any caller that can reach it. Configure an auth: block (or --auth-config), bind a loopback "+
+		"address, or pass --insecure-no-auth if a gateway in front authenticates every request", bind)
+}
+
+// isLoopbackBind reports whether bind (host or host:port) is a loopback
+// address. An empty host means "default", which this command binds to
+// loopback; "0.0.0.0" and "::" listen on every interface and are not.
+func isLoopbackBind(bind string) bool {
+	host := bind
+	if h, _, err := net.SplitHostPort(bind); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// warnSuppressedAuth tells the operator when --kb-dir/MEERKAT_KB_DIR made
+// this server ignore an auth: block that a content-source.yaml would
+// otherwise have supplied: the server then runs with whatever --auth-config
+// says, or with no authentication at all.
+func warnSuppressedAuth(cmd *cobra.Command, authConfigPath string, auth *authz.Config) {
+	if authConfigPath != "" || auth != nil {
+		return
+	}
+	kbDir, _ := cmd.Flags().GetString("kb-dir")
+	if kbdir.Resolve(kbDir) == "" {
+		return
+	}
+	contentSource, _ := cmd.Flags().GetString("content-source")
+	found, err := contentsource.LoadRuntimeAuth(contentSource)
+	if err != nil || found == nil {
+		return
+	}
+	fmt.Fprintln(cmd.ErrOrStderr(),
+		"warning: --kb-dir/MEERKAT_KB_DIR is set, so the auth: block in content-source.yaml is IGNORED and this "+
+			"server runs without it; pass --auth-config to supply the policy, or unset --kb-dir/MEERKAT_KB_DIR")
 }
 
 // notifyReload registers for SIGHUP and returns the channel it arrives

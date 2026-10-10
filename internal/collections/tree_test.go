@@ -2,6 +2,7 @@ package collections
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -174,7 +175,8 @@ func TestTree_ViewsHideSubtreesTheyCannotSee(t *testing.T) {
 	for _, e := range only.TreeEntries() {
 		paths = append(paths, e.Path)
 	}
-	if strings.Join(paths, ",") != "root/platform,root/platform/flux" {
+	// root is hidden, so the paths start below it.
+	if strings.Join(paths, ",") != "platform,platform/flux" {
 		t.Errorf("restricted entries = %v (root and its cold child must be absent)", paths)
 	}
 	hits, err := only.Search(context.Background(), "", "flux", 10)
@@ -183,5 +185,165 @@ func TestTree_ViewsHideSubtreesTheyCannotSee(t *testing.T) {
 	}
 	if len(hits) == 0 {
 		t.Error("a view without the root falls back to searching what it can see")
+	}
+}
+
+// answer renders whatever an operation returned as one string, with the
+// probed reference replaced by a placeholder, so a hidden reference and
+// a nonexistent one can be compared byte for byte.
+func answer(ref string, v any, err error) string {
+	body, _ := json.Marshal(v)
+	out := string(body)
+	if err != nil {
+		out += " error: " + err.Error()
+	}
+	return strings.ReplaceAll(out, ref, "<ref>")
+}
+
+// TestTree_HiddenAnswersAsNonexistent pins meerkat-mob#39: in a tree,
+// every tree-aware answer a restricted view gives about a knowledge base
+// it cannot see — by name, by tree path, through a path alias, or as a
+// cold child — is byte-identical to the answer for one nobody declared.
+func TestTree_HiddenAnswersAsNonexistent(t *testing.T) {
+	reg := openTree(t)
+	only := func(names ...string) *Registry {
+		return reg.Restrict(func(name string) bool {
+			for _, n := range names {
+				if n == name {
+					return true
+				}
+			}
+			return false
+		})
+	}
+	ctx := context.Background()
+	cases := []struct {
+		view             []string
+		hidden, nonexist string
+	}{
+		{[]string{"flux"}, "platform", "nosuchkb"},
+		{[]string{"flux"}, "vendors", "nosuchkb"},                          // a cold lazy child
+		{[]string{"flux"}, "root/platform", "nope/nowhere"},                // a hidden hub by path
+		{[]string{"flux"}, "root/vendors", "nope/nowhere"},                 // a cold child by path
+		{[]string{"flux"}, "root/platform/flux", "nope/nowhere/flux"},      // a visible leaf through hidden hubs
+		{[]string{"root"}, "root/platform", "root/nowhere"},                // a hidden child of a visible root
+		{[]string{"root", "flux"}, "root/platform/flux", "root/nope/flux"}, // a hidden middle hub
+		{[]string{"root"}, "vendors", "nosuchkb"},
+	}
+	for _, tc := range cases {
+		view := only(tc.view...)
+		name := strings.Join(tc.view, "+") + "/" + tc.hidden
+		t.Run(name, func(t *testing.T) {
+			probe := func(ref string) map[string]string {
+				out := map[string]string{}
+				c, err := view.Get(ref)
+				var got string
+				if c != nil {
+					got = c.Name
+				}
+				out["Get"] = answer(ref, got, err)
+				hits, err := view.Search(ctx, ref, "flux platform vendors", 5)
+				out["Search"] = answer(ref, hits, err)
+				coll, id := view.SplitQualified(ref + ":flux")
+				out["SplitQualified"] = answer(ref, []string{coll, id}, nil)
+				page, err := view.Show("", ref+":flux")
+				out["Show"] = answer(ref, page, err)
+				page, err = view.Show(ref, "flux")
+				out["Show(collection)"] = answer(ref, page, err)
+				n, ok := view.TreeNode(ref)
+				out["TreeNode"] = answer(ref, []any{n, ok}, nil)
+				return out
+			}
+			hidden, nonexist := probe(tc.hidden), probe(tc.nonexist)
+			for op := range hidden {
+				if hidden[op] != nonexist[op] {
+					t.Errorf("%s: hidden %q answers\n  %s\nbut nonexistent %q answers\n  %s", op, tc.hidden, hidden[op], tc.nonexist, nonexist[op])
+				}
+			}
+			// Nothing the view lists names a knowledge base outside it.
+			entries, _ := json.Marshal(view.TreeEntries())
+			for _, n := range []string{"root", "platform", "flux", "vendors"} {
+				if visible := view.sees(n); !visible && strings.Contains(string(entries), `"`+n) {
+					t.Errorf("TreeEntries names hidden %q: %s", n, entries)
+				}
+				if !view.sees(n) && strings.Contains(string(entries), "/"+n) {
+					t.Errorf("TreeEntries names hidden %q in a path: %s", n, entries)
+				}
+			}
+		})
+	}
+	// Lookups through hidden hubs did not mount the hidden cold child.
+	if v, _ := reg.Get("vendors"); !v.IsCold() {
+		t.Error("a restricted lookup mounted a collection outside its view")
+	}
+}
+
+func TestTree_ViewNodeFiltersMetadata(t *testing.T) {
+	reg := openTree(t)
+	rootOnly := reg.Restrict(func(name string) bool { return name == "root" })
+	n, ok := rootOnly.TreeNode("root")
+	if !ok || n.Path != "root" || len(n.Children) != 0 {
+		t.Errorf("root-only view of root = %+v %v, want no children", n, ok)
+	}
+	fluxOnly := reg.Restrict(func(name string) bool { return name == "flux" })
+	n, ok = fluxOnly.TreeNode("flux")
+	if !ok || n.Path != "flux" || n.Parent != "" || n.Depth != 2 {
+		t.Errorf("flux-only view of flux = %+v %v, want path flux, no parent, tier kept", n, ok)
+	}
+	rootFlux := reg.Restrict(func(name string) bool { return name == "root" || name == "flux" })
+	if n, _ := rootFlux.TreeNode("flux"); n.Path != "flux" || n.Parent != "" {
+		t.Errorf("root+flux view of flux = %+v: the hidden hub must not appear", n)
+	}
+	// The unrestricted registry is unchanged, and child residency is live.
+	n, _ = reg.TreeNode("root")
+	if n.Path != "root" || len(n.Children) != 2 || n.Children[1].Name != "vendors" || n.Children[1].Mounted {
+		t.Fatalf("root = %+v", n)
+	}
+	if _, err := reg.Search(context.Background(), "root/vendors", "vendors", 5); err != nil {
+		t.Fatalf("a visible lazy child mounts through its path alias: %v", err)
+	}
+	if n, _ := reg.TreeNode("root"); !n.Children[1].Mounted {
+		t.Errorf("children must report live residency after the mount: %+v", n.Children)
+	}
+	// The copy is a copy: filtering never writes through to the tree.
+	if c, _ := reg.Get("root"); len(c.Tree.Children) != 2 {
+		t.Errorf("view filtering mutated the shared node: %+v", c.Tree.Children)
+	}
+}
+
+// TestTree_DeclaredOnlyNodeNeedsTheViewsGrant covers a node the tree
+// declares that this process has no collection for (placement:
+// dedicated): it is listed and named as cold only for a view whose
+// Restrict predicate accepts it, never merely because its parent is
+// visible.
+func TestTree_DeclaredOnlyNodeNeedsTheViewsGrant(t *testing.T) {
+	reg := openTree(t)
+	reg.tree.nodes["edge"] = &contentsource.TreeNode{Name: "edge", Path: "root/edge", Depth: 1, Parent: "root", Mount: contentsource.MountEager, Placement: contentsource.PlacementDedicated}
+	reg.tree.byPath["root/edge"] = "edge"
+
+	if _, err := reg.Get("edge"); !errors.Is(err, ErrColdCollection) {
+		t.Errorf("unrestricted Get(edge) = %v, want the cold-collection error", err)
+	}
+	rootOnly := reg.Restrict(func(name string) bool { return name == "root" })
+	_, hidden := rootOnly.Get("edge")
+	_, never := rootOnly.Get("nosuchkb")
+	if errors.Is(hidden, ErrColdCollection) || answer("edge", nil, hidden) != answer("nosuchkb", nil, never) {
+		t.Errorf("hidden declared node = %v, want the same answer as %v", hidden, never)
+	}
+	for _, e := range rootOnly.TreeEntries() {
+		if e.Name == "edge" {
+			t.Error("a declared node outside the view is listed because its parent is visible")
+		}
+	}
+	withEdge := reg.Restrict(func(name string) bool { return name == "root" || name == "edge" })
+	if _, err := withEdge.Get("root/edge"); !errors.Is(err, ErrColdCollection) || !strings.Contains(err.Error(), `under "root"`) {
+		t.Errorf("granted declared node = %v, want cold under root", err)
+	}
+	edgeOnly := reg.Restrict(func(name string) bool { return name == "edge" })
+	if _, err := edgeOnly.Get("edge"); err == nil || strings.Contains(err.Error(), "root") {
+		t.Errorf("a cold error must not name a hidden parent: %v", err)
+	}
+	if e := withEdge.TreeEntries(); len(e) != 2 || e[1].Name != "edge" || e[1].Mounted {
+		t.Errorf("entries = %+v", e)
 	}
 }

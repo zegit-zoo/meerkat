@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -54,6 +55,8 @@ type Telemetry struct {
 	// restoreGlobals undoes the process-global OpenTelemetry providers
 	// this instance installed. Nil when it installed none.
 	restoreGlobals func()
+	errHandler     *errorHandler
+	trusted        []netip.Prefix
 }
 
 // Options configures New. It mirrors refresh.Options' shape — a config,
@@ -126,7 +129,8 @@ func New(ctx context.Context, opts Options) (*Telemetry, error) {
 		// onto meerkat's outbound OIDC discovery/JWKS calls would push
 		// somebody else's key/value pairs to the identity provider. Not
 		// carrying it is a stronger statement than carrying it carefully.
-		prop: propagation.TraceContext{},
+		prop:    propagation.TraceContext{},
+		trusted: cfg.TrustedSources,
 	}
 	if cfg.PrometheusMetrics {
 		t.metrics = newMetrics(opts.Registry)
@@ -156,7 +160,15 @@ func New(ctx context.Context, opts Options) (*Telemetry, error) {
 	// instead of otel's default, which writes to the standard logger.
 	// Diagnostics belong on stderr with everything else, never on stdout
 	// — stdout is the stdio transport's wire.
-	otel.SetErrorHandler(&errorHandler{log: log, metrics: t.metrics, limiter: newRateLimiter(time.Minute)})
+	// The SDK has one global handler slot, so it is claimed ONCE per
+	// process and routed to the most recently started instance; see
+	// installErrorHandler.
+	t.errHandler = &errorHandler{log: log, metrics: t.metrics, limiter: newRateLimiter(time.Minute)}
+	installErrorHandler(t.errHandler)
+	if cfg.LogLevel != "" || cfg.LogFormat != "" {
+		log.Warn("observability.logs.level and observability.logs.format have no effect and are deprecated — " +
+			"the server's logger is configured by its own flags; remove them from the file")
+	}
 
 	if opts.SetGlobals {
 		t.installGlobals()
@@ -202,7 +214,10 @@ func (t *Telemetry) startTracing(ctx context.Context, res *resource.Resource, ov
 			log:           t.log,
 			metrics:       t.metrics,
 		})
-		popts = append(popts, sdktrace.WithSpanProcessor(bp))
+		// The allowlist sits in front of the queue so that nothing a
+		// third-party instrumentation attached ever reaches the exporter;
+		// the per-second cap sits between it and the batch processor.
+		popts = append(popts, sdktrace.WithSpanProcessor(newAllowlistProcessor(newLimitProcessor(bp, t.cfg.MaxSpansPerSecond, t.metrics))))
 	}
 	tp := sdktrace.NewTracerProvider(popts...)
 	t.tracerProvider = tp
@@ -390,7 +405,9 @@ func (t *Telemetry) Start(ctx context.Context, name string, opts ...trace.SpanSt
 	return t.tracer.Start(ctx, name, opts...)
 }
 
-// Extract reads W3C trace context from inbound request headers.
+// Extract reads W3C trace context from inbound request headers,
+// unconditionally. The hosted server goes through ExtractRequest, which
+// applies the trusted-source rule first.
 //
 // A MALFORMED traceparent is ignored: the W3C propagator returns a
 // context with an invalid span context rather than an error, and the
@@ -404,6 +421,39 @@ func (t *Telemetry) Extract(ctx context.Context, h http.Header) context.Context 
 		return ctx
 	}
 	return t.prop.Extract(ctx, propagation.HeaderCarrier(h))
+}
+
+// ExtractRequest continues the caller's trace only when the request's
+// TCP peer is in traces.trusted_sources; otherwise it returns ctx
+// untouched, so the span started from it is a fresh root sampled at
+// sample_ratio with a meerkat-generated trace ID.
+//
+// Honouring an inbound sampled flag from an arbitrary caller would let
+// anyone force sampling (and so export cost and queue pressure) and
+// choose the trace ID their spans are filed under. The peer address, not
+// a header, is what decides: X-Forwarded-For is caller-written.
+func (t *Telemetry) ExtractRequest(ctx context.Context, r *http.Request) context.Context {
+	if t == nil || !t.trustedPeer(r.RemoteAddr) {
+		return ctx
+	}
+	return t.Extract(ctx, r.Header)
+}
+
+func (t *Telemetry) trustedPeer(remoteAddr string) bool {
+	if len(t.trusted) == 0 {
+		return false
+	}
+	ap, err := netip.ParseAddrPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	addr := ap.Addr().Unmap()
+	for _, p := range t.trusted {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // Inject writes this context's trace context into outbound headers.
@@ -486,6 +536,7 @@ func (t *Telemetry) Shutdown(ctx context.Context) error {
 		t.restoreGlobals()
 		t.restoreGlobals = nil
 	}
+	uninstallErrorHandler(t.errHandler)
 	timeout := t.cfg.ShutdownTimeout.Duration()
 	if timeout <= 0 {
 		timeout = defaultShutdownTimeout
@@ -537,7 +588,8 @@ func (rt *tracingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	rt.tel.Inject(ctx, out.Header)
 	resp, err := rt.inner.RoundTrip(out)
 	if err != nil {
-		span.RecordError(err)
+		// A *url.Error carries the full request URL; record the class only.
+		recordFailure(span, err)
 		return nil, err
 	}
 	span.SetAttributes(semconv.HTTPResponseStatusCode(resp.StatusCode))

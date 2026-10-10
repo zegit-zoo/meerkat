@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/zegit-zoo/meerkat/internal/memory"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
@@ -67,6 +68,10 @@ type Item struct {
 	Sources      []string
 	SubmittedBy  string
 	ReportedAt   time.Time
+	// TargetKB is the collection mk_report_outcome resolved as the
+	// deposit's target, from the depositor's own view of the registry
+	// (meerkat-mob#38); "" on a deposit made before it recorded one.
+	TargetKB string
 }
 
 // Store is the intake store over a memory.Store.
@@ -98,16 +103,67 @@ func RawKey(namespace string, now time.Time, id string) string {
 	return path.Join(StageRaw, namespace, now.UTC().Format("2006-01-02"), id, "page.md")
 }
 
-// StagedKey is where a candidate page for kb lands.
-func StagedKey(kb, id string) string { return path.Join(StageStaged, kb, id+".md") }
+// Segment reports whether s may be one segment of an intake key: a
+// collection name, an intake id or a namespace. It must be non-empty,
+// not "." or "..", and free of path separators and control characters,
+// so a key built from it stays inside its stage (meerkat-mob#38).
+// Keys are built from caller-influenced values (the deposit's target
+// collection), and path.Join would otherwise clean ".." away before any
+// later check could see it.
+func Segment(s string) error {
+	switch {
+	case s == "":
+		return errors.New("intake: empty key segment")
+	case s == "." || s == "..":
+		return fmt.Errorf("intake: %q is not a key segment", s)
+	case len(s) > maxSegment:
+		return fmt.Errorf("intake: key segment over %d bytes", maxSegment)
+	case strings.ContainsFunc(s, func(r rune) bool { return r == '/' || r == '\\' || unicode.IsControl(r) }):
+		return fmt.Errorf("intake: %q is not a single key segment", s)
+	}
+	return nil
+}
 
-func doneKey(id string) string   { return path.Join(StageDone, id+".md") }
-func parkedKey(id string) string { return path.Join(StageParked, id+".md") }
+// maxSegment bounds one key segment.
+const maxSegment = 200
+
+// StagedKey is where a candidate page for kb lands.
+func StagedKey(kb, id string) (string, error) {
+	if err := Segment(kb); err != nil {
+		return "", err
+	}
+	if err := Segment(id); err != nil {
+		return "", err
+	}
+	return StageStaged + "/" + kb + "/" + id + ".md", nil
+}
+
+func doneKey(id string) (string, error) {
+	if err := Segment(id); err != nil {
+		return "", err
+	}
+	return StageDone + "/" + id + ".md", nil
+}
+
+func parkedKey(id string) (string, error) {
+	if err := Segment(id); err != nil {
+		return "", err
+	}
+	return StageParked + "/" + id + ".md", nil
+}
 
 // PutRaw deposits a raw page create-only and returns its key.
 func (st *Store) PutRaw(ctx context.Context, namespace string, now time.Time, id string, body []byte) (string, error) {
 	if st == nil {
 		return "", errors.New("no intake store configured")
+	}
+	if namespace != "" { // "" is filed as anonymous by RawKey
+		if err := Segment(namespace); err != nil {
+			return "", err
+		}
+	}
+	if err := Segment(id); err != nil {
+		return "", err
 	}
 	key := RawKey(namespace, now, id)
 	if _, err := st.s.Put(ctx, key, body, memory.CreateOnly()); err != nil {
@@ -228,6 +284,7 @@ func Parse(key string, body []byte) (Item, error) {
 	it.Outcome, _ = front["outcome"].(string)
 	it.FallbackKind, _ = front["fallback_kind"].(string)
 	it.SubmittedBy, _ = front["submitted_by"].(string)
+	it.TargetKB, _ = front["target_kb"].(string)
 	it.Attempted = stringList(front["attempted"])
 	it.Sources = stringList(front["fallback_sources"])
 	if s, ok := front["reported_at"].(string); ok {
@@ -257,7 +314,11 @@ func (st *Store) IsDone(ctx context.Context, id string) (bool, error) {
 	if st == nil {
 		return false, nil
 	}
-	_, ok, err := st.s.Stat(ctx, doneKey(id))
+	key, err := doneKey(id)
+	if err != nil {
+		return false, err
+	}
+	_, ok, err := st.s.Stat(ctx, key)
 	return ok, err
 }
 
@@ -268,8 +329,12 @@ func (st *Store) MarkDone(ctx context.Context, id, note string) error {
 	if st == nil {
 		return nil
 	}
+	key, err := doneKey(id)
+	if err != nil {
+		return err
+	}
 	body := []byte("# done\n\n" + note + "\n")
-	_, err := st.s.Put(ctx, doneKey(id), body, memory.CreateOnly())
+	_, err = st.s.Put(ctx, key, body, memory.CreateOnly())
 	if err != nil && errors.Is(err, memory.ErrConflict) {
 		return nil
 	}
@@ -284,7 +349,10 @@ func (st *Store) PutStaged(ctx context.Context, kb, id string, body []byte) (str
 	if st == nil {
 		return "", errors.New("no intake store configured")
 	}
-	key := StagedKey(kb, id)
+	key, err := StagedKey(kb, id)
+	if err != nil {
+		return "", err
+	}
 	if _, err := st.s.Put(ctx, key, body, memory.CreateOnly()); err != nil {
 		if errors.Is(err, memory.ErrConflict) {
 			telemetry.Record(ctx).IntakeItem(StageStaged, OutcomeSkipped)
@@ -333,7 +401,11 @@ func (st *Store) Park(ctx context.Context, id, reason string) error {
 	if st == nil {
 		return nil
 	}
-	_, err := st.s.Put(ctx, parkedKey(id), renderParked(quoteReason(reason), ""), memory.CreateOnly())
+	key, err := parkedKey(id)
+	if err != nil {
+		return err
+	}
+	_, err = st.s.Put(ctx, key, renderParked(quoteReason(reason), ""), memory.CreateOnly())
 	if err != nil && errors.Is(err, memory.ErrConflict) {
 		return nil
 	}
@@ -619,7 +691,10 @@ func (st *Store) SetParkedIssue(ctx context.Context, id string, ref IssueRef) er
 
 // parkedRecord reads one parked marker with its version.
 func (st *Store) parkedRecord(ctx context.Context, id string) (memory.Record, error) {
-	key := parkedKey(id)
+	key, err := parkedKey(id)
+	if err != nil {
+		return memory.Record{}, err
+	}
 	recs, err := st.s.Load(ctx)
 	if err != nil {
 		return memory.Record{}, err
@@ -637,21 +712,26 @@ func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 // Unpark removes a parked item's marker once its issue was resolved:
 // the needs_human finding goes away, and a later Park writes a fresh
 // marker (and the librarian files a new issue). It does not re-enable
-// validation, which a marker never blocked, and it does not reset the
-// validation_failures count a validator keeps in its working copy. It
+// validation, which a marker never blocked, and it does not remove the
+// recorded failed validator runs (validations/<id>/). It
 // needs a store that can delete (memory.Deleter, every shipped
 // backend); removing a marker that is already gone is not an error.
 func (st *Store) Unpark(ctx context.Context, id string) error {
 	if st == nil {
 		return errors.New("no intake store configured")
 	}
+	key, err := parkedKey(id)
+	if err != nil {
+		return err
+	}
 	d, ok := st.s.(memory.Deleter)
 	if !ok {
-		return fmt.Errorf("intake store %s cannot delete; remove %s by hand", st.s.Describe(), parkedKey(id))
+		return fmt.Errorf("intake store %s cannot delete; remove %s by hand", st.s.Describe(), key)
 	}
-	return d.Delete(ctx, parkedKey(id))
+	return d.Delete(ctx, key)
 }
 
 // ParkedKey is where an item's parked marker lives, for messages that
 // point a human at it.
-func ParkedKey(id string) string { return parkedKey(id) }
+// It only formats; the store's own methods refuse an unsafe id.
+func ParkedKey(id string) string { return StageParked + "/" + id + ".md" }

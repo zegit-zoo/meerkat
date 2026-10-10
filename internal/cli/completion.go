@@ -17,8 +17,8 @@ import (
 // run inside the user's shell at TAB time, so they must be cheap.
 // The data comes from whatever content this invocation serves — the
 // same resolution order a normal run uses (--kb-dir/MEERKAT_KB_DIR,
-// then --content-source/MEERKAT_CONTENT_SOURCE, then content-source.yaml
-// discovery, then the build-time embed) — so a TAB on a command line
+// then --content-source/MEERKAT_CONTENT_SOURCE, then the user config
+// dir's content-source.yaml, then the build-time embed) — so a TAB on a command line
 // that points somewhere else completes from there, not from the embed.
 
 // completionContent re-resolves the content to serve from the flags on
@@ -68,7 +68,7 @@ func completionContent(cmd *cobra.Command) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, completionResolveTimeout)
 	defer cancel()
-	return resolveContent(ctx, kbDir, contentSource)
+	return resolveContent(ctx, kbDir, contentSource, nil)
 }
 
 // completionResolveTimeout bounds completionContent's re-resolution. A

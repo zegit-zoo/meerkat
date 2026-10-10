@@ -224,7 +224,12 @@ func TestConfig_Validate(t *testing.T) {
 		wantErr string
 	}{
 		{name: "nil is fine", cfg: nil},
-		{name: "empty is fine", cfg: &Config{}},
+		{name: "empty block is refused", cfg: &Config{}, wantErr: "configures no providers"},
+		{
+			name:    "resource but no providers is refused",
+			cfg:     &Config{Resource: "https://m.example.com"},
+			wantErr: "configures no providers",
+		},
 		{
 			name:    "rules without providers",
 			cfg:     &Config{Rules: []Rule{{Collections: []string{"a"}}}},

@@ -39,13 +39,13 @@ func fakeETag(body []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (f *fakeS3) List(_ context.Context, _, prefix string) ([]s3MemoryObject, error) {
+func (f *fakeS3) List(_ context.Context, _, prefix string, keep func(string) bool) ([]s3MemoryObject, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []s3MemoryObject
 	for k, o := range f.objects {
-		if strings.HasPrefix(k, prefix) {
-			out = append(out, s3MemoryObject{Key: k, ETag: o.etag})
+		if strings.HasPrefix(k, prefix) && (keep == nil || keep(k)) {
+			out = append(out, s3MemoryObject{Key: k, ETag: o.etag, Size: int64(len(o.body))})
 		}
 	}
 	return out, nil

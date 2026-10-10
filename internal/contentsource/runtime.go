@@ -29,11 +29,20 @@ func ResolveFlag(flagVal string) string {
 // use. explicit is the result of ResolveFlag (already flag/env
 // resolved); pass "" when neither was given.
 //
-// Discovery order once explicit is empty: os.UserConfigDir()/meerkat/
-// content-source.yaml, then ./content-source.yaml in the working
-// directory. Returns path == "" (not an error) when explicit is empty
-// and neither of those exist — the caller should then fall back to
-// embedded content.
+// Discovery once explicit is empty: os.UserConfigDir()/meerkat/
+// content-source.yaml, and nothing else. Returns path == "" (not an
+// error) when explicit is empty and that file does not exist — the
+// caller should then fall back to embedded content.
+//
+// A ./content-source.yaml in the working directory is deliberately NOT
+// discovered. The working directory is wherever the user (or an agent
+// harness spawning `mk mcp serve`) happens to be — often a checkout of
+// somebody else's repository — and a content-source.yaml can name remote
+// endpoints fetched with ambient credentials, local directories to
+// serve, write destinations and a git refresh. Such a file is honoured
+// only when it is named: `--content-source ./content-source.yaml` or
+// MEERKAT_CONTENT_SOURCE. WorkingDirConfigIgnored tells the caller when
+// one was skipped, so it can say so.
 //
 // An explicit path that does not exist IS an error: the operator named
 // it, so silently ignoring it would be as confusing as --kb-dir pointing
@@ -45,16 +54,35 @@ func LocateRuntime(explicit string) (path string, err error) {
 		}
 		return explicit, nil
 	}
-	if dir, uerr := os.UserConfigDir(); uerr == nil {
-		p := filepath.Join(dir, "meerkat", ConfigFile)
-		if fileExists(p) {
-			return p, nil
-		}
-	}
-	if fileExists(ConfigFile) {
-		return ConfigFile, nil
+	if p := userConfigPath(); p != "" && fileExists(p) {
+		return p, nil
 	}
 	return "", nil
+}
+
+// WorkingDirConfigIgnored reports whether LocateRuntime(explicit) passed
+// over a ./content-source.yaml in the working directory that discovery
+// used to pick up: explicit is empty, there is no user-config-dir file,
+// and the working directory holds one. It never reads the file — the
+// answer is only for a one-line notice telling the user how to opt in.
+func WorkingDirConfigIgnored(explicit string) bool {
+	if explicit != "" {
+		return false
+	}
+	if p := userConfigPath(); p != "" && fileExists(p) {
+		return false
+	}
+	return fileExists(ConfigFile)
+}
+
+// userConfigPath is <user config dir>/meerkat/content-source.yaml, or ""
+// when the platform has no user config dir.
+func userConfigPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "meerkat", ConfigFile)
 }
 
 // LoadFile reads + validates a content-source.yaml at an exact path —
@@ -63,7 +91,7 @@ func LocateRuntime(explicit string) (path string, err error) {
 // callers (ResolveRuntime, via LocateRuntime) only ever pass a path
 // they've already confirmed exists.
 func LoadFile(path string) (Config, error) {
-	body, err := os.ReadFile(path) //nolint:gosec // G304: path is an operator-supplied config location (--content-source/MEERKAT_CONTENT_SOURCE, the user config dir, or ./content-source.yaml) — not attacker-influenced input.
+	body, err := os.ReadFile(path) //nolint:gosec // G304: path is an operator-supplied config location (--content-source/MEERKAT_CONTENT_SOURCE, or the user config dir) — never a file discovered in the working directory.
 	if err != nil {
 		return Config{}, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -91,8 +119,9 @@ type RuntimeContent struct {
 //  2. contentSourceFlag (or MEERKAT_CONTENT_SOURCE if that's empty) — an
 //     explicit content-source.yaml path.
 //  3. os.UserConfigDir()/meerkat/content-source.yaml
-//  4. ./content-source.yaml (the working directory)
-//  5. none of the above exist -> RuntimeContent{} (embedded fallback)
+//  4. neither exists -> RuntimeContent{} (embedded fallback). A
+//     ./content-source.yaml in the working directory is not discovered;
+//     see LocateRuntime.
 //
 // type: none (explicit, or implied by no config being found at all)
 // resolves to the same embedded fallback. type: local resolves Dir
@@ -170,7 +199,7 @@ func ResolveRuntimeCollections(ctx context.Context, contentSourceFlag string) ([
 		return nil, fmt.Errorf("content-source.yaml (%s): %w", path, err)
 	}
 	if cfg.Tree != nil {
-		cols, _, terr := ResolveTree(ctx, *cfg.Tree, path)
+		cols, _, terr := resolveTree(ctx, *cfg.Tree, path, cfg.childRules())
 		if terr != nil {
 			return nil, fmt.Errorf("content-source.yaml (%s): %w", path, terr)
 		}
@@ -263,6 +292,11 @@ func resolveSourceInner(ctx context.Context, src Source, cfgPath string) (Resolv
 		dir := src.Path
 		if !filepath.IsAbs(dir) {
 			dir = filepath.Join(filepath.Dir(cfgPath), dir)
+		}
+		if src.manifest != nil {
+			if err := src.manifest.recheck(filepath.Clean(dir)); err != nil {
+				return ResolvedCollection{}, fmt.Errorf("%s (%s): %w", ManifestFile, cfgPath, err)
+			}
 		}
 		return ResolvedCollection{Dir: dir, Source: src, Provenance: "disk:" + dir}, nil
 	case TypeURL:

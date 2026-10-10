@@ -16,6 +16,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +35,38 @@ type Issuer struct {
 	key    *rsa.PrivateKey
 	keyID  string
 	signer jose.Signer
+
+	// jwks is what /jwks publishes; fetches counts the requests it got.
+	mu      sync.Mutex
+	jwks    []jose.JSONWebKey
+	fetches atomic.Int64
+}
+
+// JWKSFetches reports how many times the issuer's JWKS has been fetched.
+func (i *Issuer) JWKSFetches() int { return int(i.fetches.Load()) }
+
+// Rotate generates a new signing key, publishes it beside the current one
+// and signs every later Token with it, as an identity provider does
+// during a key rotation. It returns the new key ID.
+func (i *Issuer) Rotate(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, keyBits)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	kid := "test-key-" + strconv.Itoa(len(i.jwks)+1)
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.RS256, Key: key},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
+	)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	i.jwks = append(i.jwks, jose.JSONWebKey{Key: key.Public(), KeyID: kid, Algorithm: string(jose.RS256), Use: "sig"})
+	i.signer, i.key, i.keyID = signer, key, kid
+	return kid
 }
 
 // keyBits is deliberately the smallest size crypto/rsa will sign with
@@ -63,14 +98,19 @@ func NewIssuer(t *testing.T) *Issuer {
 			"subject_types_supported":               []string{"public"},
 		})
 	})
+	iss.jwks = []jose.JSONWebKey{{
+		Key:       key.Public(),
+		KeyID:     iss.keyID,
+		Algorithm: string(jose.RS256),
+		Use:       "sig",
+	}}
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		iss.fetches.Add(1)
+		iss.mu.Lock()
+		set := jose.JSONWebKeySet{Keys: append([]jose.JSONWebKey(nil), iss.jwks...)}
+		iss.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
-			Key:       key.Public(),
-			KeyID:     iss.keyID,
-			Algorithm: string(jose.RS256),
-			Use:       "sig",
-		}}})
+		_ = json.NewEncoder(w).Encode(set)
 	})
 
 	srv := httptest.NewServer(mux)
@@ -84,7 +124,9 @@ func NewIssuer(t *testing.T) *Issuer {
 	if err != nil {
 		t.Fatalf("new signer: %v", err)
 	}
+	iss.mu.Lock()
 	iss.signer = signer
+	iss.mu.Unlock()
 
 	t.Cleanup(srv.Close)
 	return iss
@@ -153,11 +195,13 @@ func (i *Issuer) Token(t *testing.T, c Claims) string {
 	if err != nil {
 		t.Fatalf("marshal claims: %v", err)
 	}
-	signer := i.signer
-	if c.Type != "" && i.key != nil {
+	i.mu.Lock()
+	signer, key, keyID := i.signer, i.key, i.keyID
+	i.mu.Unlock()
+	if c.Type != "" && key != nil {
 		signer, err = jose.NewSigner(
-			jose.SigningKey{Algorithm: jose.RS256, Key: i.key},
-			(&jose.SignerOptions{}).WithType(jose.ContentType(c.Type)).WithHeader("kid", i.keyID),
+			jose.SigningKey{Algorithm: jose.RS256, Key: key},
+			(&jose.SignerOptions{}).WithType(jose.ContentType(c.Type)).WithHeader("kid", keyID),
 		)
 		if err != nil {
 			t.Fatalf("new signer: %v", err)
@@ -176,8 +220,20 @@ func (i *Issuer) Token(t *testing.T, c Claims) string {
 
 // TokenSignedByOther mints a token with the right claims but the WRONG
 // key — the forged-token case. It uses a second key that no JWKS
-// publishes, so verification must fail on the signature alone.
+// publishes, so verification must fail on the signature alone. The
+// token carries the issuer's current key ID, so it looks like a token
+// from a key the verifier already knows.
 func (i *Issuer) TokenSignedByOther(t *testing.T, c Claims) string {
+	t.Helper()
+	i.mu.Lock()
+	kid := i.keyID
+	i.mu.Unlock()
+	return i.TokenSignedByOtherWithKID(t, c, kid)
+}
+
+// TokenSignedByOtherWithKID is TokenSignedByOther with a chosen `kid`
+// header, for a token whose key ID no JWKS publishes.
+func (i *Issuer) TokenSignedByOtherWithKID(t *testing.T, c Claims, kid string) string {
 	t.Helper()
 	other, err := rsa.GenerateKey(rand.Reader, keyBits)
 	if err != nil {
@@ -185,12 +241,11 @@ func (i *Issuer) TokenSignedByOther(t *testing.T, c Claims) string {
 	}
 	signer, err := jose.NewSigner(
 		jose.SigningKey{Algorithm: jose.RS256, Key: other},
-		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", i.keyID),
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
 	)
 	if err != nil {
 		t.Fatalf("new signer: %v", err)
 	}
-	forged := *i
-	forged.signer = signer
+	forged := &Issuer{URL: i.URL, signer: signer}
 	return forged.Token(t, c)
 }

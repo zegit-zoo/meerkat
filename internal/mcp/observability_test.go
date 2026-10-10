@@ -87,6 +87,9 @@ type tracedOptions struct {
 	exporter sdktrace.SpanExporter
 	// sampleRatio overrides the default of 1.0.
 	sampleRatio *float64
+	// trustedSources is traces.trusted_sources; empty means no caller's
+	// traceparent is honoured.
+	trustedSources []string
 	// withMemory mounts a single collection with a local memory store
 	// instead of the three read-only ones.
 	withMemory bool
@@ -121,7 +124,7 @@ func newTracedFixture(t *testing.T, opts tracedOptions) *tracedFixture {
 	tel, err := telemetry.New(context.Background(), telemetry.Options{
 		Config: &telemetry.Config{
 			ServiceName: "meerkat-test",
-			Traces:      telemetry.TraceConfig{Enabled: true, SampleRatio: opts.sampleRatio},
+			Traces:      telemetry.TraceConfig{Enabled: true, SampleRatio: opts.sampleRatio, TrustedSources: opts.trustedSources},
 			Limits:      telemetry.ExportLimits{BatchTimeout: telemetry.Duration(20 * time.Millisecond)},
 		},
 		Registry:     f.reg,
@@ -361,7 +364,7 @@ func TestObservability_ToolErrorIsDistinctFromTransportError(t *testing.T) {
 // --- acceptance: trace context continuation --------------------------------
 
 func TestObservability_ContinuesAValidInboundTraceContext(t *testing.T) {
-	f := newTracedFixture(t, tracedOptions{})
+	f := newTracedFixture(t, tracedOptions{trustedSources: []string{"127.0.0.0/8"}})
 	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
 	const parentID = "00f067aa0ba902b7"
 
@@ -383,8 +386,42 @@ func TestObservability_ContinuesAValidInboundTraceContext(t *testing.T) {
 	}
 }
 
+// An untrusted caller cannot choose the sampling decision or the trace
+// ID: with no trusted_sources configured the sampled flag is ignored and
+// sample_ratio alone decides.
+func TestObservability_UntrustedCallerCannotForceSamplingOrTraceID(t *testing.T) {
+	zero := 0.0
+	f := newTracedFixture(t, tracedOptions{sampleRatio: &zero})
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+	resp := f.get(t, ReadinessPath, map[string]string{
+		"traceparent": "00-" + traceID + "-00f067aa0ba902b7-01",
+	})
+	_ = resp.Body.Close()
+	if spans := f.flush(); len(spans) != 0 {
+		t.Fatalf("a caller-set sampled flag exported %d span(s) at sample_ratio 0", len(spans))
+	}
+
+	one := 1.0
+	f = newTracedFixture(t, tracedOptions{sampleRatio: &one})
+	resp = f.get(t, ReadinessPath, map[string]string{
+		"traceparent": "00-" + traceID + "-00f067aa0ba902b7-01",
+	})
+	_ = resp.Body.Close()
+	root, ok := spanNamed(f.flush(), "GET "+ReadinessPath)
+	if !ok {
+		t.Fatal("no root span")
+	}
+	if got := root.SpanContext.TraceID().String(); got == traceID {
+		t.Fatal("an untrusted caller chose the trace ID")
+	}
+	if root.Parent.SpanID().IsValid() {
+		t.Fatal("an untrusted caller's span became the parent")
+	}
+}
+
 func TestObservability_MalformedTraceContextIsIgnoredSafely(t *testing.T) {
-	f := newTracedFixture(t, tracedOptions{})
+	f := newTracedFixture(t, tracedOptions{trustedSources: []string{"127.0.0.0/8"}})
 
 	for _, bad := range []string{
 		"garbage",

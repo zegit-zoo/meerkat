@@ -227,3 +227,38 @@ func TestOpenAPI_DocumentsCollections(t *testing.T) {
 		}
 	}
 }
+
+// TestAnonymousRoutesNameNoCollection: neither public route that used to
+// carry the mounted names (the banner and the schema) reveals one to a
+// caller without the key, and a wrong key counts as no key. The schema
+// still names them for the key holder (OpenWebUI sends the bearer when
+// it fetches the schema).
+func TestAnonymousRoutesNameNoCollection(t *testing.T) {
+	srv := newMultiCollectionServer(t)
+	for _, auth := range []string{"", "Bearer wrong-key", "Basic dGVzdC1rZXk="} {
+		for _, path := range []string{"/", "/openapi.json"} {
+			req := httptest.NewRequest(nethttp.MethodGet, path, nil)
+			if auth != "" {
+				req.Header.Set("Authorization", auth)
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != nethttp.StatusOK {
+				t.Fatalf("GET %s (auth %q) = %d", path, auth, rec.Code)
+			}
+			for _, name := range []string{"runbooks", "architecture"} {
+				if strings.Contains(rec.Body.String(), name) {
+					t.Errorf("GET %s (auth %q) leaks collection name %q", path, auth, name)
+				}
+			}
+		}
+	}
+	// The key holder still gets the names in the schema, and the banner
+	// stays free of them whatever the credential.
+	if body := getPath(t, srv, "/openapi.json").Body.String(); !strings.Contains(body, "runbooks") {
+		t.Error("authenticated /openapi.json lost the mounted collection names")
+	}
+	if body := getPath(t, srv, "/").Body.String(); strings.Contains(body, "runbooks") {
+		t.Error("authenticated GET / names a collection; the banner is never per-caller")
+	}
+}

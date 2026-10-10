@@ -673,12 +673,29 @@ git decide:
   noted "local ahead of remote" (git confirmed it);
 - **not a fast-forward**: `diverged`, and the next check says so again;
 - the pull lands **somewhere other than R**: `unknown`. That can happen
-  when the repository's own config rewrites the URL for the pull.
+  when the remote moves between the check and the pull. (A repository
+  whose own config rewrites URLs is refused before the pull; see below.)
 
 Then it rebuilds the index under the same reload slot, so the pulled
-pages are searchable in the same cycle. Both calls run with `core.hooksPath=/dev/null`
-and `core.fsmonitor=false`, under the same environment and protocol
-allowlist.
+pages are searchable in the same cycle.
+
+Before either call runs, meerkat reads the repository's own `config` (and
+a linked worktree's `config.worktree`) as a file. It **refuses the
+repository** if the config sets a key that could make git run a program
+or go somewhere else: `core.sshCommand`, `core.gitProxy`, `core.worktree`,
+`core.askPass`, `core.alternateRefsCommand`, `credential.*`, `filter.*`,
+`include.*`, `includeIf.*`, `url.*`, `gpg.*`, a diff `textconv`,
+`command` or `external`, a merge `driver`, or a remote `vcs` or
+`uploadpack`. It also refuses a config line its strict reader cannot
+classify (meerkat-mob#31). A refusal is reported like any other failed
+pull, and the tree is left as it was. Both calls then run with no global
+or system config (`GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_CONFIG_NOSYSTEM=1`), with `core.hooksPath=/dev/null`,
+`core.fsmonitor=false`, `core.sshCommand=ssh`, `credential.helper=` and
+`core.gitProxy=` pinned on the command line, without entering
+submodules, and under the same environment and protocol allowlist. A
+private https remote therefore cannot authenticate through a credential
+helper during a pull. Use an ssh remote with the user's agent.
 
 - **A dirty tree** is reported as `dirty`, and the tree is left exactly
   as it was.
@@ -689,9 +706,13 @@ It never merges, rebases, stashes, checks out or resets. Untracked files
 do not count as dirty: a fast-forward refuses to overwrite one anyway.
 
 **The residual risk** of `pull`: it runs inside the repository, so the
-repository's own local `.git/config` applies (a checkout filter driver,
-for example). That file is written locally and never cloned, and pulling
-into a checkout is the operator's opt-in.
+config keys outside the refused list still apply. They cannot run a
+program, but they can steer the fetch: `remote.<name>.url`, `http.*` (a
+proxy, TLS settings) and fetch refspecs, within the https/ssh/git
+transport allowlist. A `.git/config` does not only come from the
+operator: an extracted archive or an ingest agent can write one. So do
+not serve, with `on_divergence: pull`, a working copy that `mk ingest`
+writes into. Pulling into a checkout remains the operator's opt-in.
 
 ### Part C: the surfaces
 

@@ -160,8 +160,9 @@ That config directory is the OS's own, not `~/.config` everywhere — hence the
 `uname` guard. meerkat then resolves **one** source per invocation, highest
 priority first: `--kb-dir`/`MEERKAT_KB_DIR`,
 `--content-source`/`MEERKAT_CONTENT_SOURCE`, `<user config dir>/meerkat/`,
-`./content-source.yaml`, then the binary's own embedded content — empty in
-every published release. `mk version` always reports which one won, as
+then the binary's own embedded content — empty in every published release. A
+`./content-source.yaml` in the working directory is used only when you name
+it with `--content-source`. `mk version` always reports which one won, as
 `kb_source`. Every backend and the rules in full:
 ["Loading content"](#loading-content).
 
@@ -604,10 +605,10 @@ config (model providers, MCP server connections, etc).
 ## Loading content
 
 This is the main path: an installed meerkat carries no content and is told
-at startup where its knowledge base lives. Four mechanisms can say so, and
+at startup where its knowledge base lives. Three mechanisms can say so, and
 `mk`/`meerkat` consults them in this order — highest priority first, each
 step reached only if the one above is unset (steps 1-2) or not found
-(steps 3-4):
+(step 3):
 
 1. `--kb-dir` (or `MEERKAT_KB_DIR`) — an explicit content-repo directory.
    Wins outright over everything below.
@@ -616,9 +617,7 @@ step reached only if the one above is unset (steps 1-2) or not found
 3. `content-source.yaml` in `<user config dir>/meerkat/` — `os.UserConfigDir()`:
    `$XDG_CONFIG_HOME` or `~/.config` on Linux, `%AppData%` on Windows, and on
    macOS `~/Library/Application Support`, which does **not** consult `XDG_CONFIG_HOME`.
-4. `content-source.yaml` in the working directory (wherever `mk`/`meerkat`
-   is invoked from — not a repo root).
-5. The binary's embedded content — the fallback when none of the above
+4. The binary's embedded content — the fallback when none of the above
    apply. Every published artefact (the Homebrew formula, the release
    tarballs, the `ghcr.io` image) is built with no content source, so this
    step serves an empty knowledge base unless you produced the binary
@@ -629,7 +628,24 @@ Once a step is used, its `content.type` decides the outcome on its own —
 including `type: none`, which resolves to the embedded fallback without
 falling through to a lower step.
 
-Steps 2-4 can also mount **several named collections** at once instead of a
+A `content-source.yaml` in the **working directory** is not discovered. The
+working directory is wherever `mk` happens to run, often a checkout of
+someone else's repository, and an agent harness usually starts `mk mcp serve`
+with the project as its working directory. A content-source.yaml decides what
+is fetched (with your ambient cloud credentials), which directories are
+served, where memory and traversal logs are written, and whether a working
+tree is pulled, so meerkat honours one only when you name it:
+`mk --content-source ./content-source.yaml …` or
+`MEERKAT_CONTENT_SOURCE=./content-source.yaml`. When step 3 finds nothing and
+the working directory holds a `content-source.yaml`, meerkat prints a one-line
+notice on stderr saying so, and serves step 4.
+
+`mk update`, `mk completion` and `mk help` resolve no content at all, and the
+configuration is read once per invocation, so every block (collections,
+`auth:`, `observability:`, `intake:`, `cache:`, `sessions:`) comes from the same
+file.
+
+Steps 2-3 can also mount **several named collections** at once instead of a
 single source — see [Multiple collections](#multiple-collections).
 
 ### `--kb-dir` / `MEERKAT_KB_DIR`
@@ -680,7 +696,7 @@ with a non-default layout looks empty through `--kb-dir`; point
 ### `content-source.yaml` at runtime
 
 When `--kb-dir`/`MEERKAT_KB_DIR` is unset, meerkat looks for a
-`content-source.yaml` (steps 2-4 above). An explicit `--content-source`/
+`content-source.yaml` (steps 2-3 above). An explicit `--content-source`/
 `MEERKAT_CONTENT_SOURCE` path that doesn't exist is a hard error — same
 reasoning as `--kb-dir`: the operator named it, so silently falling through
 would be confusing. Only `content.type: none`, `local`, `url`, `gcs` and `s3`
@@ -1139,7 +1155,8 @@ every other collection ranks with no type boost. See
 Research deposited by `mk_report_outcome` becomes knowledge through
 three agent roles: `mk ingest --role researcher` turns a raw item into
 a candidate page, `--role validator` re-derives its claims (a different
-model than the researcher's, two independent confirmations to file),
+model than the researcher's, two recorded confirmations from distinct
+models to file),
 and `--role librarian` reports dangling links, stale pages, cull
 proposals, missing links from the traversal log and parked items —
 changing nothing without `--apply`. See
@@ -1161,9 +1178,12 @@ At the end of a retrieval an agent reports how it went: the outcome,
 its first query verbatim, the pages that answered, the collections it
 tried, quality scores, and what it did instead when meerkat did not
 have it. Every report is counted; with `observability.traversal_log`
-configured it is also written as an HMAC-hashed path record, kept 90 days
-by default. The first query is stored only with `query: plaintext` in that
-block, which a librarian deployment needs. With an
+configured it is also written as a path record with collection names,
+page IDs and the session ID HMAC-hashed, kept 90 days by default. The
+first query, the fallback summary and sources and the quality notes are
+stored only with `query: plaintext` in that block, which a librarian
+deployment needs. The record is pseudonymous: the operator who holds the
+HMAC key and the access log can join it to the caller. With an
 `intake:` store and the `intake-write` capability a fallback summary
 becomes a draft page for review. See
 [docs/design/observability.md](docs/design/observability.md#retrieval-outcomes-and-the-traversal-log).

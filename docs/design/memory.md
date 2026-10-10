@@ -104,6 +104,14 @@ sha256(issuer + "\x00" + subject)[:16]   , prefixed with a readable slug of the 
 - **Two issuers are two principals.** Same `sub` from a different `iss`
   is a different namespace, matching how the policy layer already treats
   them.
+- **It is a pseudonym, not a secret.** The slug shows up to 24
+  characters of the subject, and the hash is unkeyed and truncated to
+  64 bits, so anyone who can read the store, an intake key or an
+  intake page's `submitted_by` and can guess candidate subjects can
+  confirm whose namespace it is. The namespace is the on-store key
+  layout, so changing its derivation would strand every existing
+  personal memory; it stays as is until a migration is designed
+  (meerkat-mob#53). The traversal log does not carry it.
 
 ### Path safety
 
@@ -507,6 +515,52 @@ content-addressed cache directory that is replaced whenever the content
 changes — the memories would appear to vanish on the next content bump.
 The error says to use an absolute path or the GCS backend. This is data
 loss caught at startup rather than discovered later.
+
+### Quotas and the load cap
+
+Every store bounds what one owner can put in it, so no single principal
+can grow a store until it no longer loads. The owner is read off the
+key, which is the one place the caller cannot choose:
+
+| partition | limit |
+| --- | --- |
+| `personal/<namespace>/` | `documents` / `bytes` (default 200 documents, 8 MiB) |
+| `_staging/<scope>/<namespace>/` | the same, per proposer and scope |
+| `raw/<namespace>/<day>/` (an `intake:` store) | the same, per depositor per UTC day |
+| `team/`, `global/` | `shared_documents` / `shared_bytes` (default 5,000, 256 MiB) each |
+
+```yaml
+    memory:
+      type: s3
+      # ...
+      quota:                    # optional; any limit left out keeps its default
+        documents: 200
+        bytes: 8388608
+        shared_documents: 5000
+        shared_bytes: 268435456
+```
+
+A write that would add a document to a full partition, or grow its
+bytes past the limit, is refused with `ErrQuotaExceeded` before
+anything is stored; the message names the limit, never a key or a
+location. A write that shrinks a partition is always admitted, so
+lowering a limit never stops an owner tidying up. The check lists the
+partition and then writes, so concurrent writers to one partition can
+overshoot it by the writes in flight: it is a ceiling against runaway
+growth, not an accounting system. The intake store's `staged/`,
+`done/` and `parked/` markers are written by the librarian and carry
+no owner, so they are not charged.
+
+Independently, one `Load` reads at most 20,000 **live** documents.
+Staged proposals are filtered out of the listing before that cap
+applies, so proposals cannot make the live set fail to load. A store
+that cannot be loaded at all (unreachable, or past the cap) no longer
+fails the mount: the collection serves its content without the stored
+memories, the store stays attached so new saves still land and are
+served, the failure is logged and counted on
+`meerkat_memory_backend_errors_total{operation="load"}`, and a
+collection with a memory `refresh:` block reports the memory target
+degraded until a later cycle loads it.
 
 ### Optimistic locking
 

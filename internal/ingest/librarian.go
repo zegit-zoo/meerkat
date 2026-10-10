@@ -94,6 +94,8 @@ type Fileable struct {
 	Method     string `json:"method"`
 	Key        string `json:"staged_key"`
 	PageID     string `json:"page_id"`
+	// ConfirmedBy names the recorded validator runs' models.
+	ConfirmedBy []string `json:"confirmed_by"`
 }
 
 // Count returns how many findings of a kind the report has.
@@ -246,11 +248,20 @@ func Librarian(ctx context.Context, reg *collections.Registry, store *intake.Sto
 				continue
 			}
 			p, err := kb.ParsePage(s.ID, s.Key, s.Body)
-			if err != nil || !Confirmed(p) {
+			if err != nil {
+				continue
+			}
+			// Confirmed means two recorded validator runs of distinct
+			// models, never what the candidate's verified: says.
+			models, err := Confirmations(ctx, store, s)
+			if err != nil {
+				return nil, err
+			}
+			if len(models) < ConfirmationsRequired {
 				continue
 			}
 			method := contractMethodByName(reg, s.KB)
-			rep.Fileable = append(rep.Fileable, Fileable{IntakeID: s.ID, Collection: s.KB, Method: method, Key: s.Key, PageID: p.ID})
+			rep.Fileable = append(rep.Fileable, Fileable{IntakeID: s.ID, Collection: s.KB, Method: method, Key: s.Key, PageID: p.ID, ConfirmedBy: verifierNames(models)})
 		}
 	}
 	return rep, nil
@@ -327,13 +338,15 @@ func (r Report) Write(w io.Writer) {
 // Applied is what Apply did with one fileable candidate or parked item.
 type Applied struct {
 	IntakeID string
-	Action   string // filed | instructions | skipped | unparked | adopted | duplicate
+	Action   string // filed | held | instructions | skipped | unparked | adopted | duplicate
 	Detail   string
 }
 
 // Apply files the report's confirmed candidates through their
 // collection's contract: `direct` writes the page into the collection's
-// memory store (global scope) and marks the intake item filed;
+// memory store (global scope) and marks the intake item filed, but only
+// with ApplyOpts.FileConfirmed (`--file-confirmed`); without it a
+// direct candidate is reported as held for review (meerkat-mob#33).
 // `merge-request` and `none` produce instructions and change nothing.
 // Promotion proposals are filed the same way into the root hub (see
 // applyPromotions); their Applied.IntakeID is "promote:<collection>".
@@ -358,11 +371,21 @@ func ApplyWith(ctx context.Context, reg *collections.Registry, store *intake.Sto
 			out = append(out, a)
 			continue
 		}
+		if why := depositTargetMismatch(ctx, store, f.IntakeID, f.Collection); why != "" {
+			a.Action, a.Detail = "skipped", "not filed into "+f.Collection+": "+why+"; a human must place "+f.Key
+			out = append(out, a)
+			continue
+		}
 		switch f.Method {
 		case contentsource.UpdateDirect:
 			st := c.Memory()
 			if st == nil {
 				a.Action, a.Detail = "skipped", "contract is direct but the collection has no memory store"
+				out = append(out, a)
+				continue
+			}
+			if !opts.FileConfirmed {
+				a.Action, a.Detail = "held", "confirmed by "+strings.Join(f.ConfirmedBy, ", ")+"; contract is direct: review "+f.Key+" in the intake store and re-run with --file-confirmed to write it into "+f.Collection
 				out = append(out, a)
 				continue
 			}
@@ -395,9 +418,18 @@ func stagedBody(ctx context.Context, store *intake.Store, f Fileable) ([]byte, e
 		return nil, err
 	}
 	for _, s := range staged {
-		if s.Key == f.Key {
-			return s.Body, nil
+		if s.Key != f.Key {
+			continue
 		}
+		// Re-check at filing time, from the store, not from the report.
+		models, err := Confirmations(ctx, store, s)
+		if err != nil {
+			return nil, err
+		}
+		if len(models) < ConfirmationsRequired {
+			return nil, fmt.Errorf("staged candidate %s has %d of %d recorded confirmations", f.Key, len(models), ConfirmationsRequired)
+		}
+		return withRecordedVerification(ctx, store, s)
 	}
 	return nil, fmt.Errorf("staged candidate %s vanished", f.Key)
 }

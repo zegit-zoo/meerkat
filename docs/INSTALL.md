@@ -164,10 +164,28 @@ ln -sf meerkat ~/.local/bin/mk
 meerkat version
 ```
 
+### Checking the sudo update path
+
+The sudo fallback runs real `sudo` commands, so its command sequence is
+covered by unit tests with a stubbed runner and the privileged part is
+checked by hand before a release. On a root-owned install directory
+(for example a copy in `/usr/local/bin`), run `mk update --force --yes`
+and confirm that:
+
+- it runs exactly once (it hands off to `mk version`, it does not update
+  again);
+- afterwards the directory holds only `meerkat` (no `meerkat.old-*` or
+  `meerkat.new-*` leftovers);
+- with a symlink named `meerkat.old` pointing at another directory
+  planted beforehand, the run leaves that directory untouched (backups
+  use an unpredictable name and every privileged command passes `--`).
+
 ### Why `~/.local/bin` and not `/usr/local/bin`?
 
 `mk update` downloads and verifies the new release as the current
-user, stages it in a private temp directory, then performs the final
+user (anonymously first; a cached `gh` token is used only if GitHub's
+anonymous rate limit is hit, and only for this project's release-asset
+URLs; downloads are capped at 512 MiB), stages it in a private temp directory, then performs the final
 copy/move into the install directory. If that final directory is
 root-owned, `mk update` prompts through `sudo` for only those final
 filesystem operations. The default for "system-wide" installs differs
@@ -393,8 +411,10 @@ mk list                        # now serves that directory
 The config directory is the OS's own user-config location, not `~/.config`
 everywhere: `~/.config/meerkat` on Linux (or `$XDG_CONFIG_HOME/meerkat`),
 `~/Library/Application Support/meerkat` on macOS, `%AppData%\meerkat` on
-Windows. A `content-source.yaml` in the **working directory** is also picked
-up, which is often the easier thing to try first.
+Windows. A `content-source.yaml` in the **working directory** is not picked
+up on its own (the working directory may be a checkout you do not control);
+name it to use it: `mk --content-source ./content-source.yaml list`, or set
+`MEERKAT_CONTENT_SOURCE`.
 
 A verified HTTPS archive, a GCS or S3 bucket, and several knowledge bases
 mounted side by side as named collections are `content-source.yaml` options
@@ -487,7 +507,7 @@ make docs               # regenerate docs/CLI.md
 mk update --check                      # latest version + current
 mk update                              # download + verified swap + re-exec
 mk update --version <TAG>              # pin to a specific tag, e.g. v1.2.3
-mk update --force                      # downgrade or re-install
+mk update --force                      # downgrade or re-install (runs once; the new binary then just prints `mk version`)
 mk update --yes                        # skip confirmation
 ```
 
@@ -497,6 +517,19 @@ reasons in [Updating a Homebrew
 install](#updating-a-homebrew-install). Only `mk update --check`,
 which never writes anything, behaves identically on both kinds of
 install.
+
+**`mk update` requires `cosign`.** It verifies the Sigstore signature on
+the release's checksums file before trusting anything in it, and refuses
+to install if `cosign` is not on `PATH`; install it (`brew install
+cosign`) and re-run. Without a verified signature the checksums file
+comes from the same release page as the binary, so a SHA-256 match only
+detects corruption, not tampering. For the rare case where signature
+verification cannot be used, `--skip-cosign` is accepted only when
+`MEERKAT_UPDATE_ALLOW_UNVERIFIED=1` is also set in the environment, and
+on a terminal you must additionally type `yes` at a warning prompt
+(`--yes` does not answer it). A skipped verification is reported as
+`cosign:  SKIPPED` in the output. Verifying in-process, so cosign is not a
+prerequisite, is tracked as a follow-up.
 
 `mk update` works with no authentication — the repo is public. If
 you've run `gh auth login`, `mk update` reuses the cached GitHub OAuth
@@ -596,8 +629,8 @@ command-line argument.
      named workflow in this same repository, not a branch push. This is
      the one piece of trust this whole process is bootstrapping *into* —
      everything after this step inherits it.
-   - This step is **not skippable**. Unlike `mk update --skip-cosign`,
-     `meerkat-bootstrap` has no SHA-256-only fallback, because this is
+   - This step is **not skippable**. Unlike `mk update`, whose `--skip-cosign` is gated
+     (see [Updating](#updating)), `meerkat-bootstrap` has no SHA-256-only fallback, because this is
      the step that establishes trust in the upstream identity in the
      first place; there is nothing to fall back to that would still mean
      anything.

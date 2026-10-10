@@ -281,8 +281,9 @@ one `tools/list` response cannot describe the same server differently.
 
 **HTTP.** An optional `collection` field on `/search`, `/show` and
 `/list`; a new auth-gated `GET /collections` (which collections a
-deployment mounts is not public information); the collection field and
-names published in `/openapi.json`.
+deployment mounts is not public information); the collection field published
+in `/openapi.json`, with the mounted names included only when the request
+carries the API key.
 
 ## Provenance vocabulary
 

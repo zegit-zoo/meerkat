@@ -73,6 +73,8 @@ type S3Store struct {
 	// trusting the backend to. mu serialises Put in that mode.
 	singleWriter bool
 	mu           sync.Mutex
+	// quota bounds each owner's partition; see Quota.
+	quota Quota
 }
 
 // ErrConditionalWritesNotEnforced is returned by OpenS3 when the probe
@@ -84,14 +86,18 @@ var ErrConditionalWritesNotEnforced = errors.New("s3 backend does not enforce co
 type s3MemoryObject struct {
 	Key  string
 	ETag string
+	Size int64
 }
 
 // s3MemoryAPI is the slice of the S3 API this package uses. It exists
 // as an interface for one reason: it is the test seam. ETags cross it
 // unquoted in both directions.
 type s3MemoryAPI interface {
-	// List returns every object under prefix.
-	List(ctx context.Context, bucket, prefix string) ([]s3MemoryObject, error)
+	// List returns the objects under prefix for which keep (nil keeps
+	// everything) returns true. Only kept objects count towards
+	// maxMemoryObjects, so a crowded staging area cannot make the live
+	// listing fail.
+	List(ctx context.Context, bucket, prefix string, keep func(key string) bool) ([]s3MemoryObject, error)
 	// Read returns the body and ETag of key; when ifMatch is set it is
 	// a precondition and a changed object fails with errS3Precondition.
 	Read(ctx context.Context, bucket, key, ifMatch string) ([]byte, string, error)
@@ -139,6 +145,7 @@ func OpenS3(ctx context.Context, spec *Spec) (*S3Store, error) {
 	}
 	s := newS3StoreWithAPI(api, spec.Bucket, spec.Prefix, spec.SSE)
 	s.singleWriter = spec.SingleWriter
+	s.quota = spec.Quota.effective()
 	if !s.singleWriter {
 		if err := s.verifyConditionalWrites(ctx); err != nil {
 			return nil, err
@@ -150,7 +157,7 @@ func OpenS3(ctx context.Context, spec *Spec) (*S3Store, error) {
 // newS3StoreWithAPI wires a store to an already-built API — the test
 // entry point; production goes through OpenS3.
 func newS3StoreWithAPI(api s3MemoryAPI, bucket, prefix, sse string) *S3Store {
-	return &S3Store{api: api, bucket: bucket, prefix: normalisePrefix(prefix), sse: sse}
+	return &S3Store{api: api, bucket: bucket, prefix: normalisePrefix(prefix), sse: sse, quota: DefaultQuota()}
 }
 
 // verifyConditionalWrites writes a probe document under the staging
@@ -219,7 +226,7 @@ func (s *S3Store) object(key string) string { return s.prefix + key }
 // (and picked up by the next reconciliation) rather than loaded under
 // a version it no longer has.
 func (s *S3Store) Load(ctx context.Context) ([]Record, error) {
-	objs, err := s.api.List(ctx, s.bucket, s.prefix)
+	objs, err := s.api.List(ctx, s.bucket, s.prefix, s.notStaged)
 	if err != nil {
 		return nil, fmt.Errorf("list %s: %w", s.Describe(), err)
 	}
@@ -249,6 +256,32 @@ func (s *S3Store) Load(ctx context.Context) ([]Record, error) {
 	return out, nil
 }
 
+// notStaged is the listing filter for Load and Fingerprint: staged
+// proposals are neither loaded nor counted against the object cap.
+func (s *S3Store) notStaged(name string) bool { return !Staged(strings.TrimPrefix(name, s.prefix)) }
+
+// admit checks a write against the store's Quota, from a listing of the
+// key's partition. Outside single_writer mode the listing and the write
+// are separate requests; see Quota for why that is acceptable.
+func (s *S3Store) admit(ctx context.Context, key string, size int) error {
+	prefix, _, ok := quotaPartition(key)
+	if !ok {
+		return nil
+	}
+	objs, err := s.api.List(ctx, s.bucket, s.object(prefix), nil)
+	if err != nil {
+		return fmt.Errorf("measure memory partition: %w", err)
+	}
+	used := make([]storedObject, 0, len(objs))
+	for _, o := range objs {
+		k := strings.TrimPrefix(o.Key, s.prefix)
+		if countsTowardQuota(k) {
+			used = append(used, storedObject{Key: k, Size: o.Size})
+		}
+	}
+	return s.quota.admit(key, size, used)
+}
+
 // liveDocumentKey maps an object key to a memory key, or reports why
 // the object is not a live document (a staged one, a non-.md object).
 func (s *S3Store) liveDocumentKey(name string) (string, error) {
@@ -269,7 +302,7 @@ func (s *S3Store) liveDocumentKey(name string) (string, error) {
 // ETag) pairs of every live document — one listing, no reads. Any
 // create, overwrite or delete under the prefix changes it.
 func (s *S3Store) Fingerprint(ctx context.Context) (string, error) {
-	objs, err := s.api.List(ctx, s.bucket, s.prefix)
+	objs, err := s.api.List(ctx, s.bucket, s.prefix, s.notStaged)
 	if err != nil {
 		return "", fmt.Errorf("list %s: %w", s.Describe(), err)
 	}
@@ -329,6 +362,9 @@ func (s *S3Store) Put(ctx context.Context, key string, body []byte, pre Precondi
 			return "", &ConflictError{Key: key, Current: current}
 		}
 	}
+	if err := s.admit(ctx, key, len(body)); err != nil {
+		return "", err
+	}
 	etag, err := s.api.Write(ctx, s.bucket, s.object(key), body, pre.Absent, ifMatch, s.sse)
 	if errors.Is(err, errS3Precondition) {
 		return "", &ConflictError{Key: key, Current: s.currentVersion(ctx, key)}
@@ -362,6 +398,9 @@ func (s *S3Store) Stage(ctx context.Context, key string, body []byte) (string, e
 	if !strings.HasPrefix(key, StagingPrefix+"/") {
 		return "", fmt.Errorf("staged memory key %q must be under %s/", key, StagingPrefix)
 	}
+	if err := s.admit(ctx, key, len(body)); err != nil {
+		return "", err
+	}
 	if err := s.api.WriteUnconditional(ctx, s.bucket, s.object(key), body, s.sse); err != nil {
 		return "", fmt.Errorf("stage %s: %w", s.Location(key), err)
 	}
@@ -391,7 +430,7 @@ func parseETagVersion(v Version) (string, error) {
 // s3StoreAPI is the real s3MemoryAPI over the AWS SDK.
 type s3StoreAPI struct{ c *s3.Client }
 
-func (a *s3StoreAPI) List(ctx context.Context, bucket, prefix string) ([]s3MemoryObject, error) {
+func (a *s3StoreAPI) List(ctx context.Context, bucket, prefix string, keep func(string) bool) ([]s3MemoryObject, error) {
 	var out []s3MemoryObject
 	pager := s3.NewListObjectsV2Paginator(a.c, &s3.ListObjectsV2Input{Bucket: aws.String(bucket), Prefix: aws.String(prefix)})
 	for pager.HasMorePages() {
@@ -400,10 +439,14 @@ func (a *s3StoreAPI) List(ctx context.Context, bucket, prefix string) ([]s3Memor
 			return nil, err
 		}
 		for _, o := range page.Contents {
+			key := aws.ToString(o.Key)
+			if keep != nil && !keep(key) {
+				continue
+			}
 			if len(out) >= maxMemoryObjects {
 				return nil, fmt.Errorf("memory prefix %q holds more than %d objects; refusing", prefix, maxMemoryObjects)
 			}
-			out = append(out, s3MemoryObject{Key: aws.ToString(o.Key), ETag: s3api.CleanETag(o.ETag)})
+			out = append(out, s3MemoryObject{Key: key, ETag: s3api.CleanETag(o.ETag), Size: aws.ToInt64(o.Size)})
 		}
 	}
 	return out, nil

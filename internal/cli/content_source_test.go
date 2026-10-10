@@ -185,12 +185,14 @@ func TestContentSourceFlag_NonexistentPathErrors(t *testing.T) {
 	}
 }
 
-// TestContentSourceFlag_DiscoveredFromWorkingDirectory: with neither
+// TestContentSourceFlag_WorkingDirectoryNeedsToBeNamed: with neither
 // --kb-dir nor --content-source given, a ./content-source.yaml in the
-// working directory (resolution step 4) must still be picked up.
-func TestContentSourceFlag_DiscoveredFromWorkingDirectory(t *testing.T) {
+// working directory is NOT used — the working directory may be a checkout
+// the user does not control. The command serves the embedded fallback and
+// says, in one line, how to opt in; naming the file uses it.
+func TestContentSourceFlag_WorkingDirectoryNeedsToBeNamed(t *testing.T) {
 	resetKBToEmbedded(t)
-	isolateContentCaches(t) // keep step 3 (user config dir) from shadowing this test
+	isolateContentCaches(t) // keep the user config dir empty
 	fixture := newFixtureKBDir(t)
 	cwd := t.TempDir()
 	write(t, filepath.Join(cwd, "content-source.yaml"), "content:\n  type: local\n  path: "+fixture+"\n")
@@ -200,8 +202,77 @@ func TestContentSourceFlag_DiscoveredFromWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list --json: %v\n%s", err, out)
 	}
+	if strings.Contains(out, "concepts/widgets") {
+		t.Errorf("an unnamed ./content-source.yaml was used: %s", out)
+	}
+	if !strings.Contains(out, "ignoring ./content-source.yaml") || !strings.Contains(out, "--content-source ./content-source.yaml") {
+		t.Errorf("want a one-line notice naming the opt-in, got: %s", out)
+	}
+
+	out, err = execRoot(t, "--content-source", "./content-source.yaml", "list", "--json")
+	if err != nil {
+		t.Fatalf("list --json (named): %v\n%s", err, out)
+	}
 	if !strings.Contains(out, "concepts/widgets") {
-		t.Errorf("list output missing fixture page (cwd content-source.yaml not discovered): %s", out)
+		t.Errorf("a named ./content-source.yaml must be used: %s", out)
+	}
+	if strings.Contains(out, "ignoring") {
+		t.Errorf("no notice is due when the file is named: %s", out)
+	}
+
+	t.Setenv(contentsource.EnvVar, "./content-source.yaml")
+	out, err = execRoot(t, "list", "--json")
+	if err != nil {
+		t.Fatalf("list --json (env): %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "concepts/widgets") {
+		t.Errorf("a ./content-source.yaml named by %s must be used: %s", contentsource.EnvVar, out)
+	}
+}
+
+// TestRootHook_SkipsResolutionForCommandsThatNeedNoContent: update,
+// completion and help never read the knowledge base, so they resolve
+// nothing — proven by pointing MEERKAT_CONTENT_SOURCE at a file that does
+// not exist, which fails any command that does resolve.
+func TestRootHook_SkipsResolutionForCommandsThatNeedNoContent(t *testing.T) {
+	resetKBToEmbedded(t)
+	isolateContentCaches(t)
+	t.Setenv(contentsource.EnvVar, filepath.Join(t.TempDir(), "missing.yaml"))
+
+	for _, args := range [][]string{
+		{"completion", "bash"},
+		{"completion", "zsh"},
+		{"help", "list"},
+	} {
+		if out, err := execRoot(t, args...); err != nil {
+			t.Errorf("%v resolved content (err %v): %s", args, err, out)
+		}
+	}
+	// The control: a command that does read content still resolves.
+	if _, err := execRoot(t, "list"); err == nil {
+		t.Error("list must still resolve content and fail on the missing file")
+	}
+}
+
+// TestRootHook_CompletionRequestDoesNotPrintTheNotice: the TAB-time
+// __complete request resolves like any command but never writes the
+// working-directory notice — its output is the shell's protocol.
+func TestRootHook_CompletionRequestDoesNotPrintTheNotice(t *testing.T) {
+	resetKBToEmbedded(t)
+	isolateContentCaches(t)
+	cwd := t.TempDir()
+	write(t, filepath.Join(cwd, "content-source.yaml"), "content:\n  type: none\n")
+	t.Chdir(cwd)
+
+	out, err := execRoot(t, "__complete", "list", "--status", "")
+	if err != nil {
+		t.Fatalf("__complete: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "ignoring") {
+		t.Errorf("__complete printed the notice: %s", out)
+	}
+	if !strings.Contains(out, "placeholder") {
+		t.Errorf("__complete did not complete: %s", out)
 	}
 }
 

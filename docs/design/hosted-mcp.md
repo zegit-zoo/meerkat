@@ -172,7 +172,9 @@ it for a same-host proxy that preserves the original `Host`; rewriting
 
 Generic OIDC, via `github.com/coreos/go-oidc/v3`. An issuer URL is
 discovered at `<issuer>/.well-known/openid-configuration`, its JWKS is
-fetched and cached, and each bearer token's signature, `iss`, `aud` and
+fetched and cached (re-fetched only for a key ID not seen before, and at
+most once per 30 s, so a flood of forged tokens cannot make the server
+hammer the provider), and each bearer token's signature, `iss`, `aud` and
 `exp` are verified. **Entra ID, Google Workspace and Okta are
 configuration, not code** — there is no provider-specific branch
 anywhere in `internal/authn`, only a per-provider claim mapping for the
@@ -304,7 +306,10 @@ to get wrong.
 Validation runs at **load** time, not at first request: an unknown
 capability, a rule with no `collections`, a non-https issuer, a duplicate
 issuer, `rules:` with no `providers:`, `allow_unauthenticated` combined
-with `providers`, and — since #36 — an `anonymous:` rule carrying a claim
+with `providers`, an `auth:` block that names no providers at all (unless
+`allow_unauthenticated: true` is explicit), a key the `auth:` subtree does
+not know (it is decoded strictly, so `provider:` for `providers:` fails
+instead of silently dropping the provider list), and — since #36 — an `anonymous:` rule carrying a claim
 selector, carrying a write capability, or combined with
 `allow_unauthenticated` all fail the process. The class of error this
 prevents is the quiet one — a policy that looks configured and grants
@@ -678,7 +683,8 @@ never sees a second item. See
 | `mk http serve` | unchanged; static bearer token, all collections |
 | `content-source.yaml` with no `auth:` | unchanged everywhere; `mk mcp serve-http` serves every collection to any caller and says so in its banner |
 | an `auth:` block with no `anonymous:` rule | unchanged: 401 for a token-less request, challenge included; the new counter reads 0 and the access log gains no field (#36) |
-| `--kb-dir` | suppresses `auth:` discovery, exactly as it suppresses content discovery |
+| `--kb-dir` / `MEERKAT_KB_DIR` | suppresses `auth:` discovery, exactly as it suppresses content discovery; `serve-http` prints a warning when that drops a block it would otherwise have found |
+| `mk mcp serve-http` bound beyond loopback with no authentication | refused at startup unless `--insecure-no-auth` is given (an `auth:` block with `allow_unauthenticated: true` is the in-file equivalent) |
 | a `type: local` collection with a `refresh:` block, behind its source | `mk_search` / `mk_show` gain a second text item after the unchanged first (the [freshness advisory](#freshness-advisory-a-second-text-item)); `mk_list_collections` gains `freshness`; without the block, nothing changes |
 
 `Grants.Can` on a **nil** `*Grants` returns true — "no policy in force"

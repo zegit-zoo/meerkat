@@ -142,6 +142,11 @@ type Spec struct {
 	// other writer to converge with: it is a directory belonging to one
 	// process.
 	Refresh *refresh.Spec `yaml:"refresh,omitempty"`
+
+	// Quota bounds what one namespace (and each shared scope) may hold in
+	// this store; absent or zero limits take the defaults in Quota. See
+	// Quota for how a store is partitioned by owner.
+	Quota *Quota `yaml:"quota,omitempty"`
 }
 
 // Visibility returns the effective personal-memory read policy: the
@@ -237,6 +242,9 @@ func (s *Spec) Validate(label string, contentIsEphemeral bool) error {
 	default:
 		return fmt.Errorf("%s.type must be %s, %s or %s, got %q", label, BackendLocal, BackendGCS, BackendS3, s.Type)
 	}
+	if err := s.Quota.validate(label + ".quota"); err != nil {
+		return err
+	}
 	if s.Refresh != nil && s.Type == BackendS3 && s.SingleWriter {
 		return fmt.Errorf("%s: refresh: and single_writer: true contradict each other — "+
 			"reconciliation exists so several writers converge, and single_writer asserts there is only this one", label)
@@ -278,9 +286,19 @@ func (s *Spec) Open(ctx context.Context, contentDir string) (Store, error) {
 			}
 			dir = filepath.Join(contentDir, dir)
 		}
-		return OpenLocal(dir)
+		st, err := OpenLocal(dir)
+		if err != nil {
+			return nil, err
+		}
+		st.quota = s.Quota.effective()
+		return st, nil
 	case BackendGCS:
-		return OpenGCS(ctx, s.Bucket, s.Prefix)
+		st, err := OpenGCS(ctx, s.Bucket, s.Prefix)
+		if err != nil {
+			return nil, err
+		}
+		st.quota = s.Quota.effective()
+		return st, nil
 	case BackendS3:
 		return OpenS3(ctx, s)
 	default:

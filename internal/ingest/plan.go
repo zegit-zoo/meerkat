@@ -233,11 +233,7 @@ func renderPrompt(p kb.Page, src sources.Source, wikiDir string) (string, error)
 		"enrichment":       strings.Join(src.Enrichment, ","),
 		"now":              now,
 	}
-	out := tpl
-	for k, v := range subs {
-		out = strings.ReplaceAll(out, "{{"+k+"}}", v)
-	}
-	return out, nil
+	return substitute(tpl, subs), nil
 }
 
 // pagePathForRepo returns the path *as the content working copy sees it*,

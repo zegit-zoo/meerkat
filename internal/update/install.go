@@ -10,11 +10,36 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 )
 
+// UpdatedGuardEnv is set to "1" in the environment of the freshly
+// installed binary started after a swap. `mk update` short-circuits when
+// it sees it, so an update can never trigger another update.
+const UpdatedGuardEnv = "MEERKAT_UPDATED"
+
+// reExecArgv is the argv of the post-install hand-off: the new binary
+// runs `version` (confirming the swap) rather than replaying the user's
+// original arguments, which for `update --force --yes` would install
+// again, forever.
+func reExecArgv(exe string) []string { return []string{exe, "version"} }
+
+// reExecEnv returns env with UpdatedGuardEnv=1 set (replacing any
+// previous value).
+func reExecEnv(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	prefix := UpdatedGuardEnv + "="
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			out = append(out, e)
+		}
+	}
+	return append(out, prefix+"1")
+}
+
 // SwapAndReExec atomically replaces the running binary with newPath
-// and re-executes it (preserving the original argv beyond argv[0]).
+// and hands off to it as `<exe> version` (with UpdatedGuardEnv set).
 //
 // The downloaded and verified binary is first copied into a private
 // temp directory owned by the current user. The final install step
@@ -189,7 +214,8 @@ func wrapPermissionError(currentExe, stage string, err error) error {
 func wrapSudoInstallError(currentExe string, err error) error {
 	return fmt.Errorf(`install with sudo failed for %q
 
-The new binary was downloaded, cosign-signature-verified, and staged
+The new binary was downloaded, verified (see the cosign: line printed
+earlier for what was checked), and staged
 in a user-owned temp directory. Only the final copy/move operations
 were run with sudo.
 
@@ -242,7 +268,8 @@ Two ways forward:
        mk update
 
      Note: this is the same trust boundary as running 'mk' itself;
-     the binary is cosign-signature-verified before any swap.
+     the binary is verified before any swap (see the cosign: line
+     printed by 'mk update' for exactly what was checked).
 
   2. Move the install to a user-writable directory so future
      updates work without elevation:
@@ -286,7 +313,8 @@ Two ways forward:
        sudo mk update
 
      Note: this is the same trust boundary as running 'mk' itself;
-     the binary is cosign-signature-verified before any swap.
+     the binary is verified before any swap (see the cosign: line
+     printed by 'mk update' for exactly what was checked).
 
   2. Move the install to a user-writable directory so future
      updates work without sudo:
