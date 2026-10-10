@@ -312,11 +312,20 @@ func researcherModel(p kb.Page) string {
 }
 
 func substitute(tpl string, subs map[string]string) string {
-	out := tpl
-	for k, v := range subs {
-		out = strings.ReplaceAll(out, "{{"+k+"}}", v)
+	// Every {{key}} is replaced in ONE pass (strings.Replacer), so a
+	// value that itself contains "{{other}}" is never expanded: what a
+	// value says is data, whatever order the keys come in
+	// (meerkat-mob#35).
+	keys := make([]string, 0, len(subs))
+	for k := range subs {
+		keys = append(keys, k)
 	}
-	return out
+	sort.Strings(keys)
+	pairs := make([]string, 0, 2*len(keys))
+	for _, k := range keys {
+		pairs = append(pairs, "{{"+k+"}}", subs[k])
+	}
+	return strings.NewReplacer(pairs...).Replace(tpl)
 }
 
 // writeWithin writes rel under root, creating directories on the way.
