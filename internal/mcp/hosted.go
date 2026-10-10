@@ -312,18 +312,31 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		authn.WithDenyHook(s.onDeny),
 		authn.WithAnonymousHook(s.onAnonymous))
 
+	// Session IDs are minted bound to the caller's principal and refused
+	// to anyone else, in both modes (session.go, meerkat-mob#46). Stateful
+	// mode additionally remembers what it issued, which is what
+	// mcp-go's WithStateful did — now with a cap.
+	s.sessions = newSessionBinder(cfg.Stateful, DefaultMaxSessionsPerPrincipal, DefaultMaxSessions)
+
 	hooks := &mcpserver.Hooks{}
-	hooks.AddOnRegisterSession(func(context.Context, mcpserver.ClientSession) {
+	hooks.AddOnRegisterSession(func(hctx context.Context, cs mcpserver.ClientSession) {
 		s.metrics.sessions.Inc()
+		// Registration runs in the request that opened the session, whose
+		// principal is the one the session ID is bound to.
+		s.sessions.own(cs.SessionID(), principal(hctx))
 	})
 	hooks.AddOnUnregisterSession(func(hctx context.Context, cs mcpserver.ClientSession) {
 		s.metrics.sessions.Dec()
 		// A client that went away without reporting ends its retrieval
 		// session as a timeout (issue F). The key is scoped to the
-		// principal in hctx — the request that closed the stream; the idle
-		// sweeper has none, and leaves the session to the tracker's own
-		// idle sweep.
-		cfg.Outcome.Sessions.End(telemetry.NewContext(hctx, s.tel), sessionKey(hctx, cs.SessionID()), retrieval.OutcomeTimeout, nil)
+		// principal recorded when the session was registered, not to
+		// hctx: mcp-go's idle sweeper unregisters with no request, and so
+		// no principal, in hctx.
+		p, ok := s.sessions.disown(cs.SessionID())
+		if !ok {
+			p = principal(hctx)
+		}
+		cfg.Outcome.Sessions.End(telemetry.NewContext(hctx, s.tel), retrieval.Key(p, cs.SessionID()), retrieval.OutcomeTimeout, nil)
 	})
 
 	// AllowAnonymousPersonal is deliberately false on this transport,
@@ -347,11 +360,6 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		mcpserver.WithToolHandlerMiddleware(s.metrics.instrumentTool),
 	)
 
-	// Session IDs are minted bound to the caller's principal and refused
-	// to anyone else, in both modes (session.go, meerkat-mob#46). Stateful
-	// mode additionally remembers what it issued, which is what
-	// mcp-go's WithStateful did — now with a cap.
-	s.sessions = newSessionBinder(cfg.Stateful, DefaultMaxSessionsPerPrincipal, DefaultMaxSessions)
 	streamOpts := []mcpserver.StreamableHTTPOption{
 		mcpserver.WithEndpointPath(cfg.EndpointPath),
 		mcpserver.WithStreamableHTTPLogger(s.log),

@@ -499,8 +499,9 @@ an idle window (`sessions.idle_timeout`, default 120 s), and within the
 caller's principal: the same `session_id` from two principals is two
 sessions (meerkat-mob#46). It ends on `mk_report_outcome`, on idle
 timeout, or when the MCP session goes away. At most 64 sessions per
-principal and 10,000 overall are live; past a cap the least recently
-used one ends as if idle.
+verified principal and 10,000 overall are live (callers with no
+subject are held to the overall cap only); past a cap the least
+recently used one ends as if idle.
 
 Definitions (`internal/retrieval`):
 
@@ -597,7 +598,9 @@ A report reaches the traversal log only when the gate admits it
   session's first report is logged, and a report that closes a live
   session is always the first. A reported key is remembered for an hour.
 - `rate_limited`: the caller's principal is out of tokens: a burst of 20,
-  then one per 30 s (`OutcomeOptions.Reports`).
+  then one per 30 s (`OutcomeOptions.Reports`). On a hosted server with
+  no `auth:` block every caller is the one anonymous principal, so they
+  all share a single bucket.
 - `not_configured`: there is no traversal log.
 
 The disclosure rule holds exactly as before: the span and the metric
