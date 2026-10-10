@@ -106,6 +106,10 @@ type fakeForgeServer struct {
 	list        func(page string) string
 	labelPages  []string
 	listQueries []url.Values
+	// self is GET /user's login; userStatus, when set, answers it instead.
+	self       string
+	userStatus int
+	userCalls  int
 }
 
 func (s *fakeForgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -115,6 +119,14 @@ func (s *fakeForgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/user"):
+		s.userCalls++
+		if s.userStatus != 0 {
+			w.WriteHeader(s.userStatus)
+			_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"login":"` + s.self + `"}`))
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/repos/team/kb/issues"):
 		if err := json.NewDecoder(r.Body).Decode(&s.created); err != nil {
 			s.t.Errorf("decode: %v", err)
@@ -283,13 +295,18 @@ func TestGitea_LabelLookupPaginates(t *testing.T) {
 
 const findMarker = "<!-- meerkat:intake-id hb1 -->"
 
-func issueJSON(n int, body string, pr bool) string {
+// testSelf is the login the fake forge says the test token belongs to.
+const testSelf = "meerkat-bot"
+
+func issueJSON(n int, body string, pr bool) string { return issueJSONBy(n, body, pr, testSelf) }
+
+func issueJSONBy(n int, body string, pr bool, author string) string {
 	b, _ := json.Marshal(body)
 	extra := ""
 	if pr {
 		extra = `,"pull_request":{"url":"x"}`
 	}
-	return fmt.Sprintf(`{"number":%d,"html_url":"https://forge.example.com/team/kb/issues/%d","body":%s%s}`, n, n, b, extra)
+	return fmt.Sprintf(`{"number":%d,"html_url":"https://forge.example.com/team/kb/issues/%d","body":%s%s,"user":{"login":%q}}`, n, n, b, extra, author)
 }
 
 func TestFindIssue(t *testing.T) {
@@ -304,7 +321,7 @@ func TestFindIssue(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			fs := &fakeForgeServer{t: t}
+			fs := &fakeForgeServer{t: t, self: "Meerkat-Bot"} // logins compare case-insensitively
 			srv := httptest.NewServer(fs)
 			defer srv.Close()
 			c, auth, pageSize := mk(srv.URL, srv.Client())
@@ -322,7 +339,10 @@ func TestFindIssue(t *testing.T) {
 					}
 					return "[" + strings.Join(items, ",") + "]"
 				case "2":
-					return "[" + issueJSON(900, findMarker+"\r\nlater copy", false) + "," + issueJSON(500, findMarker+"\nours", false) + "]"
+					// #400 carries the marker but was opened by someone else:
+					// the marker is no secret, so it must not be adopted.
+					return "[" + issueJSON(900, findMarker+"\r\nlater copy", false) + "," + issueJSONBy(400, findMarker+"\nplanted", false, "depositor") + "," +
+						issueJSON(500, findMarker+"\nours", false) + "]"
 				}
 				return "[]"
 			}
@@ -378,5 +398,47 @@ func TestFindIssue(t *testing.T) {
 				t.Errorf("forge error = %v", err)
 			}
 		})
+	}
+}
+
+// TestFindIssue_AdoptsOnlyItsOwnIssues pins meerkat-mob#62 item 4: an
+// issue someone else opened with the marker is never adopted, and a
+// token whose own account cannot be read adopts nothing.
+func TestFindIssue_AdoptsOnlyItsOwnIssues(t *testing.T) {
+	ctx := context.Background()
+	since := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	fs := &fakeForgeServer{t: t, self: testSelf, wantAuth: "Bearer " + testToken}
+	srv := httptest.NewServer(fs)
+	defer srv.Close()
+	c := &GitHub{Base: srv.URL, Token: testToken, HTTP: srv.Client()}
+
+	// Only a planted issue carries the marker: nothing is found.
+	fs.list = func(string) string { return "[" + issueJSONBy(1, findMarker, false, "depositor") + "]" }
+	if _, n, ok, err := c.FindIssue(ctx, "team/kb", findMarker, since); ok || err != nil {
+		t.Fatalf("a planted issue was adopted: #%d %v %v", n, ok, err)
+	}
+	if _, _, _, err := c.FindIssue(ctx, "team/kb", findMarker, since); err != nil {
+		t.Fatal(err)
+	}
+	if fs.userCalls != 1 {
+		t.Errorf("GET /user called %d times, want once (cached)", fs.userCalls)
+	}
+
+	// An App installation token cannot read /user: report "cannot rule
+	// out an earlier filing", never adopt.
+	for _, code := range []int{http.StatusForbidden, http.StatusNotFound} {
+		c := &GitHub{Base: srv.URL, Token: testToken, HTTP: srv.Client()}
+		fs.userStatus = code
+		fs.list = func(string) string { return "[" + issueJSON(1, findMarker, false) + "]" }
+		_, _, ok, err := c.FindIssue(ctx, "team/kb", findMarker, since)
+		if ok || !errors.Is(err, ErrSearchTruncated) || !errors.Is(err, ErrSelfUnknown) {
+			t.Errorf("/user %d: found=%v err=%v, want ErrSearchTruncated+ErrSelfUnknown", code, ok, err)
+		}
+	}
+	// A transient failure is a plain error, so the caller retries.
+	c = &GitHub{Base: srv.URL, Token: testToken, HTTP: srv.Client()}
+	fs.userStatus = http.StatusBadGateway
+	if _, _, _, err := c.FindIssue(ctx, "team/kb", findMarker, since); err == nil || errors.Is(err, ErrSearchTruncated) {
+		t.Errorf("/user 502 = %v, want a plain error", err)
 	}
 }

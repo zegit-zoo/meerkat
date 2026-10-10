@@ -3,7 +3,9 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -356,5 +358,42 @@ func TestLocal_ByteIdenticalRewriteKeepsTheVersion(t *testing.T) {
 	}
 	if v1 != v2 {
 		t.Errorf("version changed on a no-op rewrite: %q -> %q; nothing changed, so nobody's precondition should be invalidated", v1, v2)
+	}
+}
+
+// TestLocal_StaleTempFileDoesNotBlockWrites pins meerkat-mob#62 item 3:
+// a temp file left by a crash between create and rename (here under the
+// old PID-derived name, which a container restarted as PID 1 reused on
+// every start) must not make later writes to that key fail, and is
+// never loaded as a document.
+func TestLocal_StaleTempFileDoesNotBlockWrites(t *testing.T) {
+	ctx := context.Background()
+	s := newLocal(t)
+	if err := os.MkdirAll(filepath.Join(s.dir, "team"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{fmt.Sprintf(".note.md.%d.tmp", os.Getpid()), ".note.md.1.tmp"} {
+		if err := os.WriteFile(filepath.Join(s.dir, "team", stale), []byte("half"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v, err := s.Put(ctx, "team/note.md", []byte("one"), CreateOnly())
+	if err != nil {
+		t.Fatalf("a stale temp file blocked a write: %v", err)
+	}
+	if _, err := s.Put(ctx, "team/note.md", []byte("two"), UpdateFrom(v)); err != nil {
+		t.Fatalf("a stale temp file blocked an update: %v", err)
+	}
+	recs, err := s.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 || recs[0].Key != "team/note.md" {
+		t.Errorf("Load = %+v, want only the document", recs)
+	}
+	a, _ := tempName("team/note.md")
+	b, _ := tempName("team/note.md")
+	if a == b || !strings.HasPrefix(path.Base(a), ".note.md.") {
+		t.Errorf("temp names %q, %q: want distinct dot-prefixed siblings", a, b)
 	}
 }
