@@ -647,9 +647,14 @@ content:
 #       audience: api://meerkat        # defaults to auth.resource above
 #       claims:                        # which claim carries what
 #         groups: groups               # "roles" for Entra app roles
-#         email: preferred_username    # default "email"
+#         # email: leave at the default "email" — never preferred_username
+#         # (mutable; an `emails:` rule would trust a value its owner can change)
 #         tenant: tid                  # default "tid"
 #       require_tenant: <tenant-id>    # optional: pin a multi-tenant issuer
+#       # token_type: access           # optional: refuse ID tokens (needs typ
+#       #                              # at+jwt, or an scp/roles claim)
+#       # allowed_azp: [<client-id>]   # optional: only tokens issued to these clients
+#       # skip_issuer_check: true      # discouraged; REQUIRES require_tenant, logs a warning
 #
 #     - issuer: https://accounts.google.com
 #       audience: <oauth-client-id>.apps.googleusercontent.com
@@ -664,6 +669,12 @@ content:
 #   # (any-of, case-insensitive), tenant, issuer, anonymous. Any value
 #   # WITHIN a selector matches; ALL selectors present must match. A rule
 #   # with no selector matches every AUTHENTICATED caller.
+#   #
+#   # With MORE THAN ONE provider, a rule selecting on subjects, emails or
+#   # groups MUST say which provider with `issuer:` (it is refused at load
+#   # otherwise): a group name or email from one identity provider is not
+#   # evidence about the other's. An `emails:` rule never matches a token
+#   # whose email_verified claim is false.
 #   #
 #   # `anonymous: true` is the one selector that is not about a claim: it
 #   # publishes the rule's collections to callers with NO bearer token at
@@ -697,26 +708,31 @@ content:
 #   rules:
 #     - name: sre
 #       groups: [sre, oncall]
+#       issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
 #       collections: [runbooks, architecture]
 #       capabilities: [read]           # the default when omitted
 #
 #     - name: hr
 #       groups: [people-ops]
+#       issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
 #       collections: [team-notes]
 #       capabilities: [read, team-write]
 #
 #     - name: everyone-remembers
 #       groups: [engineering]
+#       issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
 #       collections: [team-notes]      # may save their own memories, and
 #       capabilities: [read, personal-write]   # PROPOSE team/global ones
 #
 #     - name: knowledge-owners
 #       groups: [knowledge-owners]
+#       issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
 #       collections: [team-notes]
 #       capabilities: [read, team-write, global-write]
 #
 #     - name: platform-admins
 #       groups: [platform-admins]
+#       issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
 #       collections: ["*"]             # every collection, including future ones
 #       capabilities: [admin]
 #
