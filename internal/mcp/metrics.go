@@ -30,7 +30,10 @@ import (
 //
 // The route label is therefore the server's OWN route pattern from a
 // closed set (the endpoints routes() registers), resolved through the
-// mux — never r.URL.Path.
+// mux — never r.URL.Path. The method label is closed the same way
+// (methodLabel): Go accepts any token as a request method, and these
+// series are written before authentication, so a raw r.Method would let
+// any client mint a series per request (meerkat-mob#47).
 type metrics struct {
 	reg *prometheus.Registry
 
@@ -175,7 +178,8 @@ func (m *metrics) instrumentHTTP(mux *http.ServeMux) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route := m.routeOf(r)
-		timer := prometheus.NewTimer(m.duration.WithLabelValues(route, r.Method))
+		method := methodLabel(r.Method)
+		timer := prometheus.NewTimer(m.duration.WithLabelValues(route, method))
 		rec, ok := w.(*statusRecorder)
 		if !ok {
 			rec = &statusRecorder{ResponseWriter: w, status: http.StatusOK}
@@ -183,8 +187,21 @@ func (m *metrics) instrumentHTTP(mux *http.ServeMux) http.Handler {
 		}
 		mux.ServeHTTP(w, r)
 		timer.ObserveDuration()
-		m.requests.WithLabelValues(route, r.Method, strconv.Itoa(rec.status)).Inc()
+		m.requests.WithLabelValues(route, method, strconv.Itoa(rec.status)).Inc()
 	})
+}
+
+// methodLabel maps a request method onto a closed set: the methods an
+// HTTP client of this server has any reason to send, and "other" for
+// everything else. Matching is exact — HTTP methods are case-sensitive,
+// and "get" is not GET.
+func methodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodHead,
+		http.MethodOptions, http.MethodPut, http.MethodPatch:
+		return method
+	}
+	return "other"
 }
 
 // instrumentTool counts and times tool handler invocations, and — when
