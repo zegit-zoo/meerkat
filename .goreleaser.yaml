@@ -21,11 +21,15 @@ builds:
       - CGO_ENABLED=0
     flags:
       - -trimpath
+    # Reproducible builds: the embedded date is the commit's, not the build
+    # time, and the binary's mtime is the commit timestamp, so two builds of
+    # the same tag produce identical bytes (meerkat-mob#60).
+    mod_timestamp: '{{ .CommitTimestamp }}'
     ldflags:
       - -s -w
       - -X github.com/zegit-zoo/meerkat/internal/cli.version={{.Version}}
       - -X github.com/zegit-zoo/meerkat/internal/cli.commit={{.ShortCommit}}
-      - -X github.com/zegit-zoo/meerkat/internal/cli.date={{.Date}}
+      - -X github.com/zegit-zoo/meerkat/internal/cli.date={{.CommitDate}}
       - -X github.com/zegit-zoo/meerkat/internal/cli.kbCommit={{.Env.KB_COMMIT}}
     goos:
       - darwin
@@ -53,11 +57,12 @@ builds:
       - CGO_ENABLED=0
     flags:
       - -trimpath
+    mod_timestamp: '{{ .CommitTimestamp }}'
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
       - -X main.commit={{.ShortCommit}}
-      - -X main.date={{.Date}}
+      - -X main.date={{.CommitDate}}
     goos:
       - darwin
       - linux
@@ -78,11 +83,23 @@ archives:
         formats: [zip]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    # Every archive entry carries the commit date, not the checkout's or
+    # the build's mtime, so the tar.gz/zip bytes are reproducible too.
+    builds_info:
+      mtime: '{{ .CommitDate }}'
     files:
-      - LICENSE*
-      - NOTICE
-      - THIRD-PARTY-LICENSES.txt
-      - README.md
+      - src: LICENSE*
+        info:
+          mtime: '{{ .CommitDate }}'
+      - src: NOTICE
+        info:
+          mtime: '{{ .CommitDate }}'
+      - src: THIRD-PARTY-LICENSES.txt
+        info:
+          mtime: '{{ .CommitDate }}'
+      - src: README.md
+        info:
+          mtime: '{{ .CommitDate }}'
     # Symlink mk -> meerkat at install time. For Unix tarball
     # users this is documented in docs/INSTALL.md; for Windows
     # users a copy of meerkat.exe to mk.exe (or a mk.cmd shim)
@@ -104,6 +121,12 @@ archives:
     formats: [binary]
     name_template: >-
       meerkat-bootstrap_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+# The source archive is what the `source` SBOM below describes; without
+# it goreleaser has no source artifact and silently skips that SBOM.
+source:
+  enabled: true
+  name_template: '{{ .ProjectName }}_{{ .Version }}_source'
 
 checksum:
   name_template: '{{ .ProjectName }}_{{ .Version }}_checksums.txt'

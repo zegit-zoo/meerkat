@@ -65,8 +65,9 @@ jobs:
     # Only this job creates the GitHub Release and mints the cosign
     # OIDC token — both are scoped here, not at the workflow level.
     permissions:
-      contents: write   # create the GitHub Release
-      id-token: write   # cosign keyless OIDC (Fulcio)
+      contents: write      # create the GitHub Release
+      id-token: write      # cosign keyless OIDC (Fulcio)
+      attestations: write  # SLSA build provenance for the release artifacts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -86,12 +87,24 @@ jobs:
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
         with:
-          version: "~> v2"
+          # Exact pin: the action checks the downloaded binary only against
+          # goreleaser's own checksums file, so a floating range would let a
+          # new upstream release run in the signing job unreviewed. Dependabot
+          # does not bump this input; raise it by hand (meerkat-mob#60).
+          version: v2.18.2
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
           KB_COMMIT: none
+
+      # SLSA build provenance for every artifact listed in the checksums
+      # file (archives, bootstrap binaries, source archive, SBOMs), stored
+      # as a GitHub attestation: `gh attestation verify <file> -R zegit-zoo/meerkat`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-checksums: dist/meerkat_${{ github.ref_name }}_checksums.txt
 
   docker:
     name: Build, sign & push OCI image
@@ -112,7 +125,27 @@ jobs:
         id: vars
         run: |
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # The commit date, as goreleaser's {{.CommitDate}} embeds in the
+          # release binaries, so the image binary reports the same date.
+          echo "date=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # `latest` (and nothing else) must only move forward: tagging a patch
+      # for an older line, e.g. v0.15.1 after v0.16.0, must not repoint it.
+      - name: Is this the highest release tag?
+        id: latest
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          highest="$(git ls-remote --tags --refs origin 'refs/tags/v*' \
+            | sed -n 's|.*refs/tags/\(v[0-9]*\.[0-9]*\.[0-9]*\)$|\1|p' \
+            | sort -V | tail -n 1)"
+          if [ "$highest" = "$REF_NAME" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "highest release tag: $highest; this tag: $REF_NAME"
 
       - name: Set up QEMU (linux/arm64 emulation on the amd64 runner)
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
@@ -134,21 +167,25 @@ jobs:
           images: ghcr.io/zegit-zoo/meerkat
           # {{version}}/{{major}}.{{minor}} both come from the vX.Y.Z tag
           # this workflow triggers on (see the `on.push.tags` filter
-          # above) — no separate semver parsing needed. `latest` comes
-          # from the action's default `latest=auto` flavor, which tags
-          # it on semver tag events; an explicit raw rule here would
-          # emit `latest` twice (v0.11.0's docker job failed the tag
+          # above) — no separate semver parsing needed. `latest=auto`
+          # would tag every semver push, an older line's patch included,
+          # so it is off and the raw rule adds `latest` only for the
+          # highest tag (step above). With the flavor off, the raw rule
+          # cannot duplicate it (v0.11.0's docker job failed the tag
           # assertion on exactly that duplication).
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ steps.latest.outputs.latest }}
           labels: |
             org.opencontainers.image.licenses=Apache-2.0
 
       # Guards the published-tag contract documented in
       # docs/CONTAINER.md / README.md / docs/RELEASE.md: a vX.Y.Z git
-      # tag must publish exactly the three image aliases X.Y.Z, X.Y,
-      # and latest — no leading `v`. Fails loudly (rather than
+      # tag must publish exactly the image aliases X.Y.Z, X.Y, and,
+      # when it is the highest release tag, latest — no leading `v`. Fails loudly (rather than
       # silently pushing an undocumented tag set) if metadata-action's
       # `tags` output ever changes shape upstream. Dependency-free
       # shell only — no jq/yq.
@@ -156,6 +193,7 @@ jobs:
         env:
           COMPUTED_TAGS: ${{ steps.meta.outputs.tags }}
           REF_NAME: ${{ github.ref_name }}
+          IS_LATEST: ${{ steps.latest.outputs.latest }}
         run: |
           set -euo pipefail
 
@@ -163,7 +201,10 @@ jobs:
           major_minor="${version%.*}"
           image="ghcr.io/zegit-zoo/meerkat"
 
-          expected="$(printf '%s:%s\n%s:%s\n%s:latest' "$image" "$version" "$image" "$major_minor" "$image")"
+          expected="$(printf '%s:%s\n%s:%s' "$image" "$version" "$image" "$major_minor")"
+          if [ "$IS_LATEST" = "true" ]; then
+            expected="$(printf '%s\n%s:latest' "$expected" "$image")"
+          fi
 
           if [ "$COMPUTED_TAGS" != "$expected" ]; then
             echo "::error::docker/metadata-action produced a tag set that no longer matches the documented contract (docs/CONTAINER.md, README.md, docs/RELEASE.md)."
@@ -193,7 +234,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          provenance: true
+          provenance: mode=max
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
