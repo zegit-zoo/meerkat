@@ -41,9 +41,16 @@ govulncheck):
 
 ```bash
 brew install pre-commit                    # or: pipx install pre-commit
-pre-commit install                         # gates `git commit`
+pre-commit install --install-hooks         # gates `git commit`
 pre-commit install --hook-type pre-push    # gates `git push`
 ```
+
+`--install-hooks` builds the hook environments up front. Do the same
+with `pre-commit install-hooks` after pulling a change to a `rev:` in
+`.pre-commit-config.yaml`: in a linked worktree, an environment built
+during `git commit` can overwrite that worktree's index (the commit
+fails with `fatal: unable to read <sha>`; `git read-tree HEAD` repairs
+it).
 
 That is the whole setup. You do **not** install `golangci-lint` or the
 scanners by hand, and you do **not** set `GOTOOLCHAIN`: every gate runs
