@@ -629,6 +629,10 @@ Run a Model Context Protocol server on stdio. Exposes:
   mk_search       - full-text search across the loaded KB
   mk_show         - retrieve one page by ID (returns body + frontmatter)
   mk_list         - list pages, optionally filtered (prefix/category/status/owner)
+  mk_list_collections
+                  - the mounted collections and what you may do on each
+  mk_report_outcome
+                  - close a retrieval session: found / not_found / gave_up
   mk_save_memory  - save a personal/team/global memory, searchable at once
                     (only when a collection declares a "memory:" store)
 
@@ -675,6 +679,10 @@ transport. It exposes the same tools as 'mcp serve':
   mk_search       - full-text search across the KB
   mk_show         - retrieve one page by ID (returns body + frontmatter)
   mk_list         - list pages, optionally filtered
+  mk_list_collections
+                  - the mounted collections and what you may do on each
+  mk_report_outcome
+                  - close a retrieval session: found / not_found / gave_up
   mk_save_memory  - save a personal/team/global memory (only when a
                     collection declares a "memory:" store)
 
