@@ -44,7 +44,9 @@ const (
 	DefaultEndpointPath = "/mcp"
 	// DefaultAddr binds loopback, like `mk http serve`: exposing an MCP
 	// server to a network is a decision an operator makes explicitly.
-	DefaultAddr = ":4005"
+	// (`mk mcp serve-http` always passes an address of its own, built by
+	// ResolveListenAddr, whose empty host is loopback too.)
+	DefaultAddr = "127.0.0.1:4005"
 
 	// LivenessPath answers "is this process running": it never touches
 	// content, so a restart loop can't be caused by a bad KB mount.
@@ -107,11 +109,11 @@ type HostedConfig struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
-	// Stateful keeps a registry of the session IDs this process issued
-	// and answers any other as unknown, instead of accepting any
-	// well-formed ID bound to the caller (session.go). It requires sticky
-	// routing when more than one replica is behind a load balancer, which
-	// is why it is off by default.
+	// Stateful keeps per-session state in this process (mcp-go's
+	// InsecureStatefulSessionIdManager) instead of accepting any
+	// well-formed session ID. It requires sticky routing when more than
+	// one replica is behind a load balancer, which is why it is off by
+	// default.
 	Stateful bool
 	// HeartbeatInterval keeps idle SSE streams alive through proxies
 	// that reap quiet connections. Zero means DefaultHeartbeat; a
@@ -165,6 +167,26 @@ type HostedConfig struct {
 	// NoSecurityTxt stops the server publishing
 	// /.well-known/security.txt (#126). The zero value publishes it.
 	NoSecurityTxt bool
+
+	// MaxRequestBytes caps a request body on the MCP endpoint; a larger
+	// one is answered 413 without being read past the cap (limits.go).
+	// Zero means DefaultMaxRequestBytes; a negative value is refused by
+	// validate — there is no "unbounded".
+	MaxRequestBytes int64
+	// MaxConcurrentRequests caps non-GET requests in flight on the MCP
+	// endpoint; one over the cap is answered 503 with Retry-After. Zero
+	// means DefaultMaxConcurrentRequests; negative means no cap.
+	MaxConcurrentRequests int
+	// MaxConcurrentStreams caps open GET (SSE) streams on the MCP
+	// endpoint, separately from requests, because a stream holds its slot
+	// for a whole session. Zero means DefaultMaxConcurrentStreams;
+	// negative means no cap.
+	MaxConcurrentStreams int
+	// MetricsAddr, when set, serves /metrics on its own listener at this
+	// address instead of on the API port, so a deployment can keep the
+	// scrape endpoint off the network its MCP clients reach. Empty keeps
+	// /metrics on the API port, as before.
+	MetricsAddr string
 }
 
 // HostedServer is a running (or runnable) Streamable HTTP MCP server.
@@ -173,13 +195,14 @@ type HostedServer struct {
 	reg     *collections.Registry
 	srv     *http.Server
 	handler http.Handler
-	stream  *mcpserver.StreamableHTTPServer
-	log     *slog.Logger
-	metrics *metrics
-	gate    *authn.Gate
-	auth    *authz.Config
-	// sessions binds MCP session IDs to principals (session.go).
-	sessions *sessionBinder
+	// metricsSrv serves /metrics on cfg.MetricsAddr; nil when /metrics
+	// rides the API port.
+	metricsSrv *http.Server
+	stream     *mcpserver.StreamableHTTPServer
+	log        *slog.Logger
+	metrics    *metrics
+	gate       *authn.Gate
+	auth       *authz.Config
 	// stopCache stops the temperature flusher (cache.go); set by
 	// NewHosted, called by Close.
 	stopCache func()
@@ -312,31 +335,15 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		authn.WithDenyHook(s.onDeny),
 		authn.WithAnonymousHook(s.onAnonymous))
 
-	// Session IDs are minted bound to the caller's principal and refused
-	// to anyone else, in both modes (session.go, meerkat-mob#46). Stateful
-	// mode additionally remembers what it issued, which is what
-	// mcp-go's WithStateful did — now with a cap.
-	s.sessions = newSessionBinder(cfg.Stateful, DefaultMaxSessionsPerPrincipal, DefaultMaxSessions)
-
 	hooks := &mcpserver.Hooks{}
-	hooks.AddOnRegisterSession(func(hctx context.Context, cs mcpserver.ClientSession) {
+	hooks.AddOnRegisterSession(func(context.Context, mcpserver.ClientSession) {
 		s.metrics.sessions.Inc()
-		// Registration runs in the request that opened the session, whose
-		// principal is the one the session ID is bound to.
-		s.sessions.own(cs.SessionID(), principal(hctx))
 	})
 	hooks.AddOnUnregisterSession(func(hctx context.Context, cs mcpserver.ClientSession) {
 		s.metrics.sessions.Dec()
 		// A client that went away without reporting ends its retrieval
-		// session as a timeout (issue F). The key is scoped to the
-		// principal recorded when the session was registered, not to
-		// hctx: mcp-go's idle sweeper unregisters with no request, and so
-		// no principal, in hctx.
-		p, ok := s.sessions.disown(cs.SessionID())
-		if !ok {
-			p = principal(hctx)
-		}
-		cfg.Outcome.Sessions.End(telemetry.NewContext(hctx, s.tel), retrieval.Key(p, cs.SessionID()), retrieval.OutcomeTimeout, nil)
+		// session as a timeout (issue F).
+		cfg.Outcome.Sessions.End(telemetry.NewContext(hctx, s.tel), cs.SessionID(), retrieval.OutcomeTimeout, nil)
 	})
 
 	// AllowAnonymousPersonal is deliberately false on this transport,
@@ -363,7 +370,9 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	streamOpts := []mcpserver.StreamableHTTPOption{
 		mcpserver.WithEndpointPath(cfg.EndpointPath),
 		mcpserver.WithStreamableHTTPLogger(s.log),
-		mcpserver.WithSessionIdManagerResolver(s.sessions),
+	}
+	if cfg.Stateful {
+		streamOpts = append(streamOpts, mcpserver.WithStateful(true))
 	}
 	if cfg.HeartbeatInterval > 0 {
 		streamOpts = append(streamOpts, mcpserver.WithHeartbeatInterval(cfg.HeartbeatInterval))
@@ -390,6 +399,15 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,
+	}
+	if cfg.MetricsAddr != "" {
+		s.metricsSrv = &http.Server{
+			Addr:              cfg.MetricsAddr,
+			Handler:           s.MetricsHandler(),
+			ReadHeaderTimeout: cfg.ReadTimeout,
+			ReadTimeout:       cfg.ReadTimeout,
+			IdleTimeout:       cfg.IdleTimeout,
+		}
 	}
 	return s, nil
 }
@@ -454,6 +472,15 @@ func (c *HostedConfig) applyDefaults() {
 	if c.ReadinessTTL == 0 {
 		c.ReadinessTTL = defaultReadinessTTL
 	}
+	if c.MaxRequestBytes == 0 {
+		c.MaxRequestBytes = DefaultMaxRequestBytes
+	}
+	if c.MaxConcurrentRequests == 0 {
+		c.MaxConcurrentRequests = DefaultMaxConcurrentRequests
+	}
+	if c.MaxConcurrentStreams == 0 {
+		c.MaxConcurrentStreams = DefaultMaxConcurrentStreams
+	}
 }
 
 // reservedPaths are the operational endpoints the mux always registers.
@@ -476,6 +503,9 @@ func (c *HostedConfig) validate() error {
 		if c.EndpointPath == p {
 			return fmt.Errorf("MCP endpoint path %q collides with a reserved unauthenticated endpoint — choose another --path", p)
 		}
+	}
+	if c.MaxRequestBytes < 0 {
+		return fmt.Errorf("max request bytes %d is negative; the MCP endpoint's body cap cannot be turned off", c.MaxRequestBytes)
 	}
 	if c.Auth != nil && len(c.Auth.Providers) > 0 && authn.MetadataURL(c.Auth.Resource) == "" {
 		return fmt.Errorf("auth.resource %q is not an absolute URL, so no RFC 9728 metadata location can be derived for the 401 challenge", c.Auth.Resource)
@@ -502,7 +532,15 @@ func (c *HostedConfig) validate() error {
 func (s *HostedServer) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.Handle(s.cfg.EndpointPath, s.gate.Middleware(captureIdentity(s.sessions.middleware(s.stream))))
+	// The request bounds (limits.go) wrap the authentication gate, in an
+	// order that matters: the in-flight cap is outermost, so a request
+	// holds a slot before it costs anything (token verification is work
+	// too); a body declared over the cap is refused before anything reads
+	// it; and a body of unknown length is buffered only after the gate
+	// has admitted the caller, so unauthenticated work stays cheap.
+	limiter := newInflight(s.cfg.MaxConcurrentRequests, s.cfg.MaxConcurrentStreams)
+	mux.Handle(s.cfg.EndpointPath, limiter.middleware(limitBody(s.cfg.MaxRequestBytes,
+		s.gate.Middleware(bufferBody(s.cfg.MaxRequestBytes, captureIdentity(s.stream))))))
 
 	if s.auth != nil && s.auth.Resource != "" {
 		md := authn.MetadataHandler(s.auth, "meerkat knowledge base")
@@ -522,7 +560,9 @@ func (s *HostedServer) routes() http.Handler {
 	}
 	mux.HandleFunc("GET "+LivenessPath, s.handleLivez)
 	mux.HandleFunc("GET "+ReadinessPath, s.handleReadyz)
-	mux.Handle("GET "+MetricsPath, promhttp.HandlerFor(s.metrics.reg, promhttp.HandlerOpts{}))
+	if s.cfg.MetricsAddr == "" {
+		mux.Handle("GET "+MetricsPath, s.metricsHandler())
+	}
 	mux.HandleFunc("GET /{$}", s.handleRoot)
 
 	// Outermost first: the root span has to exist before the access log
@@ -537,6 +577,22 @@ func (s *HostedServer) routes() http.Handler {
 // Handler exposes the fully-wrapped mux, for tests and for embedding
 // meerkat's MCP endpoint in a larger server.
 func (s *HostedServer) Handler() http.Handler { return s.handler }
+
+// metricsHandler is the Prometheus scrape handler over this server's
+// registry.
+func (s *HostedServer) metricsHandler() http.Handler {
+	return promhttp.HandlerFor(s.metrics.reg, promhttp.HandlerOpts{})
+}
+
+// MetricsHandler is what the separate metrics listener serves when
+// MetricsAddr is set: GET /metrics and nothing else. It is exported for
+// tests and for an embedding host that wants to mount the scrape
+// endpoint on a listener of its own.
+func (s *HostedServer) MetricsHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET "+MetricsPath, s.metricsHandler())
+	return mux
+}
 
 // Addr returns the address the server serves on.
 //
@@ -610,7 +666,17 @@ func (s *HostedServer) ListenAndServe(ctx context.Context) error {
 	s.refresh.Start(telemetry.NewContext(ctx, s.tel))
 	defer func() { _ = s.refresh.Close() }()
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
+	if s.metricsSrv != nil {
+		// The metrics listener lives and dies with the API one: a failure
+		// to bind it ends the server, rather than leaving it running with
+		// a scrape target that silently went away.
+		go func() {
+			if err := s.metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("metrics listener: %w", err)
+			}
+		}()
+	}
 	go func() {
 		var err error
 		if s.cfg.Listener != nil {
@@ -631,6 +697,9 @@ func (s *HostedServer) ListenAndServe(ctx context.Context) error {
 		defer cancel()
 		s.stream.CloseSessions(shutdownCtx)
 		_ = s.srv.Shutdown(shutdownCtx)
+		if s.metricsSrv != nil {
+			_ = s.metricsSrv.Shutdown(shutdownCtx)
+		}
 		// Flush telemetry LAST, and never let it decide the outcome. The
 		// spans worth keeping are the ones from the requests that just
 		// finished, so the flush belongs after the graceful drain; and a
@@ -640,6 +709,13 @@ func (s *HostedServer) ListenAndServe(ctx context.Context) error {
 		_ = s.tel.Shutdown(shutdownCtx)
 		return ctx.Err()
 	case err := <-errCh:
+		if s.metricsSrv != nil {
+			_ = s.metricsSrv.Close()
+		}
+		if err != nil {
+			// Whichever listener failed, the other one stops with it.
+			_ = s.srv.Close()
+		}
 		_ = s.tel.Shutdown(context.Background())
 		return err
 	}
@@ -834,7 +910,9 @@ func (s *HostedServer) handleRoot(w http.ResponseWriter, _ *http.Request) {
 	}
 	fmt.Fprintf(w, "  %-34s liveness probe\n", LivenessPath)
 	fmt.Fprintf(w, "  %-34s readiness probe\n", ReadinessPath)
-	fmt.Fprintf(w, "  %-34s Prometheus metrics\n", MetricsPath)
+	if s.cfg.MetricsAddr == "" {
+		fmt.Fprintf(w, "  %-34s Prometheus metrics\n", MetricsPath)
+	}
 	fmt.Fprintln(w, "")
 	switch {
 	case s.AuthEnabled() && s.AnonymousEnabled():
