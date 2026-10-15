@@ -23,6 +23,10 @@ type Fake struct {
 	Err error
 }
 
+// Self is the login a Fake files issues as; FindIssue adopts only
+// issues with this author, as the real clients do.
+const Self = "meerkat-librarian"
+
 var _ forge.Client = (*Fake)(nil)
 
 // Issue is one issue a Fake holds.
@@ -33,6 +37,9 @@ type Issue struct {
 	Body   string
 	Labels []string
 	State  string
+	// Author is the login that opened the issue: Self for CreateIssue,
+	// anything for Plant.
+	Author string
 }
 
 // CreateIssue implements forge.Client.
@@ -43,8 +50,18 @@ func (f *Fake) CreateIssue(_ context.Context, repo, title, body string, labels [
 		return "", 0, f.Err
 	}
 	n := len(f.issues) + 1
-	f.issues = append(f.issues, &Issue{Repo: repo, Number: n, Title: title, Body: body, Labels: append([]string(nil), labels...), State: forge.StateOpen})
+	f.issues = append(f.issues, &Issue{Repo: repo, Number: n, Title: title, Body: body, Labels: append([]string(nil), labels...), State: forge.StateOpen, Author: Self})
 	return fmt.Sprintf("https://forge.invalid/%s/issues/%d", repo, n), n, nil
+}
+
+// Plant opens an issue as somebody else, the way any user of a public
+// repo can, and returns its number.
+func (f *Fake) Plant(repo, author, body string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := len(f.issues) + 1
+	f.issues = append(f.issues, &Issue{Repo: repo, Number: n, Body: body, State: forge.StateOpen, Author: author})
+	return n
 }
 
 // IssueState implements forge.Client.
@@ -72,7 +89,7 @@ func (f *Fake) FindIssue(_ context.Context, repo, marker string, _ time.Time) (s
 	}
 	for _, is := range f.issues {
 		first, _, _ := strings.Cut(is.Body, "\n")
-		if is.Repo == repo && first == marker {
+		if is.Repo == repo && first == marker && is.Author == Self {
 			return fmt.Sprintf("https://forge.invalid/%s/issues/%d", repo, is.Number), is.Number, true, nil
 		}
 	}

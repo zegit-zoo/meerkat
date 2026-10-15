@@ -4,6 +4,10 @@ name: CI
 # Unset (the default) means GitHub-hosted with no container. CI_IMAGE optionally
 # overrides the image. Jobs left on a literal ubuntu-latest are held back on purpose
 # (docker, services:, chromium, gh CLI, GitHub Pages) -- see flux-config ADR 0011 R9.
+# Pull requests from forks never take the self-hosted route: that pool is shared, and
+# fork code must not run on it (meerkat-mob#59). The default image is pinned by digest
+# so a re-pushed tag cannot change what runs; Dependabot does not see this expression,
+# so bump tag and digest together by hand.
 
 
 on:
@@ -12,6 +16,9 @@ on:
     # listed so push CI keeps running whichever name a merge lands on.
     branches: ["master", "main"]
   pull_request:
+  # Dispatched on master by dependabot-automerge.yml after it merges: that merge
+  # is made with GITHUB_TOKEN, so it triggers no push run of its own.
+  workflow_dispatch:
 
 # Default GITHUB_TOKEN scope for every job below: none of them push,
 # tag, comment, or upload anything — they only read the checked-out
@@ -23,8 +30,8 @@ permissions:
 jobs:
   lint:
     name: Lint
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    container: ${{ vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2') || '' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    container: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2@sha256:af9d54c83a2f5ca64a1e26568d97c9480c7338e4605736467ea44a5c2b36ae2a') || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -64,8 +71,8 @@ jobs:
 
   test:
     name: Test
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    container: ${{ vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2') || '' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    container: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2@sha256:af9d54c83a2f5ca64a1e26568d97c9480c7338e4605736467ea44a5c2b36ae2a') || '' }}
     env:
       CGO_ENABLED: "1"
     steps:
@@ -81,8 +88,8 @@ jobs:
 
   vuln:
     name: Vulnerability scan
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    container: ${{ vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2') || '' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    container: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2@sha256:af9d54c83a2f5ca64a1e26568d97c9480c7338e4605736467ea44a5c2b36ae2a') || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -97,8 +104,8 @@ jobs:
   # release.yml's `verify` job runs this same `make gosec` as a release gate.
   gosec:
     name: gosec
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    container: ${{ vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2') || '' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    container: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2@sha256:af9d54c83a2f5ca64a1e26568d97c9480c7338e4605736467ea44a5c2b36ae2a') || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -136,8 +143,8 @@ jobs:
 
   gitleaks:
     name: gitleaks
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    container: ${{ vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2') || '' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    container: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2@sha256:af9d54c83a2f5ca64a1e26568d97c9480c7338e4605736467ea44a5c2b36ae2a') || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -160,8 +167,8 @@ jobs:
   # 2026-09-25, when MinIO's public container images were withdrawn.
   s3-conformance:
     name: Object store conformance (${{ matrix.provider }})
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    container: ${{ vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2') || '' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    container: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2@sha256:af9d54c83a2f5ca64a1e26568d97c9480c7338e4605736467ea44a5c2b36ae2a') || '' }}
     strategy:
       fail-fast: false
       matrix:

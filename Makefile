@@ -11,7 +11,7 @@
 # *up*. A host Go NEWER than the pin already satisfies go.mod, so it is
 # used as-is. Homebrew ships Go 1.27.x today, so an unpinned `make lint`
 # typechecked this code against the 1.27 standard library and died on
-# `math/rand/v2` signatures the pinned 1.26.8 does not have. Homebrew
+# `math/rand/v2` signatures the pinned 1.26.9 does not have. Homebrew
 # also installs its own GOROOT/go.env with a GOTOOLCHAIN default in it,
 # so `go env GOTOOLCHAIN` is not necessarily what upstream Go ships.
 #

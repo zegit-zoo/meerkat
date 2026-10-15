@@ -410,6 +410,14 @@ func TestHostedMemory_CapabilityEnforcementPerScope(t *testing.T) {
 			if status, _ := got["status"].(string); status != tc.want {
 				t.Errorf("status = %q, want %q (%s)", status, tc.want, tc.reason)
 			}
+			// Saved or staged, the answer names the page, never where the
+			// store keeps it (meerkat-mob#62).
+			if _, ok := got["location"]; ok {
+				t.Errorf("the response carried a storage location: %v", got["location"])
+			}
+			if id, _ := got["id"].(string); id == "" {
+				t.Error("the response carried no page id")
+			}
 		})
 	}
 
@@ -481,9 +489,13 @@ func TestHostedMemory_StagedMemoryIsNeitherSearchableNorShowable(t *testing.T) {
 	if searchable, _ := got["searchable"].(bool); searchable {
 		t.Error("a staged memory reports itself as searchable")
 	}
-	location, _ := got["location"].(string)
-	if !strings.Contains(location, memory.StagingPrefix) {
-		t.Errorf("location = %q, want it under %s", location, memory.StagingPrefix)
+	// The page ID is the caller's handle; the storage location is not
+	// returned (meerkat-mob#62).
+	if _, ok := got["location"]; ok {
+		t.Errorf("a staged save returned a storage location: %v", got["location"])
+	}
+	if id, _ := got["id"].(string); id == "" {
+		t.Error("a staged save returned no page id")
 	}
 	// The response tells the caller where it landed, which is what makes
 	// the review path actionable rather than a silent drop.

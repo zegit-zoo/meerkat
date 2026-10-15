@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -58,6 +59,14 @@ var ErrUnsupported = errors.New("forge host not supported yet")
 // ruled out.
 var ErrSearchTruncated = errors.New("too many issues changed to search them all")
 
+// ErrSelfUnknown is returned by FindIssue, wrapped together with
+// ErrSearchTruncated, when the forge would not say which account the
+// token belongs to (a GitHub App installation token cannot read
+// /user). Without that login no issue can be shown to be the
+// librarian's own, so none is adopted, and the caller treats it as it
+// treats a truncated search: an earlier filing could not be ruled out.
+var ErrSelfUnknown = errors.New("the forge did not name the token's own account")
+
 // Paging bounds. GitHub serves at most 100 items a page; Gitea's default
 // MAX_RESPONSE_ITEMS is 50. maxPages bounds every listing, so a busy
 // repo costs a bounded number of requests.
@@ -77,8 +86,13 @@ type Client interface {
 	IssueState(ctx context.Context, repo string, number int) (state string, labels []string, err error)
 	// FindIssue returns the lowest-numbered issue (open or closed, never
 	// a pull request) updated at or after since whose body's first line
-	// is exactly marker; found is false when there is none. When more
-	// issues changed than it reads, it returns ErrSearchTruncated.
+	// is exactly marker AND whose author is the token's own account;
+	// found is false when there is none. The marker is not a secret (an
+	// intake ID is returned to whoever deposited the item), so an issue
+	// anyone else opened with the same first line is never adopted
+	// (meerkat-mob#62). When more issues changed than it reads, it
+	// returns ErrSearchTruncated; when the token's own account cannot be
+	// read, ErrSearchTruncated and ErrSelfUnknown together.
 	FindIssue(ctx context.Context, repo, marker string, since time.Time) (url string, number int, found bool, err error)
 }
 
@@ -206,6 +220,8 @@ type GitHub struct {
 	Base  string
 	Token string
 	HTTP  *http.Client
+
+	self selfLogin
 }
 
 type issueResponse struct {
@@ -259,6 +275,8 @@ type Gitea struct {
 	Base  string
 	Token string
 	HTTP  *http.Client
+
+	self selfLogin
 }
 
 func (g *Gitea) auth(req *http.Request) {
@@ -333,11 +351,64 @@ type listedIssue struct {
 	HTMLURL     string          `json:"html_url"`
 	Body        string          `json:"body"`
 	PullRequest json.RawMessage `json:"pull_request"`
+	User        struct {
+		Login string `json:"login"`
+	} `json:"user"`
+}
+
+// selfLogin caches the login the token authenticates as. Both forges
+// answer GET {base}/user with {"login": …}. A successful answer is kept
+// for the client's lifetime; a failure is not, so a transient error is
+// retried on the next call.
+type selfLogin struct {
+	mu    sync.Mutex
+	login string
+}
+
+func (s *selfLogin) get(ctx context.Context, hc *http.Client, auth func(*http.Request), base string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.login != "" {
+		return s.login, nil
+	}
+	var me struct {
+		Login string `json:"login"`
+	}
+	if err := call(ctx, hc, auth, http.MethodGet, base+"/user", nil, &me); err != nil {
+		return "", err
+	}
+	if me.Login == "" {
+		return "", errors.New("GET /user: no login in the response")
+	}
+	s.login = me.Login
+	return s.login, nil
+}
+
+// findOwnIssue resolves the token's login, then searches. A login that
+// cannot be read means no issue can be proven ours: the search reports
+// that an earlier filing could not be ruled out rather than failing, so
+// escalation files afresh (and says to check for a duplicate) instead
+// of stalling.
+func findOwnIssue(ctx context.Context, self *selfLogin, hc *http.Client, auth func(*http.Request), base, marker string, pageSize int,
+	list func(ctx context.Context, page int) ([]listedIssue, error)) (string, int, bool, error) {
+	login, err := self.get(ctx, hc, auth, base)
+	var se *statusError
+	switch {
+	case errors.As(err, &se) && (se.Code == http.StatusForbidden || se.Code == http.StatusNotFound):
+		// A definite "this token has no user": search no further.
+		return "", 0, false, fmt.Errorf("%w: %w (%v); no issue was adopted", ErrSearchTruncated, ErrSelfUnknown, err)
+	case err != nil:
+		// Anything else (network, 401, 5xx) may be transient: report it,
+		// and the caller retries rather than filing a possible duplicate.
+		return "", 0, false, err
+	}
+	return findIssue(ctx, marker, login, pageSize, list)
 }
 
 // findIssue pages through a listing (page numbers from 1) for the
-// lowest-numbered issue whose body's first line is marker.
-func findIssue(ctx context.Context, marker string, pageSize int, list func(ctx context.Context, page int) ([]listedIssue, error)) (string, int, bool, error) {
+// lowest-numbered issue authored by self whose body's first line is
+// marker.
+func findIssue(ctx context.Context, marker, self string, pageSize int, list func(ctx context.Context, page int) ([]listedIssue, error)) (string, int, bool, error) {
 	var best *listedIssue
 	for page := 1; page <= maxPages; page++ {
 		items, err := list(ctx, page)
@@ -351,6 +422,10 @@ func findIssue(ctx context.Context, marker string, pageSize int, list func(ctx c
 			}
 			first, _, _ := strings.Cut(is.Body, "\n")
 			if strings.TrimRight(first, "\r") != marker {
+				continue
+			}
+			// Logins are case-insensitive on both forges.
+			if !strings.EqualFold(is.User.Login, self) {
 				continue
 			}
 			if best == nil || is.Number < best.Number {
@@ -374,7 +449,7 @@ func findIssue(ctx context.Context, marker string, pageSize int, list func(ctx c
 // read from the database, not a search index, so an issue created a
 // moment ago is already listed.
 func (g *GitHub) FindIssue(ctx context.Context, repo, marker string, since time.Time) (string, int, bool, error) {
-	return findIssue(ctx, marker, gitHubPageSize, func(ctx context.Context, page int) ([]listedIssue, error) {
+	return findOwnIssue(ctx, &g.self, g.HTTP, g.auth, g.Base, marker, gitHubPageSize, func(ctx context.Context, page int) ([]listedIssue, error) {
 		var out []listedIssue
 		endpoint := fmt.Sprintf("%s/repos/%s/issues?state=all&sort=created&direction=asc&since=%s&per_page=%d&page=%d",
 			g.Base, repo, url.QueryEscape(since.UTC().Format(time.RFC3339)), gitHubPageSize, page)
@@ -385,7 +460,7 @@ func (g *GitHub) FindIssue(ctx context.Context, repo, marker string, since time.
 
 // FindIssue implements Client over GET /repos/{repo}/issues?type=issues.
 func (g *Gitea) FindIssue(ctx context.Context, repo, marker string, since time.Time) (string, int, bool, error) {
-	return findIssue(ctx, marker, giteaPageSize, func(ctx context.Context, page int) ([]listedIssue, error) {
+	return findOwnIssue(ctx, &g.self, g.HTTP, g.auth, g.Base, marker, giteaPageSize, func(ctx context.Context, page int) ([]listedIssue, error) {
 		var out []listedIssue
 		endpoint := fmt.Sprintf("%s/repos/%s/issues?state=all&type=issues&since=%s&limit=%d&page=%d",
 			g.Base, repo, url.QueryEscape(since.UTC().Format(time.RFC3339)), giteaPageSize, page)
@@ -393,6 +468,15 @@ func (g *Gitea) FindIssue(ctx context.Context, repo, marker string, since time.T
 		return out, err
 	})
 }
+
+// statusError is a forge's non-2xx answer, so a caller can tell "the
+// forge said no" from a transport failure.
+type statusError struct {
+	Code int
+	msg  string
+}
+
+func (e *statusError) Error() string { return e.msg }
 
 // call does one JSON request. The error names the method, the API path
 // and the status with a short excerpt of the forge's message; never the
@@ -431,7 +515,7 @@ func call(ctx context.Context, hc *http.Client, auth func(*http.Request), method
 		if len(msg) > 200 {
 			msg = msg[:200] + "…"
 		}
-		return fmt.Errorf("%s %s: %s: %s", method, req.URL.Path, resp.Status, msg)
+		return &statusError{Code: resp.StatusCode, msg: fmt.Sprintf("%s %s: %s: %s", method, req.URL.Path, resp.Status, msg)}
 	}
 	if out == nil {
 		return nil
