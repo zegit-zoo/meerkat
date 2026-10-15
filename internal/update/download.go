@@ -254,7 +254,14 @@ func ExtractMeerkat(tarballPath string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	gz, err := gzip.NewReader(f)
+	return extractMeerkatTarGz(f)
+}
+
+// extractMeerkatTarGz is ExtractMeerkat over an already-open gzip
+// stream. It is split out so tests can feed a lazily generated stream
+// and count how much of it was consumed.
+func extractMeerkatTarGz(r io.Reader) (string, error) {
+	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return "", fmt.Errorf("gunzip: %w", err)
 	}

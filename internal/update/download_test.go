@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // fakeAsset constructs a tarball containing just a 'meerkat' binary
@@ -205,43 +204,71 @@ func (zeroReader) Read(p []byte) (int, error) {
 // without a cumulative cap this decoy alone would force us to
 // decompress and discard an unbounded, attacker-chosen number of
 // bytes — the exact "3 GiB decoy in a ~3 MB tarball" reproduction from
-// the audit, scaled down here to keep the test fast.
+// the audit.
+//
+// The decoy is generated lazily through an io.Pipe from a counting
+// zero reader, so the producer only inflates what ExtractMeerkat pulls.
+// The test asserts on bytes consumed, not wall-clock time (#186): a
+// regression to "decompress everything, then check" would drain the
+// whole decoy, twice the budget, while a working cap stops at the
+// budget plus the producer's buffering slack.
 func TestExtractMeerkat_CumulativeOversizeRejected(t *testing.T) {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
-	size := maxExtractedArchiveBytes + 4096
-	if err := tw.WriteHeader(&tar.Header{Name: "decoy-not-meerkat", Mode: 0o644, Size: size}); err != nil {
-		t.Fatal(err)
-	}
-	// Write the declared size's worth of zero bytes without holding
-	// it all in memory; gzip compresses this to a tiny stream.
-	if _, err := io.CopyN(tw, zeroReader{}, size); err != nil {
-		t.Fatal(err)
-	}
-	tw.Close()
-	gz.Close()
+	size := 2 * maxExtractedArchiveBytes
+	// Producer read-ahead past what the consumer took: the compressor's
+	// pending block plus io.Copy's 32 KiB buffer. That is about 256 KiB
+	// at BestSpeed and about 4 MiB at the default level, so 8 MiB is
+	// generous and still far below the decoy's excess over the budget.
+	const slack = 8 << 20
 
-	tmp := filepath.Join(t.TempDir(), "bomb.tar.gz")
-	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	decoy := &countingReader{r: zeroReader{}}
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// BestSpeed keeps the race-instrumented producer cheap.
+		gz, _ := gzip.NewWriterLevel(pw, gzip.BestSpeed) // a valid level never errors
+		tw := tar.NewWriter(gz)
+		err := tw.WriteHeader(&tar.Header{Name: "decoy-not-meerkat", Mode: 0o644, Size: size})
+		if err == nil {
+			_, err = io.CopyN(tw, decoy, size)
+		}
+		if err == nil {
+			err = tw.Close()
+		}
+		if err == nil {
+			err = gz.Close()
+		}
+		pw.CloseWithError(err)
+	}()
 
-	start := time.Now()
-	_, err := ExtractMeerkat(tmp)
-	elapsed := time.Since(start)
+	_, err := extractMeerkatTarGz(pr)
+	// Unblock the producer and wait for it before reading the count.
+	pr.CloseWithError(errors.New("consumer done"))
+	<-done
+
 	if err == nil {
 		t.Fatal("expected an error for a cumulative-oversize archive")
 	}
 	if !strings.Contains(err.Error(), "cumulative") {
 		t.Errorf("expected a cumulative-cap error, got: %v", err)
 	}
-	// Guard against the fix regressing to "decompress everything, then
-	// check": this should fail fast once the budget is exhausted, not
-	// after reading the full (fake, zero-filled) decoy payload.
-	if elapsed > 5*time.Second {
-		t.Errorf("ExtractMeerkat took %s — the cumulative cap should short-circuit quickly", elapsed)
+	t.Logf("decoy bytes drawn: %d (budget %d, over by %d)", decoy.n, maxExtractedArchiveBytes, decoy.n-maxExtractedArchiveBytes)
+	if limit := maxExtractedArchiveBytes + slack; decoy.n > limit {
+		t.Errorf("extraction drew %d decoy bytes, want at most %d (budget %d + slack %d): the cumulative cap should stop reading at the budget",
+			decoy.n, limit, maxExtractedArchiveBytes, slack)
 	}
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // TestExtractMeerkat_CumulativeCapCatchesMultipleSmallEntries confirms
