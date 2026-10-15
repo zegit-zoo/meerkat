@@ -1,0 +1,54 @@
+# Every optional object at once.
+replicaCount: 3
+image:
+  digest: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+server:
+  insecureNoAuth: true
+contentSource:
+  raw: |
+    content:
+      type: url
+      url: https://example.com/kb.tar.gz
+      sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+ingress:
+  enabled: true
+  className: nginx
+  tls:
+    - hosts: [meerkat.example.com]
+      secretName: meerkat-tls
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: shared-gateway
+      namespace: gateway-system
+  hostnames: [meerkat.example.com]
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+podDisruptionBudget:
+  enabled: true
+autoscaling:
+  enabled: true
+  targetMemoryUtilizationPercentage: 80
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: gateway-system
+  egress:
+    enabled: true
+    rules:
+      - ports:
+          - port: 443
+            protocol: TCP
+secrets:
+  env:
+    - name: OTEL_EXPORTER_OTLP_HEADERS
+      secretName: otel-collector-auth
+      key: headers
+      optional: true
+extraEnv:
+  - name: GOMEMLIMIT
+    value: 400MiB

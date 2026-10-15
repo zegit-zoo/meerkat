@@ -135,7 +135,9 @@ it's the recommended way to run it: a `type: local` source writes nothing at
 all, and `type: url`/`gcs`/`s3` need only `/home/nonroot/.cache` to be
 writable. See [docs/CONTAINER.md](docs/CONTAINER.md) for the full run
 reference (read-only-fs flags, the content-cache mount, and cosign
-verification).
+verification). For Kubernetes there is a Helm chart in
+[charts/meerkat](charts/meerkat/README.md); it is not published to a chart
+repository yet, so install it from a checkout.
 
 ## Use
 
@@ -1501,6 +1503,7 @@ internal/
   http/       HTTP/OpenAPI server with bearer auth
   update/     mk update — gh token, GitHub Releases download, atomic swap
   cli/        cobra command tree; clidocs/ generates docs/CLI.md from it
+charts/meerkat/   Helm chart for the hosted server (see its README.md)
 docs/         CLI.md (generated), INSTALL, CONTAINER, RELEASE, SECURITY,
               SEARCH, OKF, INGESTION, INTEGRATION-*; design/ per subsystem
 content-source.yaml   optional, never shipped; tells meerkat at runtime —

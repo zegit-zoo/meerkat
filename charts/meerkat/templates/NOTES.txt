@@ -1,0 +1,45 @@
+meerkat {{ include "meerkat.imageTag" . }} ({{ .Values.server.mode }} mode) is deployed as {{ include "meerkat.fullname" . }} in {{ .Release.Namespace }}.
+
+Reach it from inside the cluster:
+
+  http://{{ include "meerkat.fullname" . }}.{{ .Release.Namespace }}.svc:{{ include "meerkat.servicePort" . }}{{ if eq .Values.server.mode "mcp" }}{{ .Values.server.path }}{{ end }}
+
+or locally:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "meerkat.fullname" . }} {{ include "meerkat.servicePort" . }}
+{{- if eq .Values.server.mode "mcp" }}
+{{- $auth := include "meerkat.authConfigured" . }}
+{{- if .Values.server.insecureNoAuth }}
+
+WARNING: server.insecureNoAuth=true. meerkat serves EVERY mounted collection
+to any caller that can reach the pod. This is only safe when a gateway in
+front authenticates every request; consider networkPolicy.enabled=true so
+nothing can bypass that gateway.
+{{- else if eq $auth "false" }}
+
+ACTION NEEDED: contentSource has no auth: block and server.insecureNoAuth is
+false. `mk mcp serve-http` REFUSES to bind 0.0.0.0 without authentication,
+so this pod will exit at startup. Either:
+
+  - add an auth: block (OIDC providers and rules) to contentSource.config (or .raw), or
+  - set server.insecureNoAuth=true when a gateway authenticates every request
+    (or put `allow_unauthenticated: true` in the auth: block).
+
+See the chart README, section "Authentication".
+{{- else if eq $auth "unknown" }}
+
+contentSource.existingConfigMap={{ .Values.contentSource.existingConfigMap }} is not inspected. It must carry
+an auth: block, or the pod exits at startup refusing to serve unauthenticated
+on 0.0.0.0 (set server.insecureNoAuth=true only behind an authenticating gateway).
+{{- end }}
+{{- if and .Values.server.stateful (or (gt (int .Values.replicaCount) 1) .Values.autoscaling.enabled) }}
+
+WARNING: server.stateful=true with more than one replica needs sticky
+routing (session affinity on the MCP session) in front of the pods.
+{{- end }}
+{{- end }}
+{{- if .Values.contentSource.existingConfigMap }}
+
+content-source.yaml is read once at startup and comes from an existing
+ConfigMap, so an edit to it needs `kubectl rollout restart`.
+{{- end }}

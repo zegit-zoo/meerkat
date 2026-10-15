@@ -1,0 +1,12 @@
+{{- if and (or .Values.contentSource.config .Values.contentSource.raw) (not .Values.contentSource.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "meerkat.contentSourceConfigMap" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "meerkat.labels" . | nindent 4 }}
+data:
+  {{ .Values.contentSource.key }}: |
+    {{- include "meerkat.contentSourceBody" . | nindent 4 }}
+{{- end }}
