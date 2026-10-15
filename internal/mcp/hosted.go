@@ -255,6 +255,9 @@ func NewHosted(ctx context.Context, cfg HostedConfig) (*HostedServer, error) {
 	// Freshness counts (meerkat-mob#25 part C). Emits nothing unless a
 	// collection has a record, so an unconfigured /metrics is unchanged.
 	s.metrics.reg.MustRegister(newFreshnessCollector(reg))
+	// Traversal-log retention and daily-cap counters (meerkat-mob#45).
+	// Nothing without a log.
+	registerTraversalLog(s.metrics.reg, cfg.Outcome.Log)
 
 	// Telemetry is constructed BEFORE the startup index build, so the
 	// build is the first thing traced: a slow start on a large collection
