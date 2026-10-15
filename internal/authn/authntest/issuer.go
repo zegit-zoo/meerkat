@@ -65,7 +65,7 @@ func (i *Issuer) Rotate(t *testing.T) string {
 		t.Fatalf("new signer: %v", err)
 	}
 	i.jwks = append(i.jwks, jose.JSONWebKey{Key: key.Public(), KeyID: kid, Algorithm: string(jose.RS256), Use: "sig"})
-	i.signer, i.keyID = signer, kid
+	i.signer, i.key, i.keyID = signer, key, kid
 	return kid
 }
 
@@ -150,6 +150,9 @@ type Claims struct {
 	Expiry   time.Time
 	// Issuer overrides the `iss` claim, for testing issuer mismatch.
 	Issuer string
+	// Type, when set, is the JWT header `typ` (default "JWT"); RFC 9068
+	// access tokens use "at+jwt".
+	Type string
 	// Extra adds arbitrary claims, for exercising a custom claim
 	// mapping (roles instead of groups, say).
 	Extra map[string]any
@@ -193,8 +196,17 @@ func (i *Issuer) Token(t *testing.T, c Claims) string {
 		t.Fatalf("marshal claims: %v", err)
 	}
 	i.mu.Lock()
-	signer := i.signer
+	signer, key, keyID := i.signer, i.key, i.keyID
 	i.mu.Unlock()
+	if c.Type != "" && key != nil {
+		signer, err = jose.NewSigner(
+			jose.SigningKey{Algorithm: jose.RS256, Key: key},
+			(&jose.SignerOptions{}).WithType(jose.ContentType(c.Type)).WithHeader("kid", keyID),
+		)
+		if err != nil {
+			t.Fatalf("new signer: %v", err)
+		}
+	}
 	jws, err := signer.Sign(body)
 	if err != nil {
 		t.Fatalf("sign: %v", err)

@@ -8,8 +8,9 @@ the root [`Dockerfile`](../Dockerfile) for exactly how it's built.
 
 **Git tags and image tags are not spelled the same way.** The git tag is
 `vX.Y.Z`, but the published image tags drop the leading `v` — a
-`v1.2.3` git tag publishes the image aliases `1.2.3`, `1.2`, and
-`latest`. Requesting the `v`-prefixed form as an image tag (e.g. tag
+`v1.2.3` git tag publishes the image aliases `1.2.3`, `1.2`, and, when
+it is the highest release tag, `latest`, so a patch to an older line
+never moves `latest` backwards. Requesting the `v`-prefixed form as an image tag (e.g. tag
 `v1.2.3` on `ghcr.io/zegit-zoo/meerkat`) does not exist and pulling it
 fails with `MANIFEST_UNKNOWN`.
 
@@ -166,7 +167,7 @@ release).
 ## SBOM and provenance
 
 Each pushed image carries two BuildKit attestations, generated at build
-time by `docker buildx build --sbom=true --provenance=true` (see
+time by `docker buildx build --sbom=true --provenance=mode=max` (see
 `.github/workflows/release.yml`):
 
 - an SPDX SBOM (BuildKit's default SBOM scanner,

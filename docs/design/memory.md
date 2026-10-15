@@ -207,7 +207,8 @@ Two consequences worth stating:
   by sitting on its ID — the overlay only shadows a content page for the
   viewers who can actually see the overlay entry.
 - **The namespace is already a sufficient owner key.** It is
-  `sha256(issuer + "\x00" + subject)`, so two issuers minting the same
+  a slug of the subject plus `sha256(issuer + "\x00" + subject)[:16]`
+  (64 bits), so two issuers minting the same
   `sub` are two owners, and an email or group change moves nothing. The
   read side inherits all of that for free rather than re-deriving it.
 
@@ -763,10 +764,11 @@ Minimal, on purpose.
   failure that matters and the permissive reading is the one that causes
   it. The store is outside the content tree, so nothing else can reach
   it either.
-- The response says `status: "staged"`, `searchable: false`, the exact
-  location, and which capability would promote it — so the model can
-  tell the user where it went instead of reporting a success that
-  wasn't one.
+- The response says `status: "staged"`, `searchable: false`, the page
+  ID, and which capability would promote it — so the model can tell the
+  user where it went instead of reporting a success that wasn't one. It
+  does not return the storage location (an object URL or a server path):
+  that names infrastructure, not the memory (meerkat-mob#62).
 
 Promotion today is `mv <store>/_staging/<scope>/<ns>/<slug>.md
 <store>/<scope>/<slug>.md`, plus flipping the document's
@@ -778,7 +780,7 @@ promoted values, so nothing else needs editing.
 
 ```text
 mk_save_memory(scope, title, content, [key], [tags], [version], [replace], [collection])
-  → {status, collection, scope, namespace, id, version, location, searchable, note}
+  → {status, collection, scope, namespace, id, version, searchable, note}
 ```
 
 Annotations are the read tools' inverted where they should be:
