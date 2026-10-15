@@ -17,8 +17,8 @@ two differ.
    If you must touch it, comment first and wait for a reply.
 4. Work on a branch named `<owner>/<issue>-<slug>` (`claude/12-tree-manifest`, `jonas/3-s3-backend`).
    One issue per branch, one PR per issue; never stack PRs. **Never push the default branch.**
-5. Run `pre-commit install` and `pre-commit install --hook-type pre-push` once per clone. Commit
-   and push hooks are mandatory; hook-bypass flags are forbidden.
+5. Run `pre-commit install --install-hooks` and `pre-commit install --hook-type pre-push` once per
+   clone. Commit and push hooks are mandatory; hook-bypass flags are forbidden.
 6. Open the PR as a draft, link the issue, switch it to ready when CI is green,
    replace `in-progress` with `needs-review`, and unassign yourself. Someone else merges.
 7. Blocked? Add `blocked`, say what unblocks it in a comment, unassign, move on.
@@ -72,6 +72,15 @@ Labels every repo carries: `in-progress`, `needs-review`, `blocked` (plus GitHub
   `GOTOOLCHAIN=$(awk '/^toolchain /{print $2}' go.mod) go test ./...` (works in zsh and bash).
 - The GitHub gitleaks Action needs a paid org license; CI runs the gitleaks CLI instead.
 - `golangci-lint` runs collide when two worktrees lint at once; serialize them.
+- **Install hook environments before you commit, not during.** In a linked worktree
+  (`git worktree add`), a hook environment that pre-commit installs *inside* `git commit` can
+  overwrite that worktree's index with the hook repo's own files. The commit then fails with
+  `fatal: unable to read <sha>`, and `git ls-files` lists files that are not meerkat's. A plain
+  clone is not affected. It happens on the first commit after a hook `rev:` changes in
+  `.pre-commit-config.yaml`, or with an empty pre-commit cache. Run `pre-commit install-hooks`
+  first: once per clone (the `--install-hooks` flag in section 1 does it), and again after pulling
+  a `rev:` change. If it has already happened, `git read-tree HEAD` rebuilds the index from the
+  last commit and leaves the working tree alone; then `git add` again (meerkat-mob#67).
 - The credential-helper tests ask git for a credential nobody supplies. `internal/contentsource`'s
   `TestMain` turns git's prompting off for the whole package (`GIT_TERMINAL_PROMPT=0`, an empty
   `GIT_ASKPASS`, and `SSH_ASKPASS` unset). Without that, a desktop session's `SSH_ASKPASS` opened a

@@ -20,14 +20,18 @@ Edit `~/.config/opencode/opencode.json`:
 }
 ```
 
-Restart OpenCode (or run `opencode reload`). Three tools become
-available to the agent:
+Restart OpenCode (or run `opencode reload`). Five tools become
+available to the agent, six when a collection declares a `memory:`
+store:
 
 | Tool | Args | Returns |
 |------|------|---------|
 | `mk_search` | `query`, `limit?` (default 10) | `[{id, title, score, snippet, category, status}]` |
 | `mk_show` | `id` | `{id, title, body, front, trust_tier, stale}` (raw markdown body + parsed YAML frontmatter, plus two OKF-derived advisory signals — see [OKF.md](OKF.md#trust-and-lifecycle)) |
 | `mk_list` | `prefix?`, `category?`, `status?`, `owner?`, `type?` | `[{id, title, category, status, owner, type, source}]` |
+| `mk_list_collections` | none | each mounted collection's name, source type, page count and the capabilities you hold on it |
+| `mk_report_outcome` | `outcome` (`found`, `not_found`, `gave_up`), `session_id?`, `initial_query?`, `pages?`, `attempted?`, `quality?`, `fallback?` | `{recorded, logged, intake, intake_id?}`: whether the traversal log took the report, and whether a fallback was written to the intake store |
+| `mk_save_memory` | see [design/memory.md](design/memory.md) | only registered when a collection declares a `memory:` store |
 
 The agent will pick these up automatically — they appear in
 `opencode tools` and are advertised to the model on every prompt.

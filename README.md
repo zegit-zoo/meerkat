@@ -115,8 +115,8 @@ mk update               # download + verified swap; refuses on a brew install
 Every `vX.Y.Z` tag also publishes a hardened, multi-arch (linux/amd64,
 linux/arm64) OCI image to `ghcr.io/zegit-zoo/meerkat`, signed keylessly
 with cosign and carrying SLSA provenance + a Syft SBOM. Image tags drop
-the git tag's leading `v` (`v1.2.3` publishes `1.2.3`, `1.2`, and
-`latest` — never `v1.2.3`):
+the git tag's leading `v` (`v1.2.3` publishes `1.2.3`, `1.2`, and, if
+it is the highest release, `latest` — never `v1.2.3`):
 
 ```bash
 docker pull ghcr.io/zegit-zoo/meerkat:1.2.3
@@ -307,7 +307,7 @@ auth:
   providers:
     - issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
       audience: api://meerkat
-      claims: { groups: groups, email: preferred_username, tenant: tid }
+      claims: { groups: groups, tenant: tid }
   rules:
     - name: sre
       groups: [sre, oncall]

@@ -41,9 +41,16 @@ govulncheck):
 
 ```bash
 brew install pre-commit                    # or: pipx install pre-commit
-pre-commit install                         # gates `git commit`
+pre-commit install --install-hooks         # gates `git commit`
 pre-commit install --hook-type pre-push    # gates `git push`
 ```
+
+`--install-hooks` builds the hook environments up front. Do the same
+with `pre-commit install-hooks` after pulling a change to a `rev:` in
+`.pre-commit-config.yaml`: in a linked worktree, an environment built
+during `git commit` can overwrite that worktree's index (the commit
+fails with `fatal: unable to read <sha>`; `git read-tree HEAD` repairs
+it).
 
 That is the whole setup. You do **not** install `golangci-lint` or the
 scanners by hand, and you do **not** set `GOTOOLCHAIN`: every gate runs
@@ -168,8 +175,11 @@ package or subsystem (e.g. `feat(ingest): ...`).
 
 The default branch is `master`. It was renamed from `main` on
 2026-09-28; GitHub redirects the old name, and CI runs on pushes to
-either. Nothing is pushed to it directly: every change arrives through
-a pull request.
+either. By convention nothing is pushed to it directly and every change
+arrives through a pull request. That is practice, not enforcement: the
+`master` ruleset (see "Branch and tag protection") requires signed
+commits and blocks force-pushes and deletion, but it requires neither a
+pull request nor a review, so a maintainer's direct push would land.
 
 Write access to this repo is limited to the maintainers (the org's
 default member permission is read). If you're not a maintainer, you
@@ -187,13 +197,14 @@ not a landing spot for outside work.
 5. If you changed CLI commands, run `make docs` and commit the updated
    `docs/CLI.md`.
 6. If you changed dependencies, run `go mod tidy` and commit the result.
-7. Push to your fork and open a PR against `zegit-zoo/meerkat:main`. Use
+7. Push to your fork and open a PR against `zegit-zoo/meerkat:master`. Use
    Conventional Commits for your commit messages (see above) —
    squash-worthy commit history helps but isn't required; the PR
    title/commits feed the changelog.
 
 CI must pass (lint, test+coverage, vuln, gosec, gitleaks, markdown lint,
-object-store conformance) before a PR is merged.
+object-store conformance) before a PR is merged. Maintainers hold to
+that by hand: no required status check enforces it yet.
 
 ## Branch and tag protection
 
@@ -212,8 +223,12 @@ to maintainers too:
   time, not at review time.
 - **No force-push, no branch deletion.** History on `master` is append-only.
 
-Release tags (`v*`) are protected separately: they must be signed, must
-match `vX.Y.Z` exactly, and once pushed can never be deleted or moved.
+Release tags (`v*`) are protected separately: the commit they point at
+must be signed, the name must match `vX.Y.Z` exactly, and once pushed a
+tag can never be deleted or moved. The ruleset does not require the tag
+itself to be signed, and it does not restrict who may create one. The
+release workflow refuses to build a tag whose commit is not on `master`
+(see [docs/RELEASE.md](docs/RELEASE.md#tag-protection)).
 
 That last rule is not bureaucracy. The release workflow signs whatever a
 `v*.*.*` tag points at, using the repository's own OIDC identity, and

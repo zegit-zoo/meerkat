@@ -163,6 +163,27 @@ vanishes without a DELETE doesn't leak session state.
 long-lived SSE stream, and a write deadline would sever it mid-session;
 per-request work is bounded by the query timeout instead.
 
+The MCP endpoint bounds what a request can cost before the transport
+sees it (meerkat-mob#41), outside the authentication gate:
+
+- **Body cap**, `HostedConfig.MaxRequestBytes`, 4 MiB by default — far
+  above the largest legitimate call (a 256 KiB memory save, escaped, in a
+  JSON-RPC envelope). A body that declares a larger `Content-Length` is
+  answered `413` before any of it is read; one of undeclared length is
+  read up to the cap and answered `413` at the first byte past it. It is
+  read only after the authentication gate has admitted the caller, so an
+  unauthenticated request's body is never buffered. The cap cannot be
+  turned off.
+- **In-flight caps**, `MaxConcurrentRequests` (128) for POST, DELETE and
+  the rest, and `MaxConcurrentStreams` (512) for GET SSE streams. They
+  are separate pools because a stream holds its slot for a whole session.
+  A request that finds its pool full gets `503` with `Retry-After: 1`
+  at once rather than a queue. A negative value removes a cap. The caps
+  are the outermost layer: a request takes its slot before the body cap,
+  the gate or the transport do any work, so every body buffer is
+  counted. Both pools are shared by authenticated and unauthenticated
+  callers; they bound the server's total cost, not each caller's share.
+
 DNS-rebinding protection (mcp-go's rejection of loopback requests whose
 `Host` is not a localhost value) stays on. `--trust-proxy-host` disables
 it for a same-host proxy that preserves the original `Host`; rewriting
@@ -249,7 +270,10 @@ auth:
       audience: api://meerkat          # defaults to auth.resource
       claims:
         groups: groups                 # "roles" for Entra app roles
-        email: preferred_username      # "email" by default
+        # email: leave at the default ("email"). Do NOT map it to
+        # preferred_username: Entra documents that claim as mutable and
+        # unfit for authorization, so an `emails:` rule would trust a value
+        # its owner can change. Select on `subjects:` (the stable oid/sub).
         tenant: tid                    # "tid" by default
       require_tenant: <tenant-id>      # optional; pins a multi-tenant issuer
 
@@ -272,6 +296,21 @@ auth:
       collections: [handbook]
       capabilities: [read]             # the only capability an anonymous rule may hold
 ```
+
+**With more than one provider**, a rule that selects on `subjects`,
+`emails` or `groups` must carry `issuer:` — validation refuses it
+otherwise, because a group name or email asserted by one identity
+provider is no evidence about another's (for Google, pin the directory
+with `claims.tenant: hd` plus `require_tenant`). An `emails:` rule never
+matches a token whose `email_verified` claim is present and not true, and
+`claims.email` should stay `email`: `preferred_username` (Entra) is
+mutable and unfit for authorization, so meerkat logs a warning if it is
+configured — select on `subjects:` (the stable `oid`/`sub`) instead.
+`skip_issuer_check` requires `require_tenant` and logs a warning at
+startup. Optional per-provider `token_type: access` (JWT `typ` of
+`at+jwt`, or an `scp`/`roles` claim) and `allowed_azp: [...]` (the
+token's `azp`/`appid`) stop an ID token issued to another application of
+a shared registration being used as an API token.
 
 **Selectors** are `subjects` (exact), `emails` (case-insensitive),
 `groups` (any-of, case-insensitive), `tenant`, `issuer` and `anonymous`.
@@ -507,7 +546,9 @@ bounded by making them say nothing worth having:
   ID, a query or a caller subject as a label.** The `route` label is the
   server's own matched mux pattern from a closed set, never `r.URL.Path`
   — so a scanner probing `/wp-admin` collapses to `route="other"` instead
-  of adding a time series. Since #28 the same rule excludes a *source
+  of adding a time series. The `method` label is closed the same way:
+  Go accepts any token as a method, so anything outside the seven methods
+  a client has reason to send is `method="other"` (meerkat-mob#47). Since #28 the same rule excludes a *source
   generation or fingerprint*, for a second reason: it increments forever,
   so one series per publication would be an unbounded cardinality leak.
   The refresh series are keyed by the collection's configuration ordinal
@@ -552,7 +593,7 @@ current, and then the ordinary not-ready path produces the 503. See
 ### Metrics
 
 ```text
-meerkat_http_requests_total{route,method,status}
+meerkat_http_requests_total{route,method,status}   # method: GET|POST|DELETE|HEAD|OPTIONS|PUT|PATCH|other
 meerkat_http_request_duration_seconds{route,method}
 meerkat_auth_failures_total{reason}          # missing_token | invalid_token | no_grants
 meerkat_auth_anonymous_total                 # admitted without a token (#36); no labels
@@ -723,6 +764,12 @@ reachable only where it is correct.
   `Grants.Capabilities(name)` and `Grants.Identity()`, and adds a second
   registry view (`Restrict(CanWrite)`) alongside `Restrict(CanRead)`
   rather than widening the read one.
+- **A `--metrics-addr` flag.** `HostedConfig.MetricsAddr` serves
+  `/metrics` on a listener of its own and drops it from the API port
+  (meerkat-mob#47); `mk mcp serve-http` does not expose it yet, so the
+  CLI still serves `/metrics` beside `/mcp`. Likewise the request bounds
+  above (`MaxRequestBytes`, `MaxConcurrentRequests`,
+  `MaxConcurrentStreams`) run at their defaults from the CLI.
 - **OIDC for `mk http serve`.** The OpenWebUI-facing server still takes
   a single static token. `internal/authn.Gate` is transport-agnostic and
   would drop straight in.

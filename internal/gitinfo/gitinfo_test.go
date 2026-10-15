@@ -28,7 +28,7 @@ func git(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(envWithoutGit(),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
@@ -506,4 +506,20 @@ func TestUpstream_FirstURLWins(t *testing.T) {
 	if up, err := r.Upstream("main"); err != nil || up.URL != "https://first.example/kb.git" {
 		t.Errorf("Upstream = %+v, %v; want the first url", up, err)
 	}
+}
+
+// envWithoutGit is os.Environ() minus every GIT_* variable. When the
+// suite runs inside a git hook (the repo's pre-push `make test`), git
+// exports GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE for the hook; left
+// in place they send a fixture's git calls to the real checkout instead
+// of the temp dir (#168).
+func envWithoutGit() []string {
+	env := os.Environ()
+	clean := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "GIT_") {
+			clean = append(clean, kv)
+		}
+	}
+	return clean
 }

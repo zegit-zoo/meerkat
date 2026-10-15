@@ -19,16 +19,24 @@ exact tagged SHA before anything is published.
 ## Release flow
 
 1. Ensure the working tree is clean and tests pass locally (`make pre-release`).
-2. Tag the release commit:
+2. Tag the release commit. It must be a commit on `master`; the
+   workflow refuses any other:
 
    ```sh
    git tag -s v1.2.3 -m "release v1.2.3"
    git push origin v1.2.3
    ```
 
-3. The `release.yml` workflow triggers on the tag push, running two jobs
-   in parallel once `verify` passes:
-   - **`verify` job** — re-runs the full gate (lint + test + vuln + gosec + gitleaks) on the exact tagged SHA.
+   Only Markus and Jonas can create `v*` tags (see
+   [Tag protection](#tag-protection)).
+
+3. The `release.yml` workflow triggers on the tag push. `verify` runs
+   first; `goreleaser` and `docker` then each wait for approval in the
+   `release` environment. The approval must come from the other release
+   manager: the environment prevents self-review, so whoever pushed the
+   tag cannot approve its release. Once approved, the two run in
+   parallel. The jobs:
+   - **`verify` job** — first fails unless the tagged commit is an ancestor of `origin/master`, then re-runs the full gate (lint + test + vuln + gosec + gitleaks) on the exact tagged SHA.
    - **`goreleaser` job** (runs only after `verify` passes) — builds cross-platform binaries (darwin/linux/windows, amd64/arm64), creates archives and a checksums file, generates SPDX SBOMs via syft, signs the checksums file with cosign (keyless, GitHub OIDC), and publishes a GitHub Release with all artifacts attached.
    - **`docker` job** (runs only after `verify` passes, in parallel with `goreleaser`) — builds the hardened multi-stage [`Dockerfile`](../Dockerfile) for `linux/amd64` + `linux/arm64` via QEMU + buildx, pushes the manifest list to `ghcr.io/zegit-zoo/meerkat`, signs it with cosign (keyless, GitHub OIDC), and attaches a Syft SBOM + SLSA provenance attestation via buildx's native `--sbom`/`--provenance`. See [docs/CONTAINER.md](CONTAINER.md).
 
@@ -40,14 +48,25 @@ The released artifacts are:
   release independently of whatever updater the binary at its
   `--destination` understands; see [docs/INSTALL.md's "Converging from a
   downstream fork"](INSTALL.md#converging-from-a-downstream-fork)
-- `meerkat_<v>_checksums.txt` (SHA-256, covering every archive and
-  standalone binary above)
+- `meerkat_<v>_source.tar.gz` (the tagged source tree, `git archive`)
+- `meerkat_<v>_checksums.txt` (SHA-256, covering every archive,
+  standalone binary and SBOM in the release)
 - `meerkat_<v>_checksums.txt.sigstore.json` (cosign Sigstore bundle: signature + certificate + Rekor inclusion proof)
-- `*.sbom.json` (SPDX SBOM per archive and per standalone binary)
-- `ghcr.io/zegit-zoo/meerkat:X.Y.Z` / `:X.Y` / `:latest` (multi-arch OCI
-  image, signed + attested. Note these image tags drop the git tag's
-  leading `v` — a `vX.Y.Z` git tag publishes exactly these three
-  aliases — see [docs/CONTAINER.md](CONTAINER.md))
+- `*.sbom.json` (SPDX SBOM per archive, per standalone binary, and
+  `meerkat_<v>_source.sbom.json` for the source archive)
+- a SLSA build-provenance attestation for every file in the checksums
+  file, stored on GitHub, not as a release asset:
+  `gh attestation verify <file> -R zegit-zoo/meerkat`
+- `ghcr.io/zegit-zoo/meerkat:X.Y.Z` / `:X.Y` (multi-arch OCI image,
+  signed + attested), plus `:latest` when the tag is the highest
+  release tag. Note these image tags drop the git tag's leading `v`
+  — see [docs/CONTAINER.md](CONTAINER.md)
+
+The binaries and archives are reproducible: the embedded build date
+and every file timestamp are the tagged commit's, and GoReleaser is
+pinned to an exact version in `release.yml`, so rebuilding a tag at
+its commit with the same GoReleaser and Go versions yields the same
+archive and binary checksums.
 
 > **Note:** the repository is public. Downloading release assets is
 > anonymous — no token or `gh` login required. A token only helps if you
@@ -104,11 +123,24 @@ landing fast.
 
 ## Tag protection
 
-`v*` tags are governed by a repository ruleset with no bypass:
+`v*` tags are governed by the repository ruleset `release-tags-immutable`:
 
-- signed tags only (`git tag -s`)
+- the tagged **commit** must carry a verified signature. The ruleset does
+  not check the tag itself, so a lightweight tag passes, and so does any
+  commit GitHub signed on creation (API commits and PR merges)
 - name must match `vX.Y.Z` exactly
 - no deletion, no moving a tag once pushed
+- creation is restricted: only Markus and Jonas can create a `v*` tag
+  (the ruleset's bypass list holds the two human release managers, no
+  apps or bots)
+
+A tag on an unmerged commit still cannot become a release: the `verify`
+job's first step fails unless the tagged commit is on `master`, and
+nothing is built or signed before `verify` passes. The publishing jobs
+(`goreleaser`, `docker`) run in the `release` environment, which requires
+approval from Markus or Jonas, excluding whoever pushed the tag, and only
+deploys `vX.Y.Z` tags. Release tags are still signed by convention
+(`git tag -s`), but no rule enforces it.
 
 The name pattern is load-bearing, not cosmetic: `CertIdentityRegexp` in
 `internal/update/cosign.go` is anchored to

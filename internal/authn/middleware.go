@@ -222,6 +222,13 @@ func (g *Gate) Middleware(next http.Handler) http.Handler {
 			telemetry.KeyAuthzRules.Int(policy.Len()))
 		r = r.WithContext(ctx)
 		grants := policy.Evaluate(id)
+		// nil grants mean "no policy in force, unrestricted" everywhere
+		// downstream. This gate only runs with providers configured, so
+		// a nil here is a policy that failed to materialise, and the safe
+		// reading is deny, not unrestricted.
+		if grants == nil {
+			grants = authz.DenyAll(id)
+		}
 		decision.SetAttributes(
 			telemetry.KeyAuthzGranted.Bool(!grants.Empty()),
 			telemetry.KeyAuthzCollections.Int(grants.Len()),
