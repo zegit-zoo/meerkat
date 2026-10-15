@@ -82,6 +82,11 @@ markdown file with `{{var}}` placeholders the planner substitutes:
 Prompts live in the **kb repo** (not the CLI repo) so prompt
 adjustments don't require a meerkat release.
 
+Substitution is one pass: a value that itself contains `{{other}}` is
+left literal. A source's `prompt:` and `template:` must name a file
+inside `prompts/` and `templates/`; a `.` or `..` element or an
+absolute path is refused.
+
 ## Planner (`mk ingest`)
 
 ```bash
@@ -89,7 +94,7 @@ mk ingest                            # plan-only, all stale pages, JSONL on stdo
 mk ingest --source policies          # plan one source
 mk ingest --page concepts/Foo        # plan one page
 mk ingest --status placeholder       # narrow by status
-mk ingest --batch-file batch.jsonl   # plan to file
+mk ingest --batch-file batch.jsonl   # plan to file (created 0600: it holds every rendered prompt)
 mk ingest --dry-run                  # show plan, do not execute
 mk ingest sources                    # list embedded source registry
 ```
@@ -164,12 +169,28 @@ mk ingest --execute --trust-sources
 > if you trust every source repo in `sources.yaml` as much as code
 > you'd merge unreviewed. Meerkat prints a stderr warning before the
 > first agent spawns when this flag is set.
+>
+> The intake roles (`mk ingest --role researcher|validator|librarian`)
+> widen that: their prompts also carry text MCP callers sent, the
+> question, sources and research body of an intake deposit, and the
+> queries sessions typed for the librarian's rewrites. meerkat puts
+> that text inside fenced blocks labelled as untrusted data and accepts
+> only `https` sources on public hosts, but a label is not a sandbox.
+> So `--trust-sources` is refused on a `--role` run unless
+> `--trust-intake` is given too; pass both only if every identity that
+> can deposit (`intake-write`) or search is trusted like code you'd
+> merge unreviewed.
 
 The wrapped instruction prepends a small "do exactly this one
 page, commit + push, then stop" header so the sub-agent stays
 focused. Each session writes the page, runs `git pull --rebase`,
 commits, and pushes to the branch resolved from `content-source.yaml`
 (`content.branch`, or the remote default — commonly `main`).
+The commit message is written to a temporary owner-only file and the
+agent runs `git commit -F <file>`, so no message text is ever part of
+a command line. The page path, page id, intake id and branch spelled
+into the git commands must match `[A-Za-z0-9._/-]` (no leading `-`, no
+`..`); a task with any other value fails without spawning an agent.
 
 Concurrency is bounded by `--max-parallel` via a counting
 semaphore. Each goroutine acquires the semaphore, spawns its

@@ -88,6 +88,10 @@ type snapshot struct {
 	// prefix listing fingerprint — or "" for a source that has none. It
 	// is what a probe compares against.
 	version string
+	// gen identifies this snapshot among every snapshot ever installed in
+	// the process (assigned by install, never reused). The link graph keys
+	// its per-collection page cache on it: same gen, same content pages.
+	gen uint64
 
 	// once/index/indexErr are the lazily-built search index. A snapshot
 	// prepared by a reload has its index built eagerly, off the request
@@ -118,10 +122,14 @@ func (c *Collection) acquire() *snapshot {
 	return s
 }
 
+// snapshotGen hands out snapshot generations; see snapshot.gen.
+var snapshotGen atomic.Uint64
+
 // install publishes s as the serving snapshot and drops the collection's
 // reference to whatever was there.
 func (c *Collection) install(s *snapshot) {
 	s.refs.Store(1) // the collection's own reference
+	s.gen = snapshotGen.Add(1)
 	c.snapMu.Lock()
 	old := c.snap
 	c.snap = s
@@ -344,6 +352,14 @@ func (c *Collection) currentVersion() string {
 	c.snapMu.RLock()
 	defer c.snapMu.RUnlock()
 	return c.snap.version
+}
+
+// currentSnapshot reports the serving snapshot's version token and
+// generation.
+func (c *Collection) currentSnapshot() (version string, gen uint64) {
+	c.snapMu.RLock()
+	defer c.snapMu.RUnlock()
+	return c.snap.version, c.snap.gen
 }
 
 // hasFilesystem reports whether the collection reads through its own

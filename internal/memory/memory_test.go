@@ -292,3 +292,41 @@ func TestPage_IgnoresAFrontmatterIDThatClaimsAnotherPage(t *testing.T) {
 		t.Errorf("frontmatter id = %q, want it overridden by the store key", page.Front.ID)
 	}
 }
+
+// TestRender_SharedDocumentsCarryNoSubject pins meerkat-mob#62 item 2:
+// team and global documents (live or staged) are read by others, and a
+// subject can be an email address, so only the namespace records who
+// wrote them. A personal document keeps both claims.
+func TestRender_SharedDocumentsCarryNoSubject(t *testing.T) {
+	id := authz.Identity{Subject: "alice@example.com", Issuer: "https://idp.example.com"}
+	now := time.Date(2026, 10, 7, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		scope   Scope
+		status  string
+		subject bool
+	}{
+		{ScopePersonal, StatusLive, true},
+		{ScopeTeam, StatusLive, false},
+		{ScopeGlobal, StatusLive, false},
+		{ScopeTeam, StatusPending, false},
+		{ScopeGlobal, StatusPending, false},
+	} {
+		ref, err := Resolve(Document{Key: "k"}, tc.scope, Namespace(id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := Render(Document{Key: "k", Body: "b"}, ref, id, tc.status, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(body)
+		has := strings.Contains(text, "alice@example.com") || strings.Contains(text, "idp.example.com") ||
+			strings.Contains(text, "memory_subject") || strings.Contains(text, "memory_issuer")
+		if has != tc.subject {
+			t.Errorf("%s/%s: subject or issuer present = %v, want %v:\n%s", tc.scope, tc.status, has, tc.subject, text)
+		}
+		if !strings.Contains(text, "memory_namespace: "+Namespace(id)) {
+			t.Errorf("%s/%s: namespace missing:\n%s", tc.scope, tc.status, text)
+		}
+	}
+}

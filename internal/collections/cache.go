@@ -170,6 +170,12 @@ func (r *Registry) ensureMounted(ctx context.Context, c *Collection) error {
 // finds it warm. cullOthers lets the mount push colder residents out
 // when it overflows the budget (a request needs this one now); warm
 // start passes false and stops instead.
+//
+// ctx bounds the mount: besides whatever the source resolver honours,
+// it is checked between phases, and a mount whose context ends before
+// the commit discards what it built and leaves the collection cold. A
+// request's own context is therefore the limit on the work it triggers;
+// the async cold policy detaches deliberately (ensureMounted).
 func (r *Registry) mount(ctx context.Context, c *Collection, trigger string, cullOthers bool) (err error) {
 	c.mountMu.Lock()
 	defer c.mountMu.Unlock()
@@ -179,6 +185,9 @@ func (r *Registry) mount(ctx context.Context, c *Collection, trigger string, cul
 	src, cfgPath := c.Tree.LazySource()
 	if src == nil {
 		return fmt.Errorf("%w: %q has no source to mount from", ErrColdCollection, c.Name)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("mount %q: %w", c.Name, err)
 	}
 	tier := 0
 	if c.Tree != nil {
@@ -224,8 +233,15 @@ func (r *Registry) mount(ctx context.Context, c *Collection, trigger string, cul
 	if err != nil {
 		return fmt.Errorf("mount %q: enumerate pages: %w", c.Name, err)
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("mount %q: %w", c.Name, err)
+	}
 	snap, err := newBuiltSnapshot(ctx, fsys, rc.Provenance, version, c.mergeOverlay(pages, kb.Unfiltered()), c.searchOptions()...)
 	if err != nil {
+		return fmt.Errorf("mount %q: %w", c.Name, err)
+	}
+	if err := ctx.Err(); err != nil {
+		snap.discard()
 		return fmt.Errorf("mount %q: %w", c.Name, err)
 	}
 	var size int64
@@ -241,9 +257,6 @@ func (r *Registry) mount(ctx context.Context, c *Collection, trigger string, cul
 		c.applyStamp(*stamp)
 	}
 	c.cold.Store(false)
-	if c.Tree != nil {
-		c.Tree.Mounted = true
-	}
 	r.account(ctx, c, size, cullOthers)
 	return nil
 }
@@ -332,9 +345,6 @@ func (r *Registry) unmount(ctx context.Context, c *Collection, reason string) {
 	}
 	size := c.residentBytes.Swap(0)
 	c.cold.Store(true)
-	if c.Tree != nil {
-		c.Tree.Mounted = false
-	}
 	c.install(&snapshot{provenance: "cold"})
 	c.status.loaded("", "") // nothing loaded: a freshness record reads unknown
 	cs := r.cacheState()

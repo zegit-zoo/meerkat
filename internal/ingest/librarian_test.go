@@ -45,6 +45,10 @@ func librarianFixture(t *testing.T) (*collections.Registry, *intake.Store, *trav
 		t.Fatal(err)
 	}
 	st := intake.New(ms)
+	// it1's deposit was authorised for flux (mk_report_outcome records it).
+	if _, err := st.PutRaw(context.Background(), "alice-ns", now, "it1", []byte("---\n{\"id\":\"it1\",\"fallback_kind\":\"web\",\"target_kb\":\"flux\"}\n---\nresearch\n")); err != nil {
+		t.Fatal(err)
+	}
 	confirmed := "---\nid: intake/it1\ntitle: Rotate\nstatus: unverified\nverified:\n  - {by: agent:validator:one, at: 2026-09-18T12:00:00Z}\n  - {by: agent:validator:two, at: 2026-09-18T12:00:00Z}\nextra:\n  intake_id: it1\n---\n# Rotate\n"
 	if _, err := st.PutStaged(context.Background(), "flux", "it1", []byte(confirmed)); err != nil {
 		t.Fatal(err)

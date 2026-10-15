@@ -859,7 +859,7 @@ func showHandler(reg *collections.Registry, mem transportOptions) mcpserver.Tool
 			telemetry.KeyCollectionNamed.Bool(req.GetString("collection", "") != ""),
 			telemetry.KeyCollectionCount.Int(view.Len()),
 		)
-		ref, err := view.Show(req.GetString("collection", ""), id)
+		ref, err := view.ShowContext(ctx, req.GetString("collection", ""), id)
 		var cold *collections.ColdError
 		if errors.As(err, &cold) {
 			span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
@@ -1002,7 +1002,7 @@ func listHandler(reg *collections.Registry, mem transportOptions) mcpserver.Tool
 			telemetry.KeyCollectionNamed.Bool(req.GetString("collection", "") != ""),
 			telemetry.KeyCollectionCount.Int(view.Len()),
 		)
-		refs, err := view.Pages(req.GetString("collection", ""))
+		refs, err := view.PagesContext(ctx, req.GetString("collection", ""))
 		if err != nil {
 			if errors.Is(err, collections.ErrUnknownCollection) {
 				telemetry.Fail(span, telemetry.OutcomeInvalidQuery)

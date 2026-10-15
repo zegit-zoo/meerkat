@@ -29,7 +29,7 @@ func gitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(envWithoutGit(),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
@@ -396,32 +396,41 @@ func TestRemote_FlagLookupCappedIsUnknown(t *testing.T) {
 	}
 }
 
-// A pull runs inside the repository, so the repository's own insteadOf
-// applies to it while ls-remote (outside) reads the real remote. If the
-// pull lands on a commit other than the tip ls-remote reported, the
-// verdict is unknown, not current (review of #116, leftover b, and N3).
-func TestRemote_PullLandingOffTheTipIsUnknown(t *testing.T) {
+// A pull runs inside the repository, so a repository whose own config
+// rewrites URLs (url.*.insteadOf) could send it somewhere other than the
+// remote ls-remote read. Such a repository is refused before git runs
+// (meerkat-mob#31): the tree stays where it was and the pull is reported
+// as failed against the real tip.
+func TestRemote_PullRefusesARepositoryThatRewritesURLs(t *testing.T) {
 	f := newRemoteFixture(t, refresh.DivergencePull)
-	// A second remote that shares history with the real one, then moves
-	// somewhere else.
-	evil := filepath.Join(t.TempDir(), "evil.git")
-	gitT(t, t.TempDir(), "clone", "-q", "--bare", f.bare, evil)
-	pusher := filepath.Join(t.TempDir(), "evil-pusher")
-	gitT(t, t.TempDir(), "clone", "-q", evil, pusher)
-	writeLocalPage(t, pusher, "notes/elsewhere", "Somewhere else.")
-	gitT(t, pusher, "add", ".")
-	gitT(t, pusher, "commit", "-q", "-m", "elsewhere")
-	gitT(t, pusher, "push", "-q", "origin", "main")
-	elsewhere := gitT(t, pusher, "rev-parse", "HEAD")
-
+	before := gitT(t, f.dir, "rev-parse", "HEAD")
 	tip := f.pushPage(t, "notes/zebrafish", "About zebrafish.")
-	gitT(t, f.dir, "config", "url."+evil+".insteadOf", f.bare)
+	gitT(t, f.dir, "config", "url."+filepath.Join(t.TempDir(), "elsewhere.git")+".insteadOf", f.bare)
 
-	_, fr := f.check(t)
-	if got := gitT(t, f.dir, "rev-parse", "HEAD"); got != elsewhere {
-		t.Fatalf("precondition: the pull followed the local rewrite to %s, got %s", elsewhere, got)
+	out, fr := f.check(t)
+	if got := gitT(t, f.dir, "rev-parse", "HEAD"); got != before {
+		t.Fatalf("a refused pull moved HEAD to %s, want %s", got, before)
 	}
-	if fr.State != FreshUnknown || fr.Note != notePulledElse || fr.Remote != tip {
-		t.Errorf("pulled off the tip: %+v, want unknown noted %q with remote %s", fr, notePulledElse, tip)
+	if fr.Note != notePullFailed || fr.Remote != tip {
+		t.Errorf("refused pull: %+v, want noted %q with remote %s", fr, notePullFailed, tip)
 	}
+	if !strings.Contains(out.Note, "refused") {
+		t.Errorf("log note = %q, want the refusal", out.Note)
+	}
+}
+
+// envWithoutGit is os.Environ() minus every GIT_* variable. When the
+// suite runs inside a git hook (the repo's pre-push `make test`), git
+// exports GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE for the hook; left
+// in place they send a fixture's git calls to the real checkout instead
+// of the temp dir (#168).
+func envWithoutGit() []string {
+	env := os.Environ()
+	clean := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "GIT_") {
+			clean = append(clean, kv)
+		}
+	}
+	return clean
 }

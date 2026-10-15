@@ -3,8 +3,11 @@ package collections
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/fstest"
 
 	"github.com/zegit-zoo/meerkat/internal/kb"
 )
@@ -356,4 +359,125 @@ func TestLinks_HiddenTargetsReadAsMissing(t *testing.T) {
 	if l := aliceView.LinksOf(ref).Links[4]; !l.Resolved {
 		t.Errorf("alice's own note must resolve for her: %+v", l)
 	}
+}
+
+// countingFS counts Open calls: every page a listing reads is an Open.
+type countingFS struct {
+	fs.FS
+	opens atomic.Int64
+}
+
+func (c *countingFS) Open(name string) (fs.File, error) {
+	c.opens.Add(1)
+	return c.FS.Open(name)
+}
+
+// TestLinks_MemorySaveRebuildsWithoutRelistingContent pins item 1 of
+// meerkat-mob#63: a memory save invalidates the link graph, but the
+// rebuild it triggers re-reads no content root — content pages are
+// cached per snapshot — while a snapshot swap still re-lists.
+func TestLinks_MemorySaveRebuildsWithoutRelistingContent(t *testing.T) {
+	cfs := &countingFS{FS: fstest.MapFS{
+		"content/a.md": {Data: []byte("---\nid: a\ntitle: A\nrelated: [b]\n---\nbody\n")},
+		"content/b.md": {Data: []byte("---\nid: b\ntitle: B\n---\nbody\n")},
+	}}
+	docs := newCollection("docs", "disk:x", "v1", cfs)
+	other := FromPages("other", []kb.Page{{ID: "o", Title: "O"}})
+	reg, err := New(docs, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Build the search index first: a memory save writes into it, and
+	// building it is a listing of its own that is not the graph's.
+	if _, err := docs.Index(); err != nil {
+		t.Fatal(err)
+	}
+	before := cfs.opens.Load()
+	g1 := reg.graph()
+	if _, ok := g1.exists["docs:a"]; !ok {
+		t.Fatalf("content not in the graph: %v", g1.exists)
+	}
+	listed := cfs.opens.Load()
+	if listed == before {
+		t.Fatal("the first build must list the content root")
+	}
+
+	for i := range 3 {
+		if err := docs.publishMemory(kb.Page{ID: fmt.Sprintf("memory/team/m%d", i), Title: "M", Front: kb.Frontmatter{Related: []string{"b"}}}); err != nil {
+			t.Fatal(err)
+		}
+		if reg.graph() == g1 {
+			t.Fatal("a memory save must still invalidate the graph")
+		}
+	}
+	if got := cfs.opens.Load(); got != listed {
+		t.Errorf("memory saves re-read the content root: %d opens, want %d", got, listed)
+	}
+	ref, _ := reg.Show("docs", "b")
+	if pl := reg.LinksOf(ref); len(pl.LinkedFrom) != 4 {
+		t.Errorf("backlinks after the saves = %v, want docs:a and the three memories", pl.LinkedFrom)
+	}
+
+	// A new snapshot is new content: it is listed again.
+	docs.install(&snapshot{fsys: cfs, provenance: "disk:x", version: "v2"})
+	reg.graph()
+	if cfs.opens.Load() == listed {
+		t.Error("a snapshot swap must re-list the content root")
+	}
+}
+
+// TestLinks_ContentCacheForgetsDroppedAndEvictedCollections pins the
+// pruning of the per-collection content cache: a name no longer in the
+// registry, and a lazy collection the resident budget returned to cold,
+// keep no cached page list after the next rebuild. It also pins that a
+// lazy mount and an eviction move the graph key at all.
+func TestLinks_ContentCacheForgetsDroppedAndEvictedCollections(t *testing.T) {
+	t.Run("dropped", func(t *testing.T) {
+		reg, err := New(FromPages("docs", []kb.Page{{ID: "a", Title: "A"}}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reg.graph()
+		reg.links.mu.Lock()
+		reg.links.content["gone"] = contentPages{gen: 1, pages: []kb.Page{{ID: "x"}}}
+		reg.links.graph = reg.buildGraph(reg.graphKey(), reg.links)
+		_, kept := reg.links.content["docs"]
+		_, stale := reg.links.content["gone"]
+		reg.links.mu.Unlock()
+		if !kept || stale {
+			t.Errorf("content cache after rebuild: docs kept=%v, gone kept=%v; want true, false", kept, stale)
+		}
+	})
+	t.Run("evicted", func(t *testing.T) {
+		reg := openTree(t)
+		v, _ := reg.Get("vendors")
+		reg.graph() // built while vendors was cold
+		if _, err := reg.ShowContext(context.Background(), "vendors", "vendors"); err != nil {
+			t.Fatal(err)
+		}
+		// The mount moves the graph key even though a local source
+		// without a refresh block carries no version token.
+		if _, ok := reg.graph().exists["vendors:vendors"]; !ok {
+			t.Fatal("the graph must see a lazy collection once it mounts")
+		}
+		cached := func() bool {
+			reg.links.mu.Lock()
+			defer reg.links.mu.Unlock()
+			_, ok := reg.links.content["vendors"]
+			return ok
+		}
+		if !cached() {
+			t.Fatal("a mounted collection's content must be cached")
+		}
+		reg.unmount(context.Background(), v, "test")
+		if !v.IsCold() {
+			t.Fatal("unmount must leave vendors cold")
+		}
+		if _, ok := reg.graph().exists["vendors:vendors"]; ok {
+			t.Error("the graph must forget an evicted collection's pages")
+		}
+		if cached() {
+			t.Error("an evicted collection must not keep its cached page list")
+		}
+	})
 }

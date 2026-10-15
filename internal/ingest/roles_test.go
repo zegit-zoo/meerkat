@@ -84,7 +84,7 @@ func intakeFixture(t *testing.T) (*intake.Store, string) {
 	st := intake.New(ms)
 	now := time.Date(2026, 9, 18, 20, 0, 0, 0, time.UTC)
 	raw := []byte(`---
-{"id":"it1","type":"research-raw","status":"unverified","source":"agent-fallback","outcome":"gave_up","fallback_kind":"web","question":"how do I rotate the datadog api key","attempted":["root","platform","root/platform/flux"],"reported_at":"2026-09-18T20:00:00Z","submitted_by":"alice-ns","fallback_sources":["https://example.com/doc"]}
+{"id":"it1","type":"research-raw","status":"unverified","source":"agent-fallback","outcome":"gave_up","fallback_kind":"web","question":"how do I rotate the datadog api key","attempted":["root","platform","root/platform/flux"],"target_kb":"flux","reported_at":"2026-09-18T20:00:00Z","submitted_by":"alice-ns","fallback_sources":["https://example.com/doc"]}
 ---
 # Research
 

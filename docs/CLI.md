@@ -435,7 +435,8 @@ meerkat ingest [flags]
       --source string                  Restrict to one source id from sources.yaml (e.g. policies, adr, runbooks).
       --status strings                 Restrict to pages with these frontmatter statuses (default: placeholder,ingest-failed).
       --subagent string                OpenCode subagent type (default: general).
-      --trust-sources                  Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged.
+      --trust-intake                   With --role and --trust-sources: accept that text MCP callers sent (intake deposits, session queries) reaches an agent running without permission prompts.
+      --trust-sources                  Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged. With --role it also needs --trust-intake.
       --wall-clock-cap int             Per-page wall-clock cap in seconds. (default 300)
       --workdir-kb string              Content working copy to write to. Overrides the source resolved from content-source.yaml.
 ```
@@ -628,6 +629,10 @@ Run a Model Context Protocol server on stdio. Exposes:
   mk_search       - full-text search across the loaded KB
   mk_show         - retrieve one page by ID (returns body + frontmatter)
   mk_list         - list pages, optionally filtered (prefix/category/status/owner)
+  mk_list_collections
+                  - the mounted collections and what you may do on each
+  mk_report_outcome
+                  - close a retrieval session: found / not_found / gave_up
   mk_save_memory  - save a personal/team/global memory, searchable at once
                     (only when a collection declares a "memory:" store)
 
@@ -674,6 +679,10 @@ transport. It exposes the same tools as 'mcp serve':
   mk_search       - full-text search across the KB
   mk_show         - retrieve one page by ID (returns body + frontmatter)
   mk_list         - list pages, optionally filtered
+  mk_list_collections
+                  - the mounted collections and what you may do on each
+  mk_report_outcome
+                  - close a retrieval session: found / not_found / gave_up
   mk_save_memory  - save a personal/team/global memory (only when a
                     collection declares a "memory:" store)
 
@@ -695,7 +704,7 @@ content-source.yaml, or by a standalone file passed with --auth-config:
     providers:
       - issuer: https://login.microsoftonline.com/<tenant>/v2.0
         audience: api://meerkat
-        claims: { groups: groups, email: preferred_username, tenant: tid }
+        claims: { groups: groups, tenant: tid }
     rules:
       - name: sre
         groups: [sre]
@@ -885,6 +894,10 @@ frontmatter (front): trust_tier (unverified | machine-confirmed |
 human-reviewed, derived from front.verified — SPEC.md §5.3) and stale
 (whether today is on/after front.stale_after — SPEC.md §5.5), plus the
 collection the page was served from.
+
+Text output has terminal control characters (C0 and C1, except newline
+and tab) removed, so content from a remote collection cannot drive the
+terminal; --json carries the stored values exactly.
 ```
 
 #### Usage

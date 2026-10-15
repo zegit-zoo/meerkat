@@ -50,24 +50,29 @@ func (s *s3Sink) Put(ctx context.Context, key string, body []byte) error {
 	return err
 }
 
+// Days pages through the listing: a single ListObjectsV2 call returns
+// at most 1,000 entries, and a day missed here would never expire.
 func (s *s3Sink) Days(ctx context.Context) ([]string, error) {
-	out, err := s.c.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+	var days []string
+	pager := s3.NewListObjectsV2Paginator(s.c, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.bucket), Prefix: aws.String(s.prefix), Delimiter: aws.String("/"),
 	})
-	if err != nil {
-		return nil, err
-	}
-	var days []string
-	for _, p := range out.CommonPrefixes {
-		d := path.Base(strings.TrimSuffix(aws.ToString(p.Prefix), "/"))
-		if isDay(d) {
-			days = append(days, d)
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range page.CommonPrefixes {
+			d := path.Base(strings.TrimSuffix(aws.ToString(p.Prefix), "/"))
+			if isDay(d) {
+				days = append(days, d)
+			}
 		}
 	}
 	return days, nil
 }
 
-func (s *s3Sink) ReadDay(ctx context.Context, day string) ([][]byte, error) {
+func (s *s3Sink) ReadDay(ctx context.Context, day string, keep func(string) bool) ([][]byte, error) {
 	if !isDay(day) {
 		return nil, nil
 	}
@@ -79,6 +84,9 @@ func (s *s3Sink) ReadDay(ctx context.Context, day string) ([][]byte, error) {
 			return nil, err
 		}
 		for _, o := range page.Contents {
+			if keep != nil && !keep(path.Base(aws.ToString(o.Key))) {
+				continue
+			}
 			obj, err := s.c.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: o.Key})
 			if err != nil {
 				return nil, err
@@ -93,10 +101,6 @@ func (s *s3Sink) ReadDay(ctx context.Context, day string) ([][]byte, error) {
 	}
 	return out, nil
 }
-
-// maxLogObjectBytes bounds a single log object read back at warm
-// start.
-const maxLogObjectBytes = 4 << 20
 
 func (s *s3Sink) DeleteDay(ctx context.Context, day string) error {
 	if !isDay(day) {

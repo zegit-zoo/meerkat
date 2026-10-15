@@ -119,6 +119,13 @@ type Spec struct {
 	// provider that ignores If-Match / If-None-Match on writes (Garage
 	// does); with it, the store gives the local backend's guarantee and
 	// no more. See S3Store.
+	//
+	// "One process" counts every command, not only the server: `mk ingest
+	// --role librarian` writes the intake store and memory stores too, so
+	// a librarian run overlapping `mk mcp serve` (or another librarian
+	// run) is a second writer the in-process lock cannot see. The
+	// operator has to keep them from overlapping; see
+	// docs/design/memory.md (meerkat-mob#61).
 	SingleWriter bool `yaml:"single_writer,omitempty"`
 
 	// PersonalVisibility decides who may READ this collection's personal

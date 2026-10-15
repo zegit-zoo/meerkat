@@ -21,14 +21,17 @@ package authn
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
 )
@@ -67,9 +70,20 @@ type Options struct {
 	// client with a sane timeout rather than http.DefaultClient, so a
 	// hung IdP can't wedge startup forever.
 	HTTPClient *http.Client
-	// Now overrides the clock used for expiry checks. Tests set it; a
-	// nil value means time.Now.
+	// Now overrides the clock used for expiry checks and for the JWKS
+	// refresh interval. Tests set it; a nil value means time.Now.
 	Now func() time.Time
+	// JWKSMinRefresh is the shortest interval between two fetches of a
+	// provider's signing keys; zero means DefaultJWKSMinRefresh. A key
+	// the cache has never seen triggers at most one fetch per interval,
+	// however many tokens ask.
+	JWKSMinRefresh time.Duration
+	// Metrics, when set, receives the JWKS fetch counters
+	// (meerkat_oidc_jwks_fetches_total, meerkat_oidc_jwks_refetch_throttled_total).
+	Metrics prometheus.Registerer
+	// Logger receives the startup warnings about risky provider settings.
+	// Nil means slog.Default().
+	Logger *slog.Logger
 }
 
 // NewVerifier performs OIDC discovery for every configured provider and
@@ -79,7 +93,8 @@ type Options struct {
 // request: an unreachable or misconfigured issuer should fail the
 // process at startup — where a deployment notices — not surface as
 // intermittent 401s under load. JWKS refresh after that point is
-// go-oidc's remote key set, which re-fetches on an unknown key ID.
+// meerkat's own key set (keyset.go): it re-fetches only for a key ID it
+// has not seen, and at most once per Options.JWKSMinRefresh.
 func NewVerifier(ctx context.Context, opts Options) (*Verifier, error) {
 	cfg := opts.Config
 	if err := cfg.Validate(); err != nil {
@@ -99,12 +114,24 @@ func NewVerifier(ctx context.Context, opts Options) (*Verifier, error) {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	ctx = oidc.ClientContext(ctx, client)
+	ksMetrics := newKeySetMetrics(opts.Metrics)
+	log := opts.Logger
+	if log == nil {
+		log = slog.Default()
+	}
 
 	for _, p := range cfg.Providers {
 		provider, perr := oidc.NewProvider(ctx, p.Issuer)
 		if perr != nil {
 			return nil, fmt.Errorf("oidc discovery for issuer %q: %w", p.Issuer, perr)
 		}
+		var disc struct {
+			JWKSURI string `json:"jwks_uri"`
+		}
+		if cerr := provider.Claims(&disc); cerr != nil || disc.JWKSURI == "" {
+			return nil, fmt.Errorf("oidc discovery for issuer %q: no jwks_uri in the discovery document", p.Issuer)
+		}
+		warnRiskyProvider(log, p)
 		audience := p.Audience
 		if audience == "" {
 			audience = cfg.Resource
@@ -125,10 +152,25 @@ func NewVerifier(ctx context.Context, opts Options) (*Verifier, error) {
 		v.providers = append(v.providers, &providerVerifier{
 			cfg:      p,
 			claims:   p.Claims.Defaulted(),
-			verifier: provider.Verifier(oc),
+			verifier: oidc.NewVerifier(p.Issuer, newJWKSKeySet(disc.JWKSURI, client, opts.JWKSMinRefresh, opts.Now, ksMetrics), oc),
 		})
 	}
 	return v, nil
+}
+
+// warnRiskyProvider logs the provider settings that are legitimate but
+// weaken what a verified token proves.
+func warnRiskyProvider(log *slog.Logger, p authz.Provider) {
+	if p.SkipIssuerCheck {
+		log.Warn("auth.providers[].skip_issuer_check is on: the token's iss claim is NOT compared with the configured issuer, "+
+			"so only the signature, audience and require_tenant tie a token to this provider",
+			"issuer", p.Issuer, "require_tenant", p.RequireTenant)
+	}
+	if p.Claims.Email == "preferred_username" {
+		log.Warn("auth.providers[].claims.email is preferred_username: that claim is mutable and not meant for authorization, "+
+			"so rules selecting on emails: trust a value its owner can change; select on subjects: (the stable oid/sub) instead",
+			"issuer", p.Issuer)
+	}
 }
 
 // Policy returns the authorization policy the verifier evaluates
@@ -160,7 +202,7 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (authz.Identity, erro
 			lastErr = err
 			continue
 		}
-		id, cerr := p.identity(tok)
+		id, cerr := p.identity(tok, raw)
 		if cerr != nil {
 			lastErr = cerr
 			continue
@@ -175,7 +217,7 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (authz.Identity, erro
 
 // identity maps a verified token's claims onto an authz.Identity using
 // this provider's claim mapping.
-func (p *providerVerifier) identity(tok *oidc.IDToken) (authz.Identity, error) {
+func (p *providerVerifier) identity(tok *oidc.IDToken, rawJWT string) (authz.Identity, error) {
 	var raw map[string]json.RawMessage
 	if err := tok.Claims(&raw); err != nil {
 		return authz.Identity{}, fmt.Errorf("decode claims: %w", err)
@@ -190,10 +232,92 @@ func (p *providerVerifier) identity(tok *oidc.IDToken) (authz.Identity, error) {
 	if id.Subject == "" {
 		return authz.Identity{}, errors.New("token has no subject")
 	}
+	// email_verified describes the standard `email` claim. When present
+	// and not true the address is the user's own assertion, so it never
+	// satisfies an `emails:` rule. Absent (Entra emits none) is accepted.
+	if p.claims.Email == "email" {
+		if verified, present := boolClaim(raw, "email_verified"); present && !verified {
+			id.EmailUnverified = true
+		}
+	}
+	if err := p.checkTokenKind(rawJWT, raw); err != nil {
+		return authz.Identity{}, err
+	}
 	if p.cfg.RequireTenant != "" && id.Tenant != p.cfg.RequireTenant {
 		return authz.Identity{}, fmt.Errorf("token tenant %q does not match the required tenant", id.Tenant)
 	}
 	return id, nil
+}
+
+// checkTokenKind enforces the provider's optional token_type and
+// allowed_azp settings.
+func (p *providerVerifier) checkTokenKind(rawJWT string, claims map[string]json.RawMessage) error {
+	if p.cfg.TokenType == authz.TokenTypeAccess && !isAccessToken(rawJWT, claims) {
+		return errors.New("token is not an access token (token_type: access)")
+	}
+	if len(p.cfg.AllowedAZP) > 0 {
+		azp := stringClaim(claims, "azp")
+		if azp == "" {
+			azp = stringClaim(claims, "appid")
+		}
+		allowed := false
+		for _, a := range p.cfg.AllowedAZP {
+			if azp != "" && azp == a {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return errors.New("token was issued to a client that is not in allowed_azp")
+		}
+	}
+	return nil
+}
+
+// isAccessToken reports whether a verified JWT looks like an access
+// token: RFC 9068's `typ: at+jwt` header, or (for providers such as Entra
+// that do not set it) an `scp` or `roles` claim.
+func isAccessToken(rawJWT string, claims map[string]json.RawMessage) bool {
+	if head, _, ok := strings.Cut(rawJWT, "."); ok {
+		if b, err := base64.RawURLEncoding.DecodeString(head); err == nil {
+			var h struct {
+				Typ string `json:"typ"`
+			}
+			if json.Unmarshal(b, &h) == nil {
+				typ := strings.ToLower(strings.TrimPrefix(strings.ToLower(h.Typ), "application/"))
+				if typ == "at+jwt" {
+					return true
+				}
+			}
+		}
+	}
+	_, scp := claims["scp"]
+	_, roles := claims["roles"]
+	return scp || roles
+}
+
+// boolClaim reads a boolean claim, accepting the string forms "true" and
+// "false" some providers emit. present is false when the claim is absent
+// or not boolean-shaped.
+func boolClaim(raw map[string]json.RawMessage, name string) (value, present bool) {
+	b, ok := raw[name]
+	if !ok {
+		return false, false
+	}
+	var v bool
+	if json.Unmarshal(b, &v) == nil {
+		return v, true
+	}
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		switch strings.ToLower(s) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	}
+	return false, false
 }
 
 // stringClaim reads a string claim, tolerating its absence.

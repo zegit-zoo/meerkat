@@ -172,18 +172,31 @@ func planResearch(ctx context.Context, store *intake.Store, opts IntakePlanOpts,
 			skips = append(skips, Skip{it.ID, "no research in the deposit (fallback none or empty body)"})
 			continue
 		}
+		// A deposit that carries a credential is not researched: the
+		// agent would copy it into a page that is committed and pushed.
+		if rule := findSecret([]byte(it.Question + "\n" + strings.Join(it.Sources, "\n") + "\n" + it.Body)); rule != "" {
+			skips = append(skips, Skip{it.ID, "deposit matches the " + rule + " secret pattern; not researched, a human must look at it"})
+			continue
+		}
 		rawRel := path.Join(IntakeDir, it.ID+".md")
 		if err := writeWithin(root, rawRel, []byte(it.Body)); err != nil {
 			return nil, nil, err
 		}
 		pageID := path.Join(CandidateDir, it.ID)
 		pageRel := pagePathForRepo(opts.WikiDir, pageID)
+		// Caller-supplied fields reach the prompt only as labelled data
+		// blocks, and only the sources an agent may open (meerkat-mob#34).
+		sources, dropped := researchableSources(it.Sources)
+		srcLabel := "Sources it cited (https, public hosts only)"
+		if dropped > 0 {
+			srcLabel += fmt.Sprintf("; %d more were not https to a public host and are left out, do not look for them", dropped)
+		}
 		subs := map[string]string{
 			"raw_path":  rawRel,
 			"intake_id": it.ID,
-			"question":  it.Question,
-			"attempted": strings.Join(it.Attempted, ", "),
-			"sources":   strings.Join(it.Sources, ", "),
+			"question":  untrustedBlock("The question the agent asked", []string{it.Question}),
+			"attempted": untrustedBlock("Collections it tried, in order", it.Attempted),
+			"sources":   untrustedBlock(srcLabel, sources),
 			"page_path": pageRel,
 			"page_id":   pageID,
 			"model":     opts.Model,
@@ -199,17 +212,39 @@ func planResearch(ctx context.Context, store *intake.Store, opts IntakePlanOpts,
 	return tasks, skips, nil
 }
 
-// targetKB is where a candidate belongs: the deepest collection the
-// agent tried (the last one), or "unrouted" for the librarian to place.
+// targetKB is where a candidate belongs: the target mk_report_outcome
+// resolved and recorded from the depositor's own view of the registry,
+// or "unrouted" for the librarian to place. The attempted list itself is
+// never read for this: it is what the caller typed (meerkat-mob#38), and
+// a deposit made before the target was recorded is unrouted.
 func targetKB(it intake.Item) string {
-	if n := len(it.Attempted); n > 0 {
-		last := it.Attempted[n-1]
-		if i := strings.LastIndex(last, "/"); i >= 0 {
-			last = last[i+1:]
-		}
-		return last
+	if it.TargetKB != "" && intake.Segment(it.TargetKB) == nil {
+		return it.TargetKB
 	}
-	return "unrouted"
+	return unrouted
+}
+
+// unrouted is the target of a deposit with no authorised collection.
+const unrouted = "unrouted"
+
+// depositTargetMismatch re-checks, at filing or escalation time, that a
+// collection is the one the item's deposit was authorised to target:
+// the raw item meerkat wrote at deposit records it. It returns "" when
+// it is, else why not. A staged key alone is not enough, because a
+// candidate staged before targets were recorded named whatever the
+// depositor typed.
+func depositTargetMismatch(ctx context.Context, store *intake.Store, id, collection string) string {
+	raw, ok, err := store.FindRaw(ctx, id)
+	switch {
+	case err != nil:
+		return "the deposit could not be read: " + err.Error()
+	case !ok:
+		return "no deposit found for this item"
+	}
+	if got := targetKB(raw); got != collection {
+		return fmt.Sprintf("the deposit was authorised for %q, not %q", got, collection)
+	}
+	return ""
 }
 
 func planValidation(ctx context.Context, store *intake.Store, opts IntakePlanOpts, prompt string) ([]Task, []Skip, error) {
@@ -299,11 +334,20 @@ func researcherModel(p kb.Page) string {
 }
 
 func substitute(tpl string, subs map[string]string) string {
-	out := tpl
-	for k, v := range subs {
-		out = strings.ReplaceAll(out, "{{"+k+"}}", v)
+	// Every {{key}} is replaced in ONE pass (strings.Replacer), so a
+	// value that itself contains "{{other}}" is never expanded: what a
+	// value says is data, whatever order the keys come in
+	// (meerkat-mob#35).
+	keys := make([]string, 0, len(subs))
+	for k := range subs {
+		keys = append(keys, k)
 	}
-	return out
+	sort.Strings(keys)
+	pairs := make([]string, 0, 2*len(keys))
+	for _, k := range keys {
+		pairs = append(pairs, "{{"+k+"}}", subs[k])
+	}
+	return strings.NewReplacer(pairs...).Replace(tpl)
 }
 
 // writeWithin writes rel under root, creating directories on the way.
@@ -388,6 +432,17 @@ func Finalize(ctx context.Context, store *intake.Store, workdir string, results 
 			}
 			out = append(out, f)
 			continue
+		}
+		if t.Role == RoleResearcher {
+			if rule := findSecret(body); rule != "" {
+				// Not staged, and taken out of the working copy so a later
+				// commit does not carry it. What the agent already pushed is
+				// the operator's to revert.
+				_ = root.Remove(rel)
+				f.Action, f.Detail = "failed", "candidate matches the "+rule+" secret pattern; not staged and removed from the working copy (revert the agent's commit if it pushed one)"
+				out = append(out, f)
+				continue
+			}
 		}
 		page, err := kb.ParsePage(t.PageID, t.PagePath, body)
 		if err != nil {

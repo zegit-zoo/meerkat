@@ -99,6 +99,12 @@ type Collection struct {
 
 	// Tree is this collection's place in a `tree:` deployment; nil for
 	// a flat one.
+	//
+	// Read-only after Open, and shared: surfaces read it without a lock.
+	// Its Mounted field is the DECLARATION (was this node resolved at
+	// startup?), not residency — a lazy mount or cull never writes it.
+	// Live residency is IsCold, an atomic, which is what every surface
+	// reports as `mounted`.
 	Tree *contentsource.TreeNode
 
 	// Lazy-mount state (cache.go). cold: declared, not resident. lazy:
@@ -1082,7 +1088,7 @@ func (r *Registry) Get(name string) (*Collection, error) {
 //
 // Filtering here rather than per-operation is what makes an
 // unauthorized collection *invisible* rather than *denied*. Everything
-// this type exposes — target (and so Search/Pages/Show), Get's
+// this type exposes — targetCtx (and so Search/Pages/Show), Get's
 // "available: ..." list, Names, All, Len, Single, SplitQualified,
 // Provenance — reads r.list/r.by and therefore sees exactly the allowed
 // set. There is no path by which a filtered-out collection can be
@@ -1176,19 +1182,15 @@ func (r *Registry) viewerOf() kb.Viewer {
 	return *r.viewer
 }
 
-// target resolves a collection argument to the collections to act on:
-// all of them when name is empty, exactly one otherwise.
+// targetCtx resolves a collection argument to the collections to act
+// on: all of them when name is empty, exactly one otherwise. Naming a
+// cold collection mounts it under the cold policy (cache.go), bounded by
+// ctx.
 //
 // Every read routes through here, over r.list — which on a restricted
 // registry (see Restrict) is already the caller's visible set. That is
 // the whole enforcement mechanism; no operation below re-checks
 // anything.
-func (r *Registry) target(name string) ([]*Collection, error) {
-	return r.targetCtx(context.Background(), name)
-}
-
-// targetCtx is target with a context for a lazy mount: naming a cold
-// collection mounts it under the cold policy (cache.go).
 func (r *Registry) targetCtx(ctx context.Context, name string) ([]*Collection, error) {
 	if name == "" {
 		// In a tree, an unqualified search asks the ROOT hub: it routes,
@@ -1410,8 +1412,17 @@ func (r *Registry) Ready() (bool, []Health) {
 // Pages returns the pages of the named collection, or of every
 // collection in configuration order when collection is empty — as seen
 // by this view's viewer (see ViewedBy).
+//
+// Naming a cold collection mounts it with no deadline; a request handler
+// should call PagesContext so the mount is bounded by the request.
 func (r *Registry) Pages(collection string) ([]PageRef, error) {
-	targets, err := r.target(collection)
+	return r.PagesContext(context.Background(), collection)
+}
+
+// PagesContext is Pages with the request's context, which bounds a lazy
+// mount the request triggers.
+func (r *Registry) PagesContext(ctx context.Context, collection string) ([]PageRef, error) {
+	targets, err := r.targetCtx(ctx, collection)
 	if err != nil {
 		return nil, err
 	}
@@ -1579,7 +1590,16 @@ func (r *Registry) SplitQualified(id string) (collection, pageID string) {
 // per-page visibility is not counted, not named in the ambiguity error,
 // and not distinguishable from a page that was never written — the same
 // property Restrict gives a hidden collection, one level down.
+//
+// Naming a cold collection mounts it with no deadline; a request handler
+// should call ShowContext so the mount is bounded by the request.
 func (r *Registry) Show(collection, id string) (PageRef, error) {
+	return r.ShowContext(context.Background(), collection, id)
+}
+
+// ShowContext is Show with the request's context, which bounds a lazy
+// mount the request triggers.
+func (r *Registry) ShowContext(ctx context.Context, collection, id string) (PageRef, error) {
 	qualified, pageID := r.SplitQualified(id)
 	switch {
 	case qualified != "" && collection == "":
@@ -1588,7 +1608,7 @@ func (r *Registry) Show(collection, id string) (PageRef, error) {
 		return PageRef{}, fmt.Errorf("page id %q names collection %q but collection %q was requested", id, qualified, collection)
 	}
 
-	targets, err := r.target(collection)
+	targets, err := r.targetCtx(ctx, collection)
 	if err != nil {
 		return PageRef{}, err
 	}

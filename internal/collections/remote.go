@@ -194,8 +194,9 @@ func (c *Collection) pull(ctx context.Context, repo *gitinfo.Repo, up gitinfo.Up
 		return report(tip, remoteBehind, notePullFailed, "pull failed: "+err.Error())
 	}
 	// Where did the pull land? git decided; the files say what it did.
-	// The pull fetches through the repository's own config, which may
-	// rewrite the URL, so it is compared, not assumed (review N3).
+	// A repository whose config rewrites URLs is refused before git runs
+	// (meerkat-mob#31), but remote.*.url and refspecs can still steer a
+	// fetch, so the landing commit is compared, not assumed (review N3).
 	head, _, herr := repo.Head()
 	verdict, note, logNote := remoteCurrent, "", "pulled to "+short(head)
 	switch {

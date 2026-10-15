@@ -115,8 +115,8 @@ mk update               # download + verified swap; refuses on a brew install
 Every `vX.Y.Z` tag also publishes a hardened, multi-arch (linux/amd64,
 linux/arm64) OCI image to `ghcr.io/zegit-zoo/meerkat`, signed keylessly
 with cosign and carrying SLSA provenance + a Syft SBOM. Image tags drop
-the git tag's leading `v` (`v1.2.3` publishes `1.2.3`, `1.2`, and
-`latest` — never `v1.2.3`):
+the git tag's leading `v` (`v1.2.3` publishes `1.2.3`, `1.2`, and, if
+it is the highest release, `latest` — never `v1.2.3`):
 
 ```bash
 docker pull ghcr.io/zegit-zoo/meerkat:1.2.3
@@ -307,7 +307,7 @@ auth:
   providers:
     - issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
       audience: api://meerkat
-      claims: { groups: groups, email: preferred_username, tenant: tid }
+      claims: { groups: groups, tenant: tid }
   rules:
     - name: sre
       groups: [sre, oncall]
@@ -1178,9 +1178,12 @@ At the end of a retrieval an agent reports how it went: the outcome,
 its first query verbatim, the pages that answered, the collections it
 tried, quality scores, and what it did instead when meerkat did not
 have it. Every report is counted; with `observability.traversal_log`
-configured it is also written as an HMAC-hashed path record, kept 90 days
-by default. The first query is stored only with `query: plaintext` in that
-block, which a librarian deployment needs. With an
+configured it is also written as a path record with collection names,
+page IDs and the session ID HMAC-hashed, kept 90 days by default. The
+first query, the fallback summary and sources and the quality notes are
+stored only with `query: plaintext` in that block, which a librarian
+deployment needs. The record is pseudonymous: the operator who holds the
+HMAC key and the access log can join it to the caller. With an
 `intake:` store and the `intake-write` capability a fallback summary
 becomes a draft page for review. See
 [docs/design/observability.md](docs/design/observability.md#retrieval-outcomes-and-the-traversal-log).

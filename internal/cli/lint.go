@@ -39,8 +39,9 @@ this in CI. The same findings are reported, capped, as warnings in
 					return err
 				}
 			} else {
+				out := textOut(cmd)
 				for _, d := range report.Dangling {
-					fmt.Fprintln(cmd.OutOrStdout(), d.String())
+					fmt.Fprintln(out, d.String())
 				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "%d pages, %d links, %d dangling\n", report.Pages, report.Links, len(report.Dangling))
 			}

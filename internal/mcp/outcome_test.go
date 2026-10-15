@@ -114,7 +114,7 @@ func TestReportOutcome_GaveUpWithFallbackWritesIntakeAndLog(t *testing.T) {
 		t.Fatalf("intake objects = %d, want 1", len(pages))
 	}
 	page := pages[0]
-	for _, want := range []string{`"type":"research-raw"`, `"status":"unverified"`, `"source":"agent-fallback"`, `"question":"how do I rotate the datadog api key"`, `"attempted":["flux","vendors"]`, "Rotate it in Organization Settings", "## Sources", "docs.datadoghq.com"} {
+	for _, want := range []string{`"type":"research-raw"`, `"status":"unverified"`, `"source":"agent-fallback"`, `"question":"how do I rotate the datadog api key"`, `"attempted":["flux"]`, `"target_kb":"flux"`, "Rotate it in Organization Settings", "## Sources", "docs.datadoghq.com"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("intake page lacks %q:\n%s", want, page)
 		}

@@ -253,3 +253,46 @@ func TestSearchHandler_HiddenTreePathAnswersAsNonexistent(t *testing.T) {
 		}
 	}
 }
+
+// TestShowAndListHandlers_CancelledRequestLeavesColdChildCold pins item
+// 3 of meerkat-mob#63 on the MCP surface: mk_show and mk_list mount a
+// cold child under the tool call's context, so a call whose client has
+// gone mounts nothing, and a live one still mounts and answers.
+func TestShowAndListHandlers_CancelledRequestLeavesColdChildCold(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handler func(*collections.Registry) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
+		args    map[string]any
+	}{
+		{"mk_show", func(r *collections.Registry) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return showHandler(r, stdioTransport())
+		}, map[string]any{"collection": "vendors", "id": "vendors"}},
+		{"mk_list", func(r *collections.Registry) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return listHandler(r, stdioTransport())
+		}, map[string]any{"collection": "vendors"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := treeRegistry(t)
+			child, err := reg.Get("vendors")
+			if err != nil || !child.IsCold() {
+				t.Fatalf("vendors must start cold: %v", err)
+			}
+			h := tc.handler(reg)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if res, err := h(ctx, callTool(tc.args)); err == nil && !res.IsError {
+				t.Errorf("cancelled %s answered: %s", tc.name, res.Content[0].(mcp.TextContent).Text)
+			}
+			if !child.IsCold() {
+				t.Fatalf("a cancelled %s must leave the child cold", tc.name)
+			}
+			res, err := h(context.Background(), callTool(tc.args))
+			if err != nil || res.IsError {
+				t.Fatalf("live %s = %v %+v, want a mounted answer", tc.name, err, res)
+			}
+			if child.IsCold() {
+				t.Errorf("a live %s must mount the child", tc.name)
+			}
+		})
+	}
+}

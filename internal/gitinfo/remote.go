@@ -18,6 +18,9 @@ import (
 // git pull --ff-only) and the opt-in remote_check (git ls-remote)").
 // Each call has a fixed argument vector and no shell, runs under an
 // environment built from an allowlist, cannot prompt, and has a timeout.
+// The in-repository calls additionally refuse a repository whose own
+// config could make git run a program (CheckRepoConfig, meerkat-mob#31)
+// and read no global or system config.
 
 // ErrNotFastForward is a pull that could not fast-forward: local and
 // remote have diverged.
@@ -106,14 +109,38 @@ func (r Runner) LsRemote(ctx context.Context, url, branch string) (string, error
 
 // hardened is the prefix every in-repository call gets: no hooks, no
 // fsmonitor (which executes a configured program), no optional index
-// writes. It does not neutralise the repository's own config otherwise;
-// that residual is the operator's opt-in (docs/THREAT-MODEL.md).
+// writes, and the program- and credential-bearing keys pinned to inert
+// values (`-c` is read after the repository's config, so it wins for
+// every last-one-wins key; the first-match core.gitProxy is pinned in
+// inRepoEnv instead).
+//
+// These are the second line. The first is CheckRepoConfig, which refuses
+// a repository whose own config sets any such key (or a filter driver,
+// an include, a URL rewrite, a worktree elsewhere) before git runs:
+// command-line overrides cannot reach a filter driver by an arbitrary
+// name.
 func (r Runner) hardened(args ...string) []string {
 	return append([]string{
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "core.fsmonitor=false",
+		"-c", "core.sshCommand=ssh",
+		"-c", "credential.helper=",
+		"-c", "core.gitProxy=",
 		"--no-optional-locks",
 	}, args...)
+}
+
+// inRepoEnv is env for a call that runs inside the knowledge base: the
+// user's global config is not read either (only the repository's own,
+// which CheckRepoConfig has vetted, applies), and the ssh and proxy
+// commands are pinned through the environment, which git consults before
+// any config file.
+func (r Runner) inRepoEnv() []string {
+	return append(r.env(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_SSH_COMMAND=ssh",
+		"GIT_PROXY_COMMAND=",
+	)
 }
 
 // Clean reports whether the working tree has no uncommitted changes to
@@ -121,12 +148,19 @@ func (r Runner) hardened(args ...string) []string {
 // Untracked files do not count: a fast-forward refuses to overwrite one
 // anyway, and a scratch file in a knowledge base must not block updates
 // forever.
+//
+// It refuses (ErrUnsafeConfig) a repository whose own config could make
+// the status run a program, before git runs. Submodules are not entered:
+// their configuration is not vetted, and a pull does not touch them.
 func (r Runner) Clean(ctx context.Context, root string) (bool, error) {
+	if err := CheckRepoConfig(root); err != nil {
+		return false, fmt.Errorf("git status: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, r.PullTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, r.Git, r.hardened("status", "--porcelain", "--untracked-files=no")...) //nolint:gosec // G204: fixed argv, no shell; nothing configurable.
+	cmd := exec.CommandContext(ctx, r.Git, r.hardened("status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all")...) //nolint:gosec // G204: fixed argv, no shell; nothing configurable.
 	cmd.Dir = root
-	cmd.Env = r.env()
+	cmd.Env = r.inRepoEnv()
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {
@@ -139,6 +173,10 @@ func (r Runner) Clean(ctx context.Context, root string) (bool, error) {
 // does nothing else: never a merge commit, a rebase, a stash, a checkout
 // or a reset. A branch that cannot fast-forward returns ErrNotFastForward
 // and leaves the working tree as it was.
+//
+// Like Clean, it refuses a repository whose own config could make git run
+// a program or go somewhere else (ErrUnsafeConfig) before git runs, and it
+// does not recurse into submodules, whose configuration is not vetted.
 func (r Runner) PullFFOnly(ctx context.Context, root, remote, branch string) error {
 	// git pull forwards remote and branch to fetch without a `--`, so a
 	// name starting with `-` would be an option there. Upstream refuses
@@ -149,11 +187,14 @@ func (r Runner) PullFFOnly(ctx context.Context, root, remote, branch string) err
 	if err := CheckName(branch); err != nil {
 		return fmt.Errorf("git pull: branch: %w", err)
 	}
+	if err := CheckRepoConfig(root); err != nil {
+		return fmt.Errorf("git pull: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, r.PullTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, r.Git, r.hardened("pull", "--ff-only", "--no-rebase", "--no-edit", "--", remote, branch)...) //nolint:gosec // G204: fixed argv, no shell; remote and branch pass CheckName (no leading "-"), read from the repo's own config.
+	cmd := exec.CommandContext(ctx, r.Git, r.hardened("pull", "--ff-only", "--no-rebase", "--no-edit", "--no-recurse-submodules", "--", remote, branch)...) //nolint:gosec // G204: fixed argv, no shell; remote and branch pass CheckName (no leading "-"), read from the repo's own config.
 	cmd.Dir = root
-	cmd.Env = r.env()
+	cmd.Env = r.inRepoEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

@@ -487,7 +487,7 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id is required")
 		return
 	}
-	ref, err := s.reg.Show(req.Collection, req.ID)
+	ref, err := s.reg.ShowContext(r.Context(), req.Collection, req.ID)
 	if err != nil {
 		switch {
 		case errors.Is(err, kb.ErrNotFound):
@@ -516,7 +516,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	refs, err := s.reg.Pages(req.Collection)
+	refs, err := s.reg.PagesContext(r.Context(), req.Collection)
 	if err != nil {
 		if errors.Is(err, collections.ErrUnknownCollection) {
 			writeError(w, http.StatusBadRequest, err.Error())
