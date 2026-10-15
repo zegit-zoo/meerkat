@@ -41,14 +41,25 @@ The released artifacts are:
   release independently of whatever updater the binary at its
   `--destination` understands; see [docs/INSTALL.md's "Converging from a
   downstream fork"](INSTALL.md#converging-from-a-downstream-fork)
-- `meerkat_<v>_checksums.txt` (SHA-256, covering every archive and
-  standalone binary above)
+- `meerkat_<v>_source.tar.gz` (the tagged source tree, `git archive`)
+- `meerkat_<v>_checksums.txt` (SHA-256, covering every archive,
+  standalone binary and SBOM in the release)
 - `meerkat_<v>_checksums.txt.sigstore.json` (cosign Sigstore bundle: signature + certificate + Rekor inclusion proof)
-- `*.sbom.json` (SPDX SBOM per archive and per standalone binary)
-- `ghcr.io/zegit-zoo/meerkat:X.Y.Z` / `:X.Y` / `:latest` (multi-arch OCI
-  image, signed + attested. Note these image tags drop the git tag's
-  leading `v` — a `vX.Y.Z` git tag publishes exactly these three
-  aliases — see [docs/CONTAINER.md](CONTAINER.md))
+- `*.sbom.json` (SPDX SBOM per archive, per standalone binary, and
+  `meerkat_<v>_source.sbom.json` for the source archive)
+- a SLSA build-provenance attestation for every file in the checksums
+  file, stored on GitHub, not as a release asset:
+  `gh attestation verify <file> -R zegit-zoo/meerkat`
+- `ghcr.io/zegit-zoo/meerkat:X.Y.Z` / `:X.Y` (multi-arch OCI image,
+  signed + attested), plus `:latest` when the tag is the highest
+  release tag. Note these image tags drop the git tag's leading `v`
+  — see [docs/CONTAINER.md](CONTAINER.md)
+
+The binaries and archives are reproducible: the embedded build date
+and every file timestamp are the tagged commit's, and GoReleaser is
+pinned to an exact version in `release.yml`, so rebuilding a tag at
+its commit with the same GoReleaser and Go versions yields the same
+archive and binary checksums.
 
 > **Note:** the repository is public. Downloading release assets is
 > anonymous — no token or `gh` login required. A token only helps if you

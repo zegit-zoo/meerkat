@@ -12,7 +12,8 @@
 set -euo pipefail
 
 NAME="${GARAGE_CONTAINER:-meerkat-garage}"
-IMAGE="${GARAGE_IMAGE:-dxflrs/garage:v2.4.1}"
+# Pinned by digest so a re-pushed tag cannot change the conformance target.
+IMAGE="${GARAGE_IMAGE:-dxflrs/garage:v2.4.1@sha256:9c96caa2612d3411acc5b0e6701fb238dbfba33e533a6d7d3d811a4b12d0d020}"
 PORT="${GARAGE_PORT:-3900}"
 BUCKET="${GARAGE_BUCKET:-meerkat-conformance}"
 KEY="${GARAGE_KEY:-meerkat-ci}"
