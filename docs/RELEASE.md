@@ -27,8 +27,15 @@ exact tagged SHA before anything is published.
    git push origin v1.2.3
    ```
 
-3. The `release.yml` workflow triggers on the tag push, running two jobs
-   in parallel once `verify` passes:
+   Only Markus and Jonas can create `v*` tags (see
+   [Tag protection](#tag-protection)).
+
+3. The `release.yml` workflow triggers on the tag push. `verify` runs
+   first; `goreleaser` and `docker` then each wait for approval in the
+   `release` environment. The approval must come from the other release
+   manager: the environment prevents self-review, so whoever pushed the
+   tag cannot approve its release. Once approved, the two run in
+   parallel. The jobs:
    - **`verify` job** — first fails unless the tagged commit is an ancestor of `origin/master`, then re-runs the full gate (lint + test + vuln + gosec + gitleaks) on the exact tagged SHA.
    - **`goreleaser` job** (runs only after `verify` passes) — builds cross-platform binaries (darwin/linux/windows, amd64/arm64), creates archives and a checksums file, generates SPDX SBOMs via syft, signs the checksums file with cosign (keyless, GitHub OIDC), and publishes a GitHub Release with all artifacts attached.
    - **`docker` job** (runs only after `verify` passes, in parallel with `goreleaser`) — builds the hardened multi-stage [`Dockerfile`](../Dockerfile) for `linux/amd64` + `linux/arm64` via QEMU + buildx, pushes the manifest list to `ghcr.io/zegit-zoo/meerkat`, signs it with cosign (keyless, GitHub OIDC), and attaches a Syft SBOM + SLSA provenance attestation via buildx's native `--sbom`/`--provenance`. See [docs/CONTAINER.md](CONTAINER.md).
@@ -123,15 +130,17 @@ landing fast.
   commit GitHub signed on creation (API commits and PR merges)
 - name must match `vX.Y.Z` exactly
 - no deletion, no moving a tag once pushed
+- creation is restricted: only Markus and Jonas can create a `v*` tag
+  (the ruleset's bypass list holds the two human release managers, no
+  apps or bots)
 
-The ruleset has no `creation` rule, so anyone with write access, an app
-installation with `contents: write` included, can create a `v*` tag.
-What stops a tag on an unmerged commit from becoming a release is the
-`verify` job's first step: it fails unless the tagged commit is on
-`master`, and nothing is built or signed before `verify` passes. Release
-tags are still signed by convention (`git tag -s`), but no rule enforces
-it. Restricting tag creation to a human release manager is tracked
-privately.
+A tag on an unmerged commit still cannot become a release: the `verify`
+job's first step fails unless the tagged commit is on `master`, and
+nothing is built or signed before `verify` passes. The publishing jobs
+(`goreleaser`, `docker`) run in the `release` environment, which requires
+approval from Markus or Jonas, excluding whoever pushed the tag, and only
+deploys `vX.Y.Z` tags. Release tags are still signed by convention
+(`git tag -s`), but no rule enforces it.
 
 The name pattern is load-bearing, not cosmetic: `CertIdentityRegexp` in
 `internal/update/cosign.go` is anchored to
