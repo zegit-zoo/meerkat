@@ -1,9 +1,10 @@
 name: Release
-# Runner routing: the org variable CI_RUNNER selects the self-hosted ARC pool and,
-# because that pool sets ACTIONS_RUNNER_REQUIRE_JOB_CONTAINER, the job container too.
-# Unset (the default) means GitHub-hosted with no container. CI_IMAGE optionally
-# overrides the image. Jobs left on a literal ubuntu-latest are held back on purpose
-# (docker, services:, chromium, gh CLI, GitHub Pages) -- see flux-config ADR 0011 R9.
+# Runner routing: every job here runs on a literal GitHub-hosted ubuntu-latest with no
+# container, on purpose. Unlike ci.yml, this workflow ignores the org variables
+# CI_RUNNER and CI_IMAGE: goreleaser and docker hold id-token: write, and mk update
+# and the Homebrew tap accept any signature from release.yml@refs/tags/v*, so a
+# variable change must not be able to move signing onto the shared self-hosted pool
+# or into a container pulled from a third-party registry (meerkat-mob#59).
 
 
 on:
@@ -19,8 +20,7 @@ permissions:
 jobs:
   verify:
     name: Full gate
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    container: ${{ vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2') || '' }}
+    runs-on: ubuntu-latest
     # Lint/test/scan only — never pushes, tags, or signs. No id-token needed.
     permissions:
       contents: read
@@ -77,8 +77,7 @@ jobs:
   goreleaser:
     name: GoReleaser
     needs: verify
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
-    container: ${{ vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2') || '' }}
+    runs-on: ubuntu-latest
     # Only this job creates the GitHub Release and mints the cosign
     # OIDC token — both are scoped here, not at the workflow level.
     permissions:
