@@ -581,13 +581,31 @@ retrieval") because the most valuable signal in the design is an agent
 that gave up on meerkat and did base research.
 
 Three sinks, each independently configured and each named in the
-response (`{recorded, logged, intake, intake_id?}`):
+response (`{recorded, logged, log, intake, intake_id?}`):
 
 | Sink | Configured by | Carries |
 |---|---|---|
 | telemetry (always) | — | `meerkat.outcome.report` span with `result`, `fallback` (kinds), `pages`, `hops`, `tier_reached`, `has_quality`; `meerkat_retrieval_outcomes_total{outcome,fallback,recorded}` |
 | traversal log | `observability.traversal_log` | one object per report: HMAC-hashed session, page IDs and collection names; path shape (tree depths); quality scores; fallback kind; hashed fallback sources and intake reference; **the initial query, fallback summary and sources, quality notes and intake reference in plaintext only with `query: plaintext`** |
 | intake store | `intake:` + the `intake-write` capability | the fallback summary as a raw page: `type: research-raw`, `status: unverified`, `source: agent-fallback`, with the question and the attempted path in its frontmatter |
+
+A report reaches the traversal log only when the gate admits it
+(meerkat-mob#45). The `log` field gives the verdict:
+
+- `written`: logged.
+- `not_permitted`: the caller was admitted anonymously under a policy.
+  There is no principal to account the write to, so the report counts in
+  telemetry and goes no further. This mirrors intake's `not_permitted`.
+  A process with no policy (stdio, or no `auth:` block) is the trusted
+  local shape and is logged.
+- `duplicate`: the retrieval session was already reported. Only a
+  session's first report is logged, and a report that closes a live
+  session is always the first. A reported key is remembered for an hour.
+- `rate_limited`: the caller's principal is out of tokens: a burst of 20,
+  then one per 30 s (`OutcomeOptions.Reports`). On a hosted server with
+  no `auth:` block every caller is the one anonymous principal, so they
+  all share a single bucket.
+- `not_configured`: there is no traversal log.
 
 The disclosure rule holds exactly as before: the span and the metric
 labels carry closed-set values and counts. The disclosure test
