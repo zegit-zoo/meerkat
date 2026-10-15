@@ -207,7 +207,8 @@ Two consequences worth stating:
   by sitting on its ID — the overlay only shadows a content page for the
   viewers who can actually see the overlay entry.
 - **The namespace is already a sufficient owner key.** It is
-  `sha256(issuer + "\x00" + subject)`, so two issuers minting the same
+  a slug of the subject plus `sha256(issuer + "\x00" + subject)[:16]`
+  (64 bits), so two issuers minting the same
   `sub` are two owners, and an email or group change moves nothing. The
   read side inherits all of that for free rather than re-deriving it.
 

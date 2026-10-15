@@ -168,8 +168,11 @@ package or subsystem (e.g. `feat(ingest): ...`).
 
 The default branch is `master`. It was renamed from `main` on
 2026-09-28; GitHub redirects the old name, and CI runs on pushes to
-either. Nothing is pushed to it directly: every change arrives through
-a pull request.
+either. By convention nothing is pushed to it directly and every change
+arrives through a pull request. That is practice, not enforcement: the
+`master` ruleset (see "Branch and tag protection") requires signed
+commits and blocks force-pushes and deletion, but it requires neither a
+pull request nor a review, so a maintainer's direct push would land.
 
 Write access to this repo is limited to the maintainers (the org's
 default member permission is read). If you're not a maintainer, you
@@ -187,13 +190,14 @@ not a landing spot for outside work.
 5. If you changed CLI commands, run `make docs` and commit the updated
    `docs/CLI.md`.
 6. If you changed dependencies, run `go mod tidy` and commit the result.
-7. Push to your fork and open a PR against `zegit-zoo/meerkat:main`. Use
+7. Push to your fork and open a PR against `zegit-zoo/meerkat:master`. Use
    Conventional Commits for your commit messages (see above) —
    squash-worthy commit history helps but isn't required; the PR
    title/commits feed the changelog.
 
 CI must pass (lint, test+coverage, vuln, gosec, gitleaks, markdown lint,
-object-store conformance) before a PR is merged.
+object-store conformance) before a PR is merged. Maintainers hold to
+that by hand: no required status check enforces it yet.
 
 ## Branch and tag protection
 
