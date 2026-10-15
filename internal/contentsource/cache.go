@@ -47,6 +47,11 @@ type CacheSpec struct {
 	// FlushInterval is how often temperatures are written to the
 	// traversal log; default 5m; needs the traversal log.
 	FlushInterval time.Duration `yaml:"flush_interval,omitempty"`
+	// KeepVersions is how many versions of one object-store location
+	// the on-disk content cache keeps, newest first, after a new one is
+	// installed; default DefaultKeepVersions, minimum 1. Applies to
+	// every deployment form, not only tree:.
+	KeepVersions int `yaml:"keep_versions,omitempty"`
 }
 
 // Defaults.
@@ -91,6 +96,12 @@ func (c *CacheSpec) Validate(label string) error {
 	}
 	if c.FlushInterval == 0 {
 		c.FlushInterval = DefaultFlushInterval
+	}
+	if c.KeepVersions < 0 {
+		return fmt.Errorf("%s.keep_versions must be >= 1 (0 means the default, %d)", label, DefaultKeepVersions)
+	}
+	if c.KeepVersions == 0 {
+		c.KeepVersions = DefaultKeepVersions
 	}
 	return nil
 }

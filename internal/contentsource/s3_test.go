@@ -106,11 +106,11 @@ func useFakeS3(t *testing.T, f *fakeS3) {
 }
 
 func s3Bundle() Source {
-	return Source{Type: TypeS3, Bucket: "b", Object: "kb.tar.gz", Endpoint: "http://127.0.0.1:3900", Region: "garage", PathStyle: true, Layout: defaultLayout()}
+	return Source{Type: TypeS3, Bucket: "b", Object: "kb.tar.gz", Endpoint: "http://127.0.0.1:3900", Insecure: true, Region: "garage", PathStyle: true, Layout: defaultLayout()}
 }
 
 func s3Prefix() Source {
-	return Source{Type: TypeS3, Bucket: "b", Prefix: "kb/live/", Endpoint: "http://127.0.0.1:3900", Region: "garage", PathStyle: true, Layout: defaultLayout()}
+	return Source{Type: TypeS3, Bucket: "b", Prefix: "kb/live/", Endpoint: "http://127.0.0.1:3900", Insecure: true, Region: "garage", PathStyle: true, Layout: defaultLayout()}
 }
 
 func TestFetchS3_BundleIsKeyedByETagAndReadWithIfMatch(t *testing.T) {
@@ -349,6 +349,8 @@ func TestValidateS3(t *testing.T) {
 		{"neither mode", func(s *Source) { s.Prefix = "" }, "needs either object:"},
 		{"both modes", func(s *Source) { s.Object = "o" }, "not both"},
 		{"bare endpoint", func(s *Source) { s.Endpoint = "s3.example.net" }, "endpoint must be an http(s):// URL"},
+		{"http endpoint without insecure", func(s *Source) { s.Insecure = false }, "plaintext http"},
+		{"https endpoint", func(s *Source) { s.Endpoint = "https://s3.example.net"; s.Insecure = false }, ""},
 		{"etag on prefix", func(s *Source) { s.ETag = "abc" }, "etag pins one bundle object"},
 		{"etag with whitespace", func(s *Source) { s.Prefix = ""; s.Object = "o"; s.ETag = "a b" }, "bare ETag"},
 		{"generation on s3", func(s *Source) { s.Generation = 7 }, "generation is a GCS object generation"},

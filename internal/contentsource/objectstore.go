@@ -187,6 +187,18 @@ func storeCacheDir(src Source, kind storeKind, version string) (string, error) {
 	return filepath.Join(base, "meerkat", "content", kind.scheme, hex.EncodeToString(sum[:])[:32], safeVersionSegment(version)), nil
 }
 
+// pinKeySuffix folds a configured sha256 pin into an object-store cache
+// key, so an entry cached before the pin was added (or under a different
+// pin) is never a cache hit for the pinned source: the first fetch under
+// the pin downloads and verifies the bytes. Unpinned sources keep the
+// key, and the cache entry, they always had.
+func pinKeySuffix(src Source) string {
+	if src.SHA256 == "" {
+		return ""
+	}
+	return "\x00sha256=" + strings.ToLower(src.SHA256)
+}
+
 // safeVersionSegment returns version unchanged when it is a plain
 // [A-Za-z0-9._-] token (a generation, a hex fingerprint, an ETag), and
 // a hash of it otherwise.
@@ -282,6 +294,7 @@ func fetchBundle(ctx context.Context, client objectStore, src Source, kind store
 	if err != nil {
 		return "", "", err
 	}
+	pruneCacheVersions(cacheDir, cacheKeepVersions)
 	return cacheDir, version, nil
 }
 
@@ -323,6 +336,7 @@ func fetchPrefixTree(ctx context.Context, client objectStore, src Source, kind s
 	}
 	span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
 	span.End()
+	pruneCacheVersions(cacheDir, cacheKeepVersions)
 	return cacheDir, version, nil
 }
 
@@ -580,6 +594,12 @@ func downloadStoreToTemp(ctx context.Context, client objectStore, kind storeKind
 // visible at the cache path, and never be treated as a cache hit if it
 // somehow is (see completionMarker / isCacheComplete).
 //
+// A cache directory that is already complete is never removed or
+// replaced: another process (a CLI beside a server, a replica sharing
+// the volume) may have filled it first and be serving it through an
+// open os.Root, so the staging copy is discarded instead. See
+// installCacheDir.
+//
 // marker is written into the completion marker file as a human-readable
 // record of what the entry holds.
 func populateCacheDir(cacheDir, marker string, fill func(tmpDir string) error) error {
@@ -587,15 +607,19 @@ func populateCacheDir(cacheDir, marker string, fill func(tmpDir string) error) e
 	if err := os.MkdirAll(cacheParent, 0o750); err != nil {
 		return fmt.Errorf("create cache parent dir: %w", err)
 	}
+	cleanStaleStaging(cacheParent)
+	if isCacheComplete(cacheDir) {
+		return nil
+	}
 	// A sibling of cacheDir, not os.TempDir(): the final step is an
 	// os.Rename, which is only atomic within one filesystem.
-	tmpDir, err := os.MkdirTemp(cacheParent, ".fetch-*")
+	tmpDir, err := os.MkdirTemp(cacheParent, stagingPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("create staging dir: %w", err)
 	}
-	succeeded := false
+	installed := false
 	defer func() {
-		if !succeeded {
+		if !installed {
 			_ = os.RemoveAll(tmpDir)
 		}
 	}()
@@ -608,13 +632,6 @@ func populateCacheDir(cacheDir, marker string, fill func(tmpDir string) error) e
 	if err := os.WriteFile(filepath.Join(tmpDir, completionMarker), []byte(marker+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write completion marker: %w", err)
 	}
-	// Best-effort cleanup of any earlier incomplete attempt at this exact
-	// path (never a cache hit — see isCacheComplete) so Rename can't fail
-	// on an existing non-empty directory.
-	_ = os.RemoveAll(cacheDir)
-	if err := os.Rename(tmpDir, cacheDir); err != nil {
-		return fmt.Errorf("finalize cache dir: %w", err)
-	}
-	succeeded = true
-	return nil
+	installed, err = installCacheDir(tmpDir, cacheDir)
+	return err
 }

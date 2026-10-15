@@ -63,7 +63,7 @@ var gcsKind = storeKind{
 		if src.Object == "" {
 			mode, target = "prefix", src.Prefix
 		}
-		return src.Bucket + "\x00" + mode + "\x00" + target
+		return src.Bucket + "\x00" + mode + "\x00" + target + pinKeySuffix(src)
 	},
 	fingerprintSize: false,
 	validate:        func(src Source, p string) error { return src.validateGCS(p) },

@@ -194,9 +194,12 @@ copying — usable as a CI lint on `content-source.yaml`.
   `mk version` and, because content is embedded, it is covered by the
   cosign-keyless signature on the release — a consumer can tie a binary to the
   exact content commit it was built from.
-- **Cache trust:** the git cache dir is user-owned; the tool checks out the
-  exact pinned ref and records the resolved SHA (so a mutated cache is
-  detectable via the stamp).
+- **Cache trust:** the git cache dir is user-owned (under the user cache
+  directory; with no HOME/XDG_CACHE_HOME the sync fails rather than
+  falling back to a shared temp directory); the tool checks out the exact
+  pinned ref and records the resolved SHA (so a mutated cache is
+  detectable via the stamp). The clone URL is passed after `--`, so it is
+  never parsed as a git option.
 
 ## Migration
 

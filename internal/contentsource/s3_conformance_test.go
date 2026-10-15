@@ -91,7 +91,7 @@ func (e conformanceEnv) put(t *testing.T, key string, body []byte) string {
 }
 
 func (e conformanceEnv) source(prefix string) Source {
-	return Source{Type: TypeS3, Bucket: e.bucket, Endpoint: e.cfg.Endpoint, Region: e.cfg.Region, PathStyle: e.cfg.PathStyle, Layout: defaultLayout()}
+	return Source{Type: TypeS3, Bucket: e.bucket, Endpoint: e.cfg.Endpoint, Insecure: strings.HasPrefix(e.cfg.Endpoint, "http://"), Region: e.cfg.Region, PathStyle: e.cfg.PathStyle, Layout: defaultLayout()}
 }
 
 func isolateCache(t *testing.T) {
