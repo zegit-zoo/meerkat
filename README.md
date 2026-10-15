@@ -229,7 +229,7 @@ Restart OpenCode. Five tools become available to the agent, plus
 | `mk_show` | `id`, `collection?`, `session_id?` | `{id, title, body, front, trust_tier, stale}` (parsed frontmatter, plus two OKF-derived advisory signals — see [docs/OKF.md](docs/OKF.md#trust-and-lifecycle)) |
 | `mk_list` | `prefix?`, `category?`, `status?`, `owner?`, `type?`, `collection?` | `[{id, title, category, status, owner, type, source}]` |
 | `mk_list_collections` | — | `[{name, type, source, pages, capabilities, …}]` — what this caller may read (see [Multiple collections](#multiple-collections)) |
-| `mk_report_outcome` | `outcome`, `initial_query?`, `pages?`, `attempted?`, `quality?`, `fallback?`, `session_id?` | `{recorded, logged, intake_id?}` — see [Reporting outcomes](#reporting-outcomes-mk_report_outcome) |
+| `mk_report_outcome` | `outcome`, `initial_query?`, `pages?`, `attempted?`, `quality?`, `fallback?`, `session_id?` | `{recorded, logged, log, intake, intake_id?}` — see [Reporting outcomes](#reporting-outcomes-mk_report_outcome) |
 | `mk_save_memory` | `scope`, `title`, `content`, `key?`, `tags?`, `version?`, `replace?` | `{status, id, version, location, searchable}` — only when a collection declares a [`memory:`](#memory-mk_save_memory) store |
 
 ## Hosted MCP server (Streamable HTTP + OIDC)
@@ -258,6 +258,14 @@ mounted collection to any caller — the same posture as `mk mcp serve`, just
 over HTTP. Bind loopback (the default) or put a gateway in front. With one
 configured, every collection needs a token unless it is
 [explicitly published](#publishing-a-collection-to-unauthenticated-callers).
+
+**Sessions belong to the caller.** MCP session IDs are minted bound to the
+principal that opened them (the verified `(iss, sub)`), and an ID presented
+by anyone else is answered `404`, as for an unknown session. The same goes for
+the `session_id` tool argument: two callers who pick the same value get two
+separate retrieval sessions. A verified principal may hold 32 open GET
+streams (`429` beyond). See
+[docs/design/hosted-mcp.md](docs/design/hosted-mcp.md#sessions-belong-to-a-principal-meerkat-mob46).
 
 ### Socket activation (systemd)
 
@@ -463,6 +471,10 @@ collections:
       personal_visibility: private   # private (default) | collection
 ```
 
+Two stores may not overlap. Every `memory:` and `intake:` block that names
+the same (bucket, prefix), or a prefix nested inside another's, on the same
+backend and endpoint is refused at load, and so are nested local directories.
+
 With no `memory:` block anywhere the tool is not registered at all, and
 nothing else changes — which is what every configuration written before
 this feature gets.
@@ -545,12 +557,18 @@ export MEERKAT_API_KEY=$(openssl rand -hex 32)
 mk http serve --port 4004
 ```
 
+The key must be at least 16 characters, and a shorter one fails at startup.
+To keep it out of the environment, put it in a file (mode 0600) and pass
+`--api-key-file`. `--api-key` also works, but it warns that the key is
+visible in the process list. `MEERKAT_API_KEY` wins over both flags.
+
 Register `http://127.0.0.1:4004/openapi.json` as a Tool Server in OpenWebUI.
 The search/show/list tools are available as `POST /search`, `POST /show`,
 `POST /list`, and `GET /collections` enumerates what's mounted. `/healthz`,
 `/openapi.json` and `/.well-known/security.txt` (meerkat's security contact;
 `--security-txt=false` turns it off) are exempt from auth; everything else needs the bearer
-token, and the server refuses to start without one. `mk http serve` loads
+token, and the server refuses to start without one. An unauthenticated
+request to a path the server does not serve gets `401`, not `404`. `mk http serve` loads
 its collections once and never runs a `refresh:` block, so `GET /collections`
 reports no refresh status and no freshness. For a server that follows its
 sources, use `mk mcp serve-http`.
@@ -811,7 +829,11 @@ In prefix mode the key is a fingerprint over every listed object's
 `(name, generation)`, so any add, overwrite or delete under the prefix
 invalidates it. Either way a restart on unchanged content is a cache hit;
 overwriting the object publishes new content on the next start, with the
-previous generation's cache entry left intact for a rollback.
+previous generation's cache entry left intact for a rollback. Only the newest
+`cache.keep_versions` (default 2) versions of a location are kept, and older
+ones are pruned when a new version is installed. A configured `sha256:` is
+part of the cache key, so it is checked on a cached version too, not only on
+the first download.
 
 Objects are fetched with a conditional read (an explicit generation **and**
 `ifGenerationMatch`), so the bytes in a cache entry named `<generation>`
@@ -840,6 +862,7 @@ content:
   bucket: my-org-knowledge
   prefix: kb/live/                  # stripped: kb/live/wiki/x.md -> wiki/x.md
   endpoint: https://s3.example.net  # required for anything that is not AWS
+  # insecure: true                  # needed only for an http:// endpoint
   region: garage                    # Garage checks it against its s3_region
   path_style: true                  # Garage/versitygw: <endpoint>/<bucket>/…; not AWS
 ```
@@ -862,6 +885,11 @@ verified before extraction if you set it:
 <user cache dir>/meerkat/content/s3/<hash(endpoint,bucket,object)>/<etag>/
 <user cache dir>/meerkat/content/s3/<hash(endpoint,bucket,prefix)>/<listing-fingerprint>/
 ```
+
+An `http://` endpoint is refused at load unless the source sets
+`insecure: true`, because the fetched content would otherwise cross the
+network unauthenticated and in plaintext. Versions are pruned and `sha256:`
+pins are keyed as for `type: gcs`.
 
 In prefix mode the fingerprint covers every listed object's
 `(key, ETag, size)`. Setting `etag:` pins a bundle exactly as
@@ -1170,7 +1198,9 @@ session: one `meerkat.retrieval.session` span parenting the calls, and
 histograms for time to first context, time to first relevant context,
 time to give up, hops, steps and wrong turns, plus quality per tier from
 `mk_report_outcome`. The tree's traversal limits are enforced per
-session with a structured `limit_reached` answer. See
+session with a structured `limit_reached` answer. Sessions are scoped to
+the caller's principal, so another caller's equal `session_id` is a
+different session. See
 [docs/design/observability.md](docs/design/observability.md#retrieval-sessions-and-slis).
 
 ### Reporting outcomes (`mk_report_outcome`)
@@ -1186,7 +1216,16 @@ stored only with `query: plaintext` in that block, which a librarian
 deployment needs. The record is pseudonymous: the operator who holds the
 HMAC key and the access log can join it to the caller. With an
 `intake:` store and the `intake-write` capability a fallback summary
-becomes a draft page for review. See
+becomes a draft page for review.
+
+A report is written to the traversal log only when a gate admits it, and
+the response's `log` field gives the verdict. `written` means it was
+stored. `not_permitted` means the caller was admitted anonymously, so
+there is no principal to account the write to. `duplicate` means the
+session was already reported: only a retrieval session's first report is
+logged. `rate_limited` means the principal's bucket is spent (burst 20,
+then one every 30 s). `not_configured` means there is no traversal log.
+Report once per question, with a fresh `session_id`. See
 [docs/design/observability.md](docs/design/observability.md#retrieval-outcomes-and-the-traversal-log).
 
 ### Lazy mounting and the resident cache (`cache:`)
