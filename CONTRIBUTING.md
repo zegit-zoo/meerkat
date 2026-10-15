@@ -212,8 +212,12 @@ to maintainers too:
   time, not at review time.
 - **No force-push, no branch deletion.** History on `master` is append-only.
 
-Release tags (`v*`) are protected separately: they must be signed, must
-match `vX.Y.Z` exactly, and once pushed can never be deleted or moved.
+Release tags (`v*`) are protected separately: the commit they point at
+must be signed, the name must match `vX.Y.Z` exactly, and once pushed a
+tag can never be deleted or moved. The ruleset does not require the tag
+itself to be signed, and it does not restrict who may create one. The
+release workflow refuses to build a tag whose commit is not on `master`
+(see [docs/RELEASE.md](docs/RELEASE.md#tag-protection)).
 
 That last rule is not bureaucracy. The release workflow signs whatever a
 `v*.*.*` tag points at, using the repository's own OIDC identity, and

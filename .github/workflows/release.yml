@@ -31,6 +31,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A release is only ever cut from master. The tag ruleset checks the
+      # target commit's signature, and GitHub signs any commit made through
+      # the API or a PR merge, so a tag on an unmerged branch commit would
+      # otherwise be built and signed as release.yml@refs/tags/vX.Y.Z
+      # (meerkat-mob#36). goreleaser and docker both `needs: verify`, so
+      # failing here publishes nothing.
+      - name: Tag commit must be on master
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
+          tag_commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if ! git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/master; then
+            echo "::error::${GITHUB_REF_NAME} points at ${tag_commit}, which is not on master. Releases are cut from master only."
+            exit 1
+          fi
+          echo "${GITHUB_REF_NAME} (${tag_commit}) is on master."
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version-file: go.mod
