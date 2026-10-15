@@ -251,7 +251,7 @@ transport, with concurrent sessions, plus:
 | `/.well-known/oauth-protected-resource` | none | RFC 9728 protected-resource metadata |
 | `/livez` | none | liveness (process only) |
 | `/readyz` | none | readiness — content resolution + per-collection index health |
-| `/metrics` | none | Prometheus |
+| `/metrics` | none | Prometheus (on its own listener with `--metrics-addr host:port`) |
 
 With **no `auth:` block configured** it is unauthenticated and serves every
 mounted collection to any caller — the same posture as `mk mcp serve`, just

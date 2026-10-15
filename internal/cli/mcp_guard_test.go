@@ -88,3 +88,34 @@ func TestServeHTTP_WarnsWhenKBDirSuppressesAuth(t *testing.T) {
 		t.Errorf("no warning about the suppressed auth: block; output %q", out)
 	}
 }
+
+// --metrics-addr moves /metrics off the API port (meerkat-mob#47); a
+// malformed address fails at startup, not after the server is up.
+func TestCheckMetricsAddr(t *testing.T) {
+	for _, tc := range []struct {
+		addr    string
+		wantErr bool
+	}{
+		{"", false},
+		{"127.0.0.1:9090", false},
+		{":9090", false},
+		{"[::1]:9090", false},
+		{"metrics.internal:0", false},
+		{"127.0.0.1", true},
+		{"9090", true},
+		{"127.0.0.1:http", true},
+		{"127.0.0.1:70000", true},
+	} {
+		err := checkMetricsAddr(tc.addr)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("checkMetricsAddr(%q) = %v, wantErr %v", tc.addr, err, tc.wantErr)
+		}
+	}
+}
+
+func TestServeHTTP_HasMetricsAddrFlag(t *testing.T) {
+	f := newMCPServeHTTPCmd().Flags().Lookup("metrics-addr")
+	if f == nil || f.DefValue != "" {
+		t.Fatalf("--metrics-addr = %+v, want a flag defaulting to the API port", f)
+	}
+}
