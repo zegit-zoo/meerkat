@@ -81,6 +81,7 @@ func PersonalVisibilities() []string { return []string{VisibilityPrivate, Visibi
 //	  region: garage
 //	  path_style: true                   # Garage / versitygw; not AWS
 //	  sse: AES256                        # optional; SSE-S3 on AWS
+//	  # insecure: true                   # only for an http:// endpoint
 //
 // Absent, the collection is read-only and mk_save_memory refuses to
 // name it — which is what every pre-existing configuration gets.
@@ -111,6 +112,13 @@ type Spec struct {
 	Region    string `yaml:"region,omitempty"`
 	PathStyle bool   `yaml:"path_style,omitempty"`
 	SSE       string `yaml:"sse,omitempty"`
+	// Insecure accepts a plaintext http:// Endpoint (type: s3 only).
+	// Without it an http:// endpoint is refused at load: over plaintext
+	// the signed requests, the memories and the ETags the store's
+	// preconditions compare are all visible to, and changeable by, the
+	// network path (meerkat-mob#51). The same rule as a type: s3
+	// content source.
+	Insecure bool `yaml:"insecure,omitempty"`
 
 	// SingleWriter (type: s3 only) asserts that exactly one meerkat
 	// process writes this store, and makes the store enforce its
@@ -201,8 +209,8 @@ func (s *Spec) Validate(label string, contentIsEphemeral bool) error {
 		if s.Bucket != "" || s.Prefix != "" {
 			return fmt.Errorf("%s: bucket/prefix apply to type: %s or %s, not type: %s", label, BackendGCS, BackendS3, BackendLocal)
 		}
-		if s.Endpoint != "" || s.Region != "" || s.PathStyle || s.SSE != "" || s.SingleWriter {
-			return fmt.Errorf("%s: endpoint/region/path_style/sse/single_writer apply to type: %s, not type: %s", label, BackendS3, BackendLocal)
+		if s.Endpoint != "" || s.Region != "" || s.PathStyle || s.SSE != "" || s.SingleWriter || s.Insecure {
+			return fmt.Errorf("%s: endpoint/region/path_style/sse/single_writer/insecure apply to type: %s, not type: %s", label, BackendS3, BackendLocal)
 		}
 		if contentIsEphemeral && !filepath.IsAbs(s.Path) {
 			return fmt.Errorf("%s.path must be absolute for a cache-backed content source: "+
@@ -222,8 +230,8 @@ func (s *Spec) Validate(label string, contentIsEphemeral bool) error {
 		if s.Path != "" {
 			return fmt.Errorf("%s: path applies to type: %s, not type: %s", label, BackendLocal, BackendGCS)
 		}
-		if s.Endpoint != "" || s.Region != "" || s.PathStyle || s.SSE != "" || s.SingleWriter {
-			return fmt.Errorf("%s: endpoint/region/path_style/sse/single_writer apply to type: %s, not type: %s", label, BackendS3, BackendGCS)
+		if s.Endpoint != "" || s.Region != "" || s.PathStyle || s.SSE != "" || s.SingleWriter || s.Insecure {
+			return fmt.Errorf("%s: endpoint/region/path_style/sse/single_writer/insecure apply to type: %s, not type: %s", label, BackendS3, BackendGCS)
 		}
 	case BackendS3:
 		if s.Bucket == "" {
@@ -240,6 +248,9 @@ func (s *Spec) Validate(label string, contentIsEphemeral bool) error {
 		}
 		if s.Endpoint != "" && !strings.HasPrefix(s.Endpoint, "https://") && !strings.HasPrefix(s.Endpoint, "http://") {
 			return fmt.Errorf("%s.endpoint must be an http(s):// URL, got %q", label, s.Endpoint)
+		}
+		if strings.HasPrefix(s.Endpoint, "http://") && !s.Insecure {
+			return fmt.Errorf("%s.endpoint %q is plaintext http; use https, or set insecure: true to accept an unencrypted connection (a local test store, a trusted private network)", label, s.Endpoint)
 		}
 		switch s.SSE {
 		case "", "AES256", "aws:kms":

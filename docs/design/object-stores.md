@@ -71,7 +71,10 @@ at load unless the source also sets `insecure: true` — for a local test
 store or a trusted private network — because over plaintext the signed
 requests (access key ID, session token), the content and the ETags
 meerkat compares are all visible to, and changeable by, the network
-path. This is the same rule `observability:` applies to its collector.
+path. This is the same rule `observability:` applies to its collector,
+and a `type: s3` `memory:` or `intake:` store follows it too: there the
+plaintext path would also carry every memory written and the ETags its
+optimistic-locking preconditions compare (meerkat-mob#51).
 
 ## The on-disk cache
 
