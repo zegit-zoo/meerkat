@@ -154,8 +154,8 @@ present on the other.
 | collections visible | all | the caller's — including, since #36, the ones explicitly published to callers with no token |
 
 Defaults: `/mcp` on `127.0.0.1:4005`, stateless session IDs (any
-well-formed ID bound to the caller is accepted, so replicas need no
-sticky routing — `--stateful` opts into in-process session state), a 30s SSE heartbeat so
+well-formed ID is accepted, so replicas need no sticky routing —
+`--stateful` opts into in-process session state), a 30s SSE heartbeat so
 proxies don't reap idle streams, and a 30m idle sweep so a client that
 vanishes without a DELETE doesn't leak session state.
 
@@ -163,51 +163,26 @@ vanishes without a DELETE doesn't leak session state.
 long-lived SSE stream, and a write deadline would sever it mid-session;
 per-request work is bounded by the query timeout instead.
 
-### Sessions belong to a principal (meerkat-mob#46)
+The MCP endpoint bounds what a request can cost before the transport
+sees it (meerkat-mob#41), outside the authentication gate:
 
-Two identifiers name a session, and the caller supplies both: the
-`session_id` tool argument (retrieval sessions, their traversal limits,
-freshness advisories) and the MCP session ID (`Mcp-Session-Id`, the
-transport's per-session state and GET stream). Neither may reach
-another principal's state.
-
-- **The principal** is `memory.Namespace(identity)`, the hash of the
-  verified `(iss, sub)` that also owns personal memories. Every caller
-  with no subject (`anonymous:` callers, all callers behind
-  `allow_unauthenticated`, and all callers of a deployment without
-  auth) is one anonymous principal.
-- **Tool-level keys** are `principal + "\x00" + id`. Two principals that
-  pick the same `session_id` get two sessions: neither can spend the
-  other's limits, end it with `mk_report_outcome`, suppress its
-  advisories or parent spans under it.
-- **MCP session IDs are minted bound to the principal**:
-  `mcp-session-<nonce>.<tag>`, where the tag is a hash of the principal
-  and the nonce. A request presenting an ID whose tag does not match its
-  own principal is answered `404`, the answer for an unknown session, on
-  POST, GET and DELETE, in both modes. The check needs no secret and no
-  shared state, because it is made against the principal of the
-  presenting request, which comes from a verified token. Stateless
-  replicas therefore still need no sticky routing. `--stateful`
-  additionally answers `404` for any ID this process did not issue.
-- **Caps.** A verified principal may hold 32 open GET streams (`429`
-  beyond) and, in stateful mode, 32 issued IDs. The process holds at
-  most 10,000 IDs, and past either cap the oldest ID is evicted. The
-  retrieval tracker holds at most 64 live sessions per verified
-  principal and 10,000 overall. When a cap is reached the least recently
-  used session goes, the principal's own first, and ends as an idle one
-  would.
-- **The anonymous principal has the overall caps only.** It stands for
-  any number of clients, so a per-principal cap on it would be a
-  deployment-wide cap on every server without auth, and its clients
-  would evict one another. Its stateful IDs and retrieval sessions count
-  against the 10,000 overall caps. Its GET streams are not held to the
-  32-stream cap; the endpoint's overall bound on in-flight work and open
-  streams (meerkat-mob#41) applies to them as to every caller.
-- **Ending a stream ends its retrieval session.** The transport session
-  behind a GET stream is recorded with its principal when it is
-  registered, and when it is unregistered (the client went away, or
-  mcp-go's idle sweeper reclaimed it) the retrieval session keyed by
-  that MCP session ID is ended as a timeout under that principal.
+- **Body cap**, `HostedConfig.MaxRequestBytes`, 4 MiB by default — far
+  above the largest legitimate call (a 256 KiB memory save, escaped, in a
+  JSON-RPC envelope). A body that declares a larger `Content-Length` is
+  answered `413` before any of it is read; one of undeclared length is
+  read up to the cap and answered `413` at the first byte past it. It is
+  read only after the authentication gate has admitted the caller, so an
+  unauthenticated request's body is never buffered. The cap cannot be
+  turned off.
+- **In-flight caps**, `MaxConcurrentRequests` (128) for POST, DELETE and
+  the rest, and `MaxConcurrentStreams` (512) for GET SSE streams. They
+  are separate pools because a stream holds its slot for a whole session.
+  A request that finds its pool full gets `503` with `Retry-After: 1`
+  at once rather than a queue. A negative value removes a cap. The caps
+  are the outermost layer: a request takes its slot before the body cap,
+  the gate or the transport do any work, so every body buffer is
+  counted. Both pools are shared by authenticated and unauthenticated
+  callers; they bound the server's total cost, not each caller's share.
 
 DNS-rebinding protection (mcp-go's rejection of loopback requests whose
 `Host` is not a localhost value) stays on. `--trust-proxy-host` disables
@@ -295,7 +270,10 @@ auth:
       audience: api://meerkat          # defaults to auth.resource
       claims:
         groups: groups                 # "roles" for Entra app roles
-        email: preferred_username      # "email" by default
+        # email: leave at the default ("email"). Do NOT map it to
+        # preferred_username: Entra documents that claim as mutable and
+        # unfit for authorization, so an `emails:` rule would trust a value
+        # its owner can change. Select on `subjects:` (the stable oid/sub).
         tenant: tid                    # "tid" by default
       require_tenant: <tenant-id>      # optional; pins a multi-tenant issuer
 
@@ -318,6 +296,21 @@ auth:
       collections: [handbook]
       capabilities: [read]             # the only capability an anonymous rule may hold
 ```
+
+**With more than one provider**, a rule that selects on `subjects`,
+`emails` or `groups` must carry `issuer:` — validation refuses it
+otherwise, because a group name or email asserted by one identity
+provider is no evidence about another's (for Google, pin the directory
+with `claims.tenant: hd` plus `require_tenant`). An `emails:` rule never
+matches a token whose `email_verified` claim is present and not true, and
+`claims.email` should stay `email`: `preferred_username` (Entra) is
+mutable and unfit for authorization, so meerkat logs a warning if it is
+configured — select on `subjects:` (the stable `oid`/`sub`) instead.
+`skip_issuer_check` requires `require_tenant` and logs a warning at
+startup. Optional per-provider `token_type: access` (JWT `typ` of
+`at+jwt`, or an `scp`/`roles` claim) and `allowed_azp: [...]` (the
+token's `azp`/`appid`) stop an ID token issued to another application of
+a shared registration being used as an API token.
 
 **Selectors** are `subjects` (exact), `emails` (case-insensitive),
 `groups` (any-of, case-insensitive), `tenant`, `issuer` and `anonymous`.
@@ -553,7 +546,9 @@ bounded by making them say nothing worth having:
   ID, a query or a caller subject as a label.** The `route` label is the
   server's own matched mux pattern from a closed set, never `r.URL.Path`
   — so a scanner probing `/wp-admin` collapses to `route="other"` instead
-  of adding a time series. Since #28 the same rule excludes a *source
+  of adding a time series. The `method` label is closed the same way:
+  Go accepts any token as a method, so anything outside the seven methods
+  a client has reason to send is `method="other"` (meerkat-mob#47). Since #28 the same rule excludes a *source
   generation or fingerprint*, for a second reason: it increments forever,
   so one series per publication would be an unbounded cardinality leak.
   The refresh series are keyed by the collection's configuration ordinal
@@ -598,7 +593,7 @@ current, and then the ordinary not-ready path produces the 503. See
 ### Metrics
 
 ```text
-meerkat_http_requests_total{route,method,status}
+meerkat_http_requests_total{route,method,status}   # method: GET|POST|DELETE|HEAD|OPTIONS|PUT|PATCH|other
 meerkat_http_request_duration_seconds{route,method}
 meerkat_auth_failures_total{reason}          # missing_token | invalid_token | no_grants
 meerkat_auth_anonymous_total                 # admitted without a token (#36); no labels
@@ -695,10 +690,10 @@ A client that reads the first item keeps working. A client that renders
 every item shows the line. It is sent once per (session, collection,
 state), at most 240 bytes, and never names a commit, path or URL. It only
 covers collections the caller may read. The session is the explicit
-`session_id`, else the MCP session, else one bucket for the caller's
-session-less calls. Every key is scoped to the caller's principal, so
-one principal cannot use up another's advisory by picking the same
-`session_id` (meerkat-mob#46). Only a `type: local` collection
+`session_id`, else the MCP session. Calls with neither share one bucket
+across every caller, so one principal's session-less call can use up
+another's advisory. That costs a missed line, never a disclosure, and a
+caller that wants its own passes `session_id`. Only a `type: local` collection
 with a `refresh:` block has a state at all, so a deployment without one
 never sees a second item. See
 [hot-reload.md](hot-reload.md#part-c-the-surfaces).
@@ -769,6 +764,12 @@ reachable only where it is correct.
   `Grants.Capabilities(name)` and `Grants.Identity()`, and adds a second
   registry view (`Restrict(CanWrite)`) alongside `Restrict(CanRead)`
   rather than widening the read one.
+- **A `--metrics-addr` flag.** `HostedConfig.MetricsAddr` serves
+  `/metrics` on a listener of its own and drops it from the API port
+  (meerkat-mob#47); `mk mcp serve-http` does not expose it yet, so the
+  CLI still serves `/metrics` beside `/mcp`. Likewise the request bounds
+  above (`MaxRequestBytes`, `MaxConcurrentRequests`,
+  `MaxConcurrentStreams`) run at their defaults from the CLI.
 - **OIDC for `mk http serve`.** The OpenWebUI-facing server still takes
   a single static token. `internal/authn.Gate` is transport-agnostic and
   would drop straight in.
