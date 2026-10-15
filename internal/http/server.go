@@ -19,17 +19,22 @@
 // may be written "<collection>:<page-id>").
 //
 // Authentication: a single static bearer token is required on all
-// endpoints except /healthz and /openapi.json. The token is supplied
-// via --api-key flag or MEERKAT_API_KEY env. The server refuses to
-// start with no key configured (no anonymous mode).
+// endpoints except /healthz, /openapi.json and /.well-known/security.txt
+// (and an unknown path is a 401, like any other unauthenticated request,
+// not a 404). The token is supplied via --api-key-file, MEERKAT_API_KEY
+// env or --api-key flag. The server refuses to start with no key
+// configured (no anonymous mode) or with one shorter than
+// MinAPIKeyLength.
 package http
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -42,6 +47,12 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/search"
 	"github.com/zegit-zoo/meerkat/internal/wellknown"
 )
+
+// MinAPIKeyLength is the shortest API key the server accepts. The key is
+// the only credential and there is no throttling, so a short one is a
+// guessing target; 16 characters is the floor, and `openssl rand -hex 32`
+// (64) is what the docs recommend.
+const MinAPIKeyLength = 16
 
 // Config controls how the HTTP server is constructed. Zero values
 // yield safe defaults except APIKey, which is required.
@@ -90,6 +101,9 @@ type Server struct {
 	handler http.Handler // authGate(mux) — see routes/Handler
 	srv     *http.Server
 	reg     *collections.Registry
+
+	// keyDigest is sha256(APIKey), compared in constant time per request.
+	keyDigest [sha256.Size]byte
 }
 
 // New builds a Server with every collection's search index already
@@ -97,7 +111,11 @@ type Server struct {
 // Close to release the indexes when done.
 func New(cfg Config) (*Server, error) {
 	if cfg.APIKey == "" {
-		return nil, errors.New("APIKey is required (set --api-key or MEERKAT_API_KEY)")
+		return nil, errors.New("APIKey is required (set --api-key-file, MEERKAT_API_KEY or --api-key)")
+	}
+	if len(cfg.APIKey) < MinAPIKeyLength {
+		return nil, fmt.Errorf("API key is too short (%d characters, minimum %d): generate one with `openssl rand -hex 32`",
+			len(cfg.APIKey), MinAPIKeyLength)
 	}
 	if cfg.Addr == "" {
 		cfg.Addr = ":4004"
@@ -214,7 +232,11 @@ func (s *Server) routeTable() []route {
 		// Public endpoints — needed by OpenWebUI / health probes.
 		{pattern: "GET /openapi.json", public: true, handler: s.handleOpenAPI},
 		{pattern: "GET /healthz", public: true, handler: s.handleHealthz},
-		{pattern: "GET /", public: true, handler: s.handleRoot},
+		// "{$}" matches the root path only. A bare "GET /" would catch every
+		// GET path and answer it publicly with a 404, so an unauthenticated
+		// probe could tell real routes (401) from nothing; with "{$}" an
+		// unknown GET path matches no pattern and is denied like any POST.
+		{pattern: "GET /{$}", public: true, handler: s.handleRoot},
 	}
 	if !s.cfg.NoSecurityTxt {
 		// Public by definition: RFC 9116's reader has no credentials.
@@ -225,6 +247,7 @@ func (s *Server) routeTable() []route {
 }
 
 func (s *Server) routes() {
+	s.keyDigest = sha256.Sum256([]byte(s.cfg.APIKey))
 	public := make(map[string]bool)
 	for _, rt := range s.routeTable() {
 		s.mux.HandleFunc(rt.pattern, rt.handler)
@@ -250,6 +273,9 @@ func (s *Server) routes() {
 // that would otherwise confirm which paths don't exist.
 func (s *Server) authGate(public map[string]bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Every response, 401s included, is data or an error document;
+		// none should be sniffed into anything else.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		_, pattern := s.mux.Handler(r)
 		if public[pattern] {
 			s.mux.ServeHTTP(w, r)
@@ -280,16 +306,15 @@ const (
 // the caller holds the key (handleOpenAPI).
 func (s *Server) checkKey(r *http.Request) keyState {
 	header := r.Header.Get("Authorization")
+	// The auth scheme is case-insensitive (RFC 7235 §2.1).
 	const prefix = "Bearer "
-	if !strings.HasPrefix(header, prefix) {
+	if len(header) < len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
 		return keyMissing
 	}
-	got := []byte(strings.TrimPrefix(header, prefix))
-	want := []byte(s.cfg.APIKey)
-	// ConstantTimeCompare requires equal lengths to be useful;
-	// it returns 0 for unequal lengths so the check is safe but
-	// also cheaply rejects different lengths early.
-	if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
+	// Compare fixed-length digests, so neither the content nor the length
+	// of the configured key is observable through timing.
+	got := sha256.Sum256([]byte(header[len(prefix):]))
+	if subtle.ConstantTimeCompare(got[:], s.keyDigest[:]) != 1 {
 		return keyWrong
 	}
 	return keyOK
@@ -453,7 +478,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusGatewayTimeout,
 				"search: query exceeded the server's maximum query duration")
 		default:
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("search: %v", err))
+			writeInternalError(w, "search", err)
 		}
 		return
 	}
@@ -501,7 +526,7 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 			// should re-request with.
 			writeError(w, http.StatusConflict, err.Error())
 		default:
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeInternalError(w, "show", err)
 		}
 		return
 	}
@@ -522,7 +547,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeInternalError(w, "list", err)
 		return
 	}
 	keep := func(f kb.FilterFunc) {
@@ -605,10 +630,6 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "meerkat http server (version %s)\n\n", s.cfg.Version)
 	fmt.Fprintln(w, "Endpoints (require Authorization: Bearer <api-key>):")
@@ -643,6 +664,13 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(body)
+}
+
+// writeInternalError answers a 500 with fixed text. The cause (a storage
+// path, a backend error) goes to the server log, not to the caller.
+func writeInternalError(w http.ResponseWriter, op string, err error) {
+	slog.Error("http: request failed", "op", op, "error", err)
+	writeError(w, http.StatusInternalServerError, "internal error")
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

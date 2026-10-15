@@ -38,7 +38,7 @@ func newMultiCollectionServer(t *testing.T) *Server {
 		t.Fatalf("collections.New: %v", err)
 	}
 	s := &Server{
-		cfg: Config{APIKey: "test-key", Version: "test", QueryTimeout: search.DefaultQueryTimeout},
+		cfg: Config{APIKey: "test-key-0123456789", Version: "test", QueryTimeout: search.DefaultQueryTimeout},
 		reg: reg, mux: nethttp.NewServeMux(),
 	}
 	s.routes()
@@ -49,7 +49,7 @@ func newMultiCollectionServer(t *testing.T) *Server {
 func getPath(t *testing.T, srv *Server, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(nethttp.MethodGet, path, nil)
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer test-key-0123456789")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	return rec

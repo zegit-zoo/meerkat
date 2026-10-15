@@ -5,12 +5,21 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
 	mhttp "github.com/zegit-zoo/meerkat/internal/http"
+	"github.com/zegit-zoo/meerkat/internal/wellknown"
 )
+
+func init() {
+	// Both servers publish /.well-known/security.txt; its Expires date is
+	// fixed from the build date the release pipeline stamps into `date`.
+	wellknown.SetBuildDate(date)
+}
 
 func newHTTPCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -28,6 +37,7 @@ func newHTTPServeCmd() *cobra.Command {
 		host        string
 		port        int
 		apiKey      string
+		apiKeyFile  string
 		securityTxt bool
 	)
 	cmd := &cobra.Command{
@@ -54,26 +64,26 @@ freshness. For a server that follows its sources, use
 "mk mcp serve-http".
 
 Authentication: all data endpoints require an Authorization: Bearer
-header carrying the configured API key. The key is supplied via
---api-key or the MEERKAT_API_KEY env var (env wins if both set).
-The server refuses to start without a key — there is no anonymous
-mode.
+header carrying the configured API key. Supply the key in a file
+(--api-key-file, preferably mode 0600; surrounding whitespace is
+trimmed) or in the MEERKAT_API_KEY env var; the env var wins if both
+are set. --api-key also works, but a value on the command line is
+visible to other local users in the process list. The server refuses to
+start without a key — there is no anonymous mode — or with one shorter
+than 16 characters; 'openssl rand -hex 32' makes a good one.
 
 Register http://<host>:<port>/openapi.json with OpenWebUI as a Tool
 Server.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// MEERKAT_API_KEY env wins over --api-key flag.
-			if v := os.Getenv("MEERKAT_API_KEY"); v != "" {
-				if apiKey != "" && apiKey != v {
-					fmt.Fprintln(cmd.ErrOrStderr(),
-						"warning: MEERKAT_API_KEY env overrides --api-key flag")
-				}
-				apiKey = v
+			key, warnings, err := resolveAPIKey(os.Getenv("MEERKAT_API_KEY"), apiKeyFile, apiKey)
+			for _, w := range warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: "+w)
 			}
-			if apiKey == "" {
-				return fmt.Errorf("no API key configured — set --api-key or MEERKAT_API_KEY")
+			if err != nil {
+				return err
 			}
+			apiKey = key
 
 			cfg := mhttp.Config{
 				Addr:          mhttp.ResolveListenAddr(host, port),
@@ -105,6 +115,69 @@ Server.`,
 		"Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. "+
 			"Turn it off when the host serves a security.txt of its own")
 	cmd.Flags().StringVar(&apiKey, "api-key", "",
-		"Static bearer token. Required (or set MEERKAT_API_KEY).")
+		"Static bearer token (min 16 characters). Visible to other local users in the process list: "+
+			"prefer --api-key-file or MEERKAT_API_KEY.")
+	cmd.Flags().StringVar(&apiKeyFile, "api-key-file", "",
+		"Read the static bearer token from this file (min 16 characters; surrounding whitespace is trimmed). "+
+			"Keep it mode 0600. MEERKAT_API_KEY, if set, takes precedence.")
+	cmd.MarkFlagsMutuallyExclusive("api-key", "api-key-file")
 	return cmd
+}
+
+// resolveAPIKey picks the API key from, in order of precedence, the
+// MEERKAT_API_KEY environment variable, the --api-key-file file and the
+// --api-key flag value. It returns warnings for the caller to print.
+func resolveAPIKey(env, file, flagValue string) (key string, warnings []string, err error) {
+	fromFile := ""
+	if file != "" {
+		fromFile, warnings, err = readAPIKeyFile(file)
+		if err != nil {
+			return "", warnings, err
+		}
+	}
+	if flagValue != "" {
+		warnings = append(warnings, "--api-key puts the key in the process list, visible to other local users; "+
+			"use --api-key-file or MEERKAT_API_KEY instead")
+	}
+	switch {
+	case env != "":
+		if (fromFile != "" && fromFile != env) || (flagValue != "" && flagValue != env) {
+			warnings = append(warnings, "MEERKAT_API_KEY env overrides the key given by --api-key-file/--api-key")
+		}
+		key = env
+	case fromFile != "":
+		key = fromFile
+	default:
+		key = flagValue
+	}
+	if key == "" {
+		return "", warnings, fmt.Errorf("no API key configured — set --api-key-file or MEERKAT_API_KEY (or --api-key)")
+	}
+	return key, warnings, nil
+}
+
+// readAPIKeyFile reads a key from path, trimming surrounding whitespace.
+// A file readable by other users is accepted but warned about.
+func readAPIKeyFile(path string) (string, []string, error) {
+	var warnings []string
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", nil, fmt.Errorf("--api-key-file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("--api-key-file %s is not a regular file", path)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		warnings = append(warnings, fmt.Sprintf("%s is readable by other users (mode %04o); run chmod 600 on it",
+			path, info.Mode().Perm()))
+	}
+	body, err := os.ReadFile(path) //nolint:gosec // G304: path is an operator-supplied flag value (--api-key-file), not attacker-influenced input.
+	if err != nil {
+		return "", warnings, fmt.Errorf("--api-key-file: %w", err)
+	}
+	key := strings.TrimSpace(string(body))
+	if key == "" {
+		return "", warnings, fmt.Errorf("--api-key-file %s is empty", path)
+	}
+	return key, warnings, nil
 }

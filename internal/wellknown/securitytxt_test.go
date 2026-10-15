@@ -49,10 +49,11 @@ func TestSecurityTxt_RequiredFieldsAndContacts(t *testing.T) {
 	}
 }
 
-// Expires is computed from the time of the request, so a long-running
-// or old binary never serves a stale file, and it is under a year away
-// as RFC 9116 recommends.
-func TestSecurityTxt_ExpiresIsFreshAndUnderAYear(t *testing.T) {
+// An unstamped build (go build, go install) has no build date, so Expires
+// is computed from the time of the request and is under a year away as
+// RFC 9116 recommends.
+func TestSecurityTxt_UnstampedExpiresIsFreshAndUnderAYear(t *testing.T) {
+	SetBuildDate("unknown")
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 	exp, err := time.Parse(time.RFC3339, fields(t, SecurityTxt(now))["Expires"][0])
 	if err != nil {
@@ -65,6 +66,32 @@ func TestSecurityTxt_ExpiresIsFreshAndUnderAYear(t *testing.T) {
 	exp2, _ := time.Parse(time.RFC3339, fields(t, SecurityTxt(later))["Expires"][0])
 	if !exp2.After(later) {
 		t.Errorf("a file served three years later expires at %v, before it is served", exp2)
+	}
+}
+
+// A release binary carries its build date: Expires is fixed from it, the
+// same on every request however long the process has run, still 30 days
+// to a year after the build, and it does move forward with a new build.
+func TestSecurityTxt_StampedExpiresIsFixedAtBuildTime(t *testing.T) {
+	t.Cleanup(func() { SetBuildDate("unknown") })
+	built := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	SetBuildDate(built.Format(time.RFC3339))
+
+	want := built.Add(validity).Format(time.RFC3339)
+	for _, now := range []time.Time{built, built.AddDate(0, 6, 0), built.AddDate(3, 0, 0)} {
+		got := fields(t, SecurityTxt(now))["Expires"]
+		if len(got) != 1 || got[0] != want {
+			t.Fatalf("Expires served at %v = %v, want the fixed %s", now, got, want)
+		}
+	}
+	exp, _ := time.Parse(time.RFC3339, want)
+	if d := exp.Sub(built); d <= 30*24*time.Hour || d >= 365*24*time.Hour {
+		t.Errorf("Expires is %v after the build; want more than 30 days and under a year", d)
+	}
+
+	SetBuildDate(built.AddDate(0, 3, 0).Format(time.RFC3339))
+	if got := fields(t, SecurityTxt(built))["Expires"][0]; got == want {
+		t.Error("a later build must advance Expires")
 	}
 }
 
@@ -86,6 +113,9 @@ func TestSecurityTxtHandler_ServesPlainText(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
 		t.Errorf("Content-Type = %q (RFC 9116 §3)", ct)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
 	}
 	if rec.Body.String() != SecurityTxt(now) {
 		t.Error("the handler serves something other than SecurityTxt(now)")

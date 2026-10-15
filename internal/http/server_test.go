@@ -19,7 +19,7 @@ import (
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	srv, err := New(Config{APIKey: "test-key", Version: "test"})
+	srv, err := New(Config{APIKey: "test-key-0123456789", Version: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func newTestServerWithConfig(t *testing.T, cfg Config, pages []kb.Page) *Server 
 func postSearch(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(nethttp.MethodPost, "/search", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer test-key-0123456789")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -62,7 +62,7 @@ func postSearch(t *testing.T, srv *Server, body string) *httptest.ResponseRecord
 func postShow(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(nethttp.MethodPost, "/show", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer test-key-0123456789")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -72,7 +72,7 @@ func postShow(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder
 func postList(t *testing.T, srv *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(nethttp.MethodPost, "/list", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer test-key-0123456789")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -147,6 +147,8 @@ func TestAuth_DenyByDefault(t *testing.T) {
 			if !ok {
 				t.Fatalf("route pattern %q missing a %q-separated method prefix", rt.pattern, " ")
 			}
+			// "{$}" is the mux's "exactly this path" marker, not part of the URL.
+			path = strings.TrimSuffix(path, "{$}")
 			var body io.Reader
 			if method != nethttp.MethodGet {
 				body = strings.NewReader(`{}`)
@@ -202,7 +204,7 @@ func TestSearch_Authed(t *testing.T) {
 	srv := newTestServer(t)
 	req := httptest.NewRequest(nethttp.MethodPost, "/search",
 		strings.NewReader(`{"query":"payment","limit":3}`))
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer test-key-0123456789")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -229,7 +231,7 @@ func TestSearch_BadBody(t *testing.T) {
 	srv := newTestServer(t)
 	req := httptest.NewRequest(nethttp.MethodPost, "/search",
 		strings.NewReader(`not json`))
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer test-key-0123456789")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != nethttp.StatusBadRequest {
@@ -242,7 +244,7 @@ func TestSearch_MissingQuery(t *testing.T) {
 	srv := newTestServer(t)
 	req := httptest.NewRequest(nethttp.MethodPost, "/search",
 		strings.NewReader(`{"query":""}`))
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer test-key-0123456789")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != nethttp.StatusBadRequest {
@@ -284,7 +286,7 @@ func TestSearch_QueryPathologicallyNested(t *testing.T) {
 // context deadline: with an already-expired budget, the handler must
 // answer 504 rather than hang or 500.
 func TestSearch_QueryTimeout(t *testing.T) {
-	srv := newTestServerWithConfig(t, Config{APIKey: "test-key", QueryTimeout: -1 * time.Second}, []kb.Page{
+	srv := newTestServerWithConfig(t, Config{APIKey: "test-key-0123456789", QueryTimeout: -1 * time.Second}, []kb.Page{
 		{ID: "a/b", Title: "T", Body: "some searchable body text", Front: kb.Frontmatter{Category: "concepts"}},
 	})
 
@@ -307,7 +309,7 @@ func TestSearch_LimitClampedToMax(t *testing.T) {
 			Front: kb.Frontmatter{Category: "concepts"},
 		}
 	}
-	srv := newTestServerWithConfig(t, Config{APIKey: "test-key"}, pages)
+	srv := newTestServerWithConfig(t, Config{APIKey: "test-key-0123456789"}, pages)
 
 	rec := postSearch(t, srv, `{"query":"widget","limit":100000}`)
 	if rec.Code != nethttp.StatusOK {
@@ -415,7 +417,7 @@ func TestOpenAPI_ListDocumentsTypeFilterAndField(t *testing.T) {
 func TestList_Authed_NoBody(t *testing.T) {
 	srv := newTestServer(t)
 	req := httptest.NewRequest(nethttp.MethodPost, "/list", bytes.NewReader(nil))
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer test-key-0123456789")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != nethttp.StatusOK {
@@ -488,7 +490,7 @@ func TestShow_NotFound(t *testing.T) {
 	srv := newTestServer(t)
 	req := httptest.NewRequest(nethttp.MethodPost, "/show",
 		strings.NewReader(`{"id":"nope/missing"}`))
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer test-key-0123456789")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != nethttp.StatusNotFound {
