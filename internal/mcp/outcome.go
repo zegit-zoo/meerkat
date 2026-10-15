@@ -90,18 +90,6 @@ type OutcomeOptions struct {
 	Sessions *retrieval.Tracker
 }
 
-// sessionKey is the retrieval-session key for a call: the explicit
-// session_id, else the MCP client session, else "" (no session).
-func sessionKey(ctx context.Context, explicit string) string {
-	if explicit != "" {
-		return explicit
-	}
-	if cs := mcpserver.ClientSessionFromContext(ctx); cs != nil {
-		return cs.SessionID()
-	}
-	return ""
-}
-
 // limitResult answers a call that exceeded a traversal limit: a tool
 // result, not an error, telling the agent to report rather than keep
 // searching.

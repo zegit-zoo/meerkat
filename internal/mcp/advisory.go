@@ -22,8 +22,9 @@ import (
 //     no advisory can be mistaken for knowledge-base content.
 //   - It is sent at most once per (session, collection, state). The
 //     session is the key mk_report_outcome uses: an explicit session_id,
-//     else the MCP session, else one shared bucket. A new state is a new
-//     advisory.
+//     else the MCP session, else one bucket per principal — always scoped
+//     to the caller's principal (advisoryKey, meerkat-mob#46). A new
+//     state is a new advisory.
 //   - It is bounded: one line, at most collections.MaxAdvisory bytes,
 //     naming the collection and the state and nothing else.
 //

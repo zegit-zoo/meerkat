@@ -495,9 +495,13 @@ agent took to get context for one question, how many hops it needed,
 or where it gave up. A **retrieval session** can: every tool call
 sharing a key — an explicit `session_id` passed to `mk_search`,
 `mk_show` and `mk_report_outcome`, or the MCP client session — within
-an idle window (`sessions.idle_timeout`, default 120 s). It ends on
-`mk_report_outcome`, on idle timeout, or when the MCP session goes
-away.
+an idle window (`sessions.idle_timeout`, default 120 s), and within the
+caller's principal: the same `session_id` from two principals is two
+sessions (meerkat-mob#46). It ends on `mk_report_outcome`, on idle
+timeout, or when the MCP session goes away. At most 64 sessions per
+verified principal and 10,000 overall are live (callers with no
+subject are held to the overall cap only); past a cap the least
+recently used one ends as if idle.
 
 Definitions (`internal/retrieval`):
 
