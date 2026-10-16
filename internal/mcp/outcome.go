@@ -424,12 +424,19 @@ func reportOutcomeHandler(reg *collections.Registry, opts transportOptions) mcps
 				fb := args.fallback
 				entry.Fallback = &fb
 			}
-			if _, err := opts.Outcome.Log.Record(ctx, entry); err != nil {
+			_, err := opts.Outcome.Log.Record(ctx, entry)
+			switch {
+			case errors.Is(err, traversal.ErrDailyCap):
+				// A backstop, not a failure of the report: answered like
+				// the gate's own refusals.
+				resp["log"] = logDailyCap
+			case err != nil:
 				telemetry.Record(ctx).RetrievalOutcome(args.outcome, args.fallback.Kind, telemetry.OutcomeError)
 				telemetry.Fail(span, telemetry.OutcomeError)
 				return mcp.NewToolResultError("traversal log: " + err.Error()), nil
+			default:
+				resp["logged"] = true
 			}
-			resp["logged"] = true
 		}
 
 		// 1. Telemetry, always.

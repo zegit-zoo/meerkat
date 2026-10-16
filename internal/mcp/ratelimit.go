@@ -28,6 +28,10 @@ import (
 //  3. The caller's principal has a token left in its bucket
 //     (ReportLimits); otherwise `log: rate_limited`.
 //
+// Past the gate, the log itself refuses writes once its per-day cap is
+// reached (traversal.ErrDailyCap): `log: daily_cap`, a backstop across
+// all principals.
+//
 // Telemetry is recorded whatever the verdict: it is a counter, not
 // storage.
 
@@ -38,6 +42,7 @@ const (
 	logNotPermitted  = "not_permitted"
 	logDuplicate     = "duplicate"
 	logRateLimited   = "rate_limited"
+	logDailyCap      = "daily_cap"
 )
 
 // ReportLimits bounds traversal-log writes per principal. Zero fields

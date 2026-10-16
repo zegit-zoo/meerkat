@@ -605,6 +605,11 @@ A report reaches the traversal log only when the gate admits it
   then one per 30 s (`OutcomeOptions.Reports`). On a hosted server with
   no `auth:` block every caller is the one anonymous principal, so they
   all share a single bucket.
+- `daily_cap`: the log has reached its per-day cap
+  (`max_entries_per_day`, default 20,000, or `max_bytes_per_day`,
+  default 512 MiB, counted per UTC day in the serving process). A
+  backstop across all principals; nothing is written until the day
+  turns over.
 - `not_configured`: there is no traversal log.
 
 The disclosure rule holds exactly as before: the span and the metric
@@ -668,6 +673,8 @@ observability:
     hmac_key_env: MEERKAT_TRAVERSAL_KEY
     query: plaintext       # omit (default) | plaintext
     retention_days: 90     # the default; 0 keeps everything
+    max_entries_per_day: 20000   # the default; 0 is no cap
+    max_bytes_per_day: 536870912 # 512 MiB, the default; 0 is no cap
 ```
 
 **Data classification** (the company taxonomy, provisional until the
@@ -691,7 +698,10 @@ Threat model:
 - *A caller floods the log.* Every field is bounded (query 2 KiB,
   summary 16 KiB, 50 list items, 20 sources), each report is one object
   with a unique key (single-writer-per-key, so any provider is safe),
-  and anonymous callers can report but never write intake.
+  and anonymous callers can report but never write intake. Writes are
+  gated per principal (above) and capped per day across all of them
+  (`daily_cap`); `meerkat_traversal_log_capped_total` counts refused
+  writes.
 - *Retention.* An application job, not bucket lifecycle (Garage has
   none): `retention_days` deletes day prefixes older than the window,
   on startup, then hourly on a background ticker for as long as the
@@ -701,7 +711,12 @@ Threat model:
   logged to stderr, counted, and retried on the next pass; it does not
   hold up later days. A failure on the startup pass still fails
   startup. The S3 sink pages through the day listing, so no day is
-  missed past the first 1,000. The default is **90 days** (#124). It
+  missed past the first 1,000. On `mk mcp serve-http`, `/metrics`
+  carries `meerkat_traversal_log_retention_runs_total`,
+  `meerkat_traversal_log_retention_days_total{result="deleted"|"failed"}`,
+  `meerkat_traversal_log_retention_list_failures_total` and
+  `meerkat_traversal_log_retention_last_run_timestamp_seconds`, so an
+  alert can fire on failed days or on a pass that stopped running. The default is **90 days** (#124). It
   was unbounded before, because this log is the self-improving loop's
   training data; `retention_days: 0` still keeps everything, for an
   operator who wants that. The window covers every object under the

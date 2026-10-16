@@ -30,6 +30,12 @@
 // Open's context lives, and opportunistically from the write paths; a
 // day that fails to delete is logged, counted (PruneStats) and retried
 // on the next pass without holding up later days (meerkat-mob#45).
+//
+// Writes are capped per UTC day (DefaultMaxEntriesPerDay,
+// DefaultMaxBytesPerDay): past either cap, Record refuses with
+// ErrDailyCap until the day turns over, so no caller, or set of
+// callers, can grow the log without bound (meerkat-mob#45). The count
+// lives in the process and starts from zero at Open.
 // Every object has a unique key, so the
 // single-writer-per-key rule (docs/design/object-stores.md) holds on
 // every provider.
@@ -76,6 +82,15 @@ const (
 // configuration does not say (#124).
 const DefaultRetentionDays = 90
 
+// Daily write caps applied when the configuration does not say. A
+// session entry is at most about 70 KB (every field is bounded), and a
+// principal may log about 2,900 a day after its burst, so the entry cap
+// is reached first only by several callers at full rate.
+const (
+	DefaultMaxEntriesPerDay = 20000
+	DefaultMaxBytesPerDay   = 512 << 20
+)
+
 // PruneInterval is how often retention runs: on the background ticker
 // Open starts, and at most this often from the write paths.
 const PruneInterval = time.Hour
@@ -108,6 +123,26 @@ type Config struct {
 	// Unset means DefaultRetentionDays; 0 keeps everything. A pointer,
 	// so that an explicit 0 is told apart from an absent key.
 	RetentionDays *int `yaml:"retention_days,omitempty"`
+	// MaxEntriesPerDay and MaxBytesPerDay cap the session entries Record
+	// writes per UTC day. Unset means DefaultMaxEntriesPerDay and
+	// DefaultMaxBytesPerDay; 0 lifts that cap.
+	MaxEntriesPerDay *int   `yaml:"max_entries_per_day,omitempty"`
+	MaxBytesPerDay   *int64 `yaml:"max_bytes_per_day,omitempty"`
+}
+
+// DailyCaps are the per-day write caps Open applies; 0 is no cap.
+func (c *Config) DailyCaps() (entries int, bytes int64) {
+	entries, bytes = DefaultMaxEntriesPerDay, DefaultMaxBytesPerDay
+	if c == nil {
+		return entries, bytes
+	}
+	if c.MaxEntriesPerDay != nil {
+		entries = *c.MaxEntriesPerDay
+	}
+	if c.MaxBytesPerDay != nil {
+		bytes = *c.MaxBytesPerDay
+	}
+	return entries, bytes
 }
 
 // Retention is the window Open applies, in days; 0 keeps everything.
@@ -156,6 +191,12 @@ func (c *Config) Validate(label string) error {
 	}
 	if c.RetentionDays != nil && *c.RetentionDays < 0 {
 		return fmt.Errorf("%s.retention_days must be >= 0 (0 keeps everything; unset means %d)", label, DefaultRetentionDays)
+	}
+	if c.MaxEntriesPerDay != nil && *c.MaxEntriesPerDay < 0 {
+		return fmt.Errorf("%s.max_entries_per_day must be >= 0 (0 is no cap; unset means %d)", label, DefaultMaxEntriesPerDay)
+	}
+	if c.MaxBytesPerDay != nil && *c.MaxBytesPerDay < 0 {
+		return fmt.Errorf("%s.max_bytes_per_day must be >= 0 (0 is no cap; unset means %d)", label, DefaultMaxBytesPerDay)
 	}
 	switch c.Query {
 	case "", QueryOmit, QueryPlaintext:
@@ -366,10 +407,61 @@ type Log struct {
 	queries bool
 	now     func() time.Time
 
+	// maxEntries and maxBytes cap Record per UTC day; 0 is no cap.
+	maxEntries int
+	maxBytes   int64
+
 	mu         sync.Mutex
 	lastPruned time.Time
 	stats      PruneStats
 	onPrune    func(PruneResult)
+	// day is the UTC day dayEntries and dayBytes count; capped counts
+	// the writes refused since Open.
+	day        string
+	dayEntries int
+	dayBytes   int64
+	capped     int
+}
+
+// ErrDailyCap is returned by Record when today's entry or byte cap is
+// reached. Nothing is written.
+var ErrDailyCap = errors.New("traversal log: daily write cap reached")
+
+// CappedWrites returns how many Record calls ErrDailyCap refused since
+// Open.
+func (l *Log) CappedWrites() int {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.capped
+}
+
+// reserve claims room for one entry of n bytes on day, or reports
+// ErrDailyCap. A failed write gives it back with release.
+func (l *Log) reserve(day string, n int64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if day != l.day {
+		l.day, l.dayEntries, l.dayBytes = day, 0, 0
+	}
+	if (l.maxEntries > 0 && l.dayEntries >= l.maxEntries) || (l.maxBytes > 0 && l.dayBytes+n > l.maxBytes) {
+		l.capped++
+		return ErrDailyCap
+	}
+	l.dayEntries++
+	l.dayBytes += n
+	return nil
+}
+
+func (l *Log) release(day string, n int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if day == l.day {
+		l.dayEntries--
+		l.dayBytes -= n
+	}
 }
 
 // PruneResult is one retention pass.
@@ -449,6 +541,7 @@ func Open(ctx context.Context, cfg *Config, newS3 func(ctx context.Context, cfg 
 	}
 	l := NewLog(sink, []byte(key), cfg.Retention())
 	l.queries = cfg.Query == QueryPlaintext
+	l.maxEntries, l.maxBytes = cfg.DailyCaps()
 	if err := l.Prune(ctx); err != nil {
 		return nil, fmt.Errorf("traversal log: initial retention pass: %w", err)
 	}
@@ -481,7 +574,7 @@ func (l *Log) RunRetention(ctx context.Context, interval time.Duration) {
 }
 
 // NewLog wires a Log to a sink directly (tests, and Open). It keeps no
-// queries; Open turns them on for `query: plaintext`.
+// queries and has no daily caps; Open sets both from the configuration.
 func NewLog(sink Sink, key []byte, retentionDays int) *Log {
 	return &Log{sink: sink, key: key, retention: retentionDays, now: time.Now}
 }
@@ -503,7 +596,8 @@ func (l *Log) Hash(v string) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// Record hashes e's identifiers and writes it. Names in e.Session,
+// Record hashes e's identifiers and writes it, or returns ErrDailyCap
+// when today's cap is reached. Names in e.Session,
 // e.Pages and e.Attempted are given in PLAINTEXT and hashed here, so a
 // caller can never accidentally store a raw name by skipping a step.
 func (l *Log) Record(ctx context.Context, e Entry) (key string, err error) {
@@ -552,8 +646,13 @@ func (l *Log) Record(ctx context.Context, e Entry) (key string, err error) {
 	}
 	var nonce [4]byte
 	_, _ = rand.Read(nonce[:])
-	key = path.Join(Prefix, now.Format("2006-01-02"), fmt.Sprintf("%d-%s.json", now.UnixNano(), hex.EncodeToString(nonce[:])))
+	day := now.Format("2006-01-02")
+	key = path.Join(Prefix, day, fmt.Sprintf("%d-%s.json", now.UnixNano(), hex.EncodeToString(nonce[:])))
+	if err := l.reserve(day, int64(len(body))); err != nil {
+		return "", err
+	}
 	if err := l.sink.Put(ctx, key, body); err != nil {
+		l.release(day, int64(len(body)))
 		return "", err
 	}
 	l.maybePrune(ctx, now)

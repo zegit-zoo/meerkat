@@ -15,6 +15,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/collections"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
+	"github.com/zegit-zoo/meerkat/internal/traversal"
 )
 
 // metrics is the hosted server's Prometheus instrumentation.
@@ -268,3 +269,49 @@ func (m *metrics) instrumentTool(next mcpserver.ToolHandlerFunc) mcpserver.ToolH
 // server that logged there would corrupt any future in-process reuse of
 // the same handlers.
 func defaultLogWriter() io.Writer { return os.Stderr }
+
+// registerTraversalLog exposes the traversal log's retention and
+// daily-cap counters (meerkat-mob#45). They are read from the log at
+// scrape time, so they include the retention pass Open ran before this
+// server existed. Labels are a closed set; no day, key or bucket is one.
+func registerTraversalLog(reg prometheus.Registerer, l *traversal.Log) {
+	if l == nil {
+		return
+	}
+	stat := func(f func(traversal.PruneStats) float64) func() float64 {
+		return func() float64 { return f(l.PruneStats()) }
+	}
+	reg.MustRegister(
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "meerkat_traversal_log_retention_runs_total",
+			Help: "Traversal-log retention passes since startup.",
+		}, stat(func(s traversal.PruneStats) float64 { return float64(s.Runs) })),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name:        "meerkat_traversal_log_retention_days_total",
+			Help:        "Expired traversal-log day prefixes, by result (deleted, failed). A failed day is retried on the next pass.",
+			ConstLabels: prometheus.Labels{"result": "deleted"},
+		}, stat(func(s traversal.PruneStats) float64 { return float64(s.DaysDeleted) })),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name:        "meerkat_traversal_log_retention_days_total",
+			Help:        "Expired traversal-log day prefixes, by result (deleted, failed). A failed day is retried on the next pass.",
+			ConstLabels: prometheus.Labels{"result": "failed"},
+		}, stat(func(s traversal.PruneStats) float64 { return float64(s.DaysFailed) })),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "meerkat_traversal_log_retention_list_failures_total",
+			Help: "Traversal-log retention passes that could not list the day prefixes, so considered nothing.",
+		}, stat(func(s traversal.PruneStats) float64 { return float64(s.ListFailures) })),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "meerkat_traversal_log_retention_last_run_timestamp_seconds",
+			Help: "Unix time of the last traversal-log retention pass; 0 before the first.",
+		}, stat(func(s traversal.PruneStats) float64 {
+			if s.LastRun.IsZero() {
+				return 0
+			}
+			return float64(s.LastRun.Unix())
+		})),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "meerkat_traversal_log_capped_total",
+			Help: "Traversal-log writes refused because the per-day entry or byte cap was reached.",
+		}, func() float64 { return float64(l.CappedWrites()) }),
+	)
+}
