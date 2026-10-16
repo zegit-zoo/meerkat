@@ -11,7 +11,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/zegit-zoo/meerkat
   # Defaults to .Chart.AppVersion. Image tags have NO leading "v"
-  # (git tag v0.18.0 -> image tag 0.18.0); a leading "v" is stripped.
+  # (git tag v0.19.0 -> image tag 0.19.0); a leading "v" is stripped.
   tag: ""
   # Pin by digest ("sha256:…"). When set the reference becomes
   # repository:tag@digest: the tag stays for readability and the digest

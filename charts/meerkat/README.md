@@ -11,8 +11,8 @@ yet. Install it from a checkout:
 helm install meerkat ./charts/meerkat -n meerkat --create-namespace -f my-values.yaml
 ```
 
-Chart `0.1.0` defaults to meerkat `0.18.0` (`appVersion`). Image tags have
-no leading `v`: git tag `v0.18.0` publishes image tag `0.18.0`, and the
+Chart `0.1.1` defaults to meerkat `0.19.0` (`appVersion`). Image tags have
+no leading `v`: git tag `v0.19.0` publishes image tag `0.19.0`, and the
 chart strips a `v` from `image.tag` if you give one. Pin by digest with
 `image.digest`; see [docs/CONTAINER.md](../../docs/CONTAINER.md) for
 verifying the image with cosign first.
