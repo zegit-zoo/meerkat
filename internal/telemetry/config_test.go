@@ -237,6 +237,29 @@ func TestResolve_PlaintextHTTPEndpointRequiresExplicitInsecure(t *testing.T) {
 	}
 }
 
+// The traversal log's s3 backend follows the same rule as the collector,
+// and the key is read from the file (meerkat-mob#68).
+func TestResolve_PlaintextTraversalLogEndpointRequiresExplicitInsecure(t *testing.T) {
+	clearOTelEnv(t)
+	const block = "traversal_log:\n  backend: s3\n  bucket: kb\n  endpoint: http://garage.internal:3900\n  hmac_key_env: K\n"
+	var cfg Config
+	if err := yaml.Unmarshal([]byte(block), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Resolve(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "insecure: true") {
+		t.Fatalf("an http:// traversal_log endpoint without insecure: true must be refused, got: %v", err)
+	}
+
+	cfg = Config{}
+	if err := yaml.Unmarshal([]byte(block+"  insecure: true\n"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve(&cfg); err != nil {
+		t.Fatalf("insecure: true must accept the http:// endpoint: %v", err)
+	}
+}
+
 func TestResolve_RejectsANonHTTPEndpointScheme(t *testing.T) {
 	clearOTelEnv(t)
 	if _, err := Resolve(&Config{

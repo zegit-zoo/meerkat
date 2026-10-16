@@ -677,6 +677,26 @@ observability:
     max_bytes_per_day: 536870912 # 512 MiB, the default; 0 is no cap
 ```
 
+With `backend: s3` the block takes `bucket`, `prefix`, `endpoint`,
+`region` and `path_style`, as a `type: s3` content source does. An
+`http://` endpoint is refused unless the block also sets
+`insecure: true` (meerkat-mob#68): over plaintext the signed requests
+and the entries, queries included under `query: plaintext`, are visible
+to, and changeable by, the network path.
+
+```yaml
+observability:
+  traversal_log:
+    backend: s3
+    bucket: kb
+    prefix: telemetry/
+    endpoint: https://s3.example.net
+    region: garage
+    path_style: true
+    # insecure: true       # only for an http:// endpoint
+    hmac_key_env: MEERKAT_TRAVERSAL_KEY
+```
+
 **Data classification** (the company taxonomy, provisional until the
 asset catalogue, MK-A-4): a traversal-log entry is `internal` and
 pseudonymous (see above); with `query: plaintext` it also carries

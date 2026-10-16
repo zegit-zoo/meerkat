@@ -929,6 +929,7 @@ content:
 #     endpoint: https://s3.example.net
 #     region: garage
 #     path_style: true
+#     # insecure: true             # only for an http:// endpoint
 #     hmac_key_env: MEERKAT_PATH_LOG_KEY
 #     retention_days: 0
 
