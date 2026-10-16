@@ -472,20 +472,31 @@ const maxBlurbRunes = 500
 // while a model still reads it. The result is then capped at
 // maxBlurbRunes.
 func collectionBlurb(desc string) string {
-	visible := strings.Map(func(r rune) rune {
-		switch {
-		case unicode.IsSpace(r):
-			return r // oneLine folds every kind of whitespace to one space
-		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
-			return -1
-		}
-		return r
-	}, desc)
-	blurb := strings.TrimRight(oneLine(visible), " .;,")
+	// oneLine folds every kind of whitespace stripHidden keeps to one space.
+	blurb := strings.TrimRight(oneLine(stripHidden(desc)), " .;,")
 	if runes := []rune(blurb); len(runes) > maxBlurbRunes {
 		blurb = strings.TrimRight(string(runes[:maxBlurbRunes-1]), " .;,") + "…"
 	}
 	return blurb
+}
+
+// stripHidden drops control characters other than whitespace and
+// format characters (bidi overrides and isolates, zero-width
+// characters, the BOM, tag characters): the text a renderer would hide
+// from a human while a model still reads it. Whitespace, newlines
+// included, is kept. collectionBlurb applies it to tool descriptions;
+// mk_list_collections applies it to the operator- and manifest-written
+// text it returns (meerkat-mob#64).
+func stripHidden(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return r
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // collectionArg builds the shared, optional "collection" argument. Its
@@ -1252,7 +1263,7 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry, runnin
 			Type:         c.Type(),
 			Source:       c.Provenance(),
 			Capabilities: g.Capabilities(c.Name).Strings(),
-			Description:  c.Description(),
+			Description:  stripHidden(c.Description()),
 			Refresh:      running.of(c.Name, c.ReloadStatuses()),
 		}
 		if f, ok := c.Freshness(); ok {
@@ -1286,11 +1297,11 @@ func listCollectionsJSON(ctx context.Context, view *collections.Registry, runnin
 			entry.Contract = &contractSummary{
 				Method:       string(ec.Method),
 				Declared:     string(ec.Declared),
-				Repo:         ec.Repo,
-				Host:         ec.Host,
-				Branch:       ec.Branch,
-				Path:         ec.Path,
-				Instructions: ec.Instructions,
+				Repo:         stripHidden(ec.Repo),
+				Host:         stripHidden(ec.Host),
+				Branch:       stripHidden(ec.Branch),
+				Path:         stripHidden(ec.Path),
+				Instructions: stripHidden(ec.Instructions),
 				Reason:       ec.Reason,
 			}
 		}

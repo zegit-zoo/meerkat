@@ -375,7 +375,7 @@ tree child's `manifest.yaml`, not only the operator who writes
 `content-source.yaml`. So the text is defended on both sides (#96):
 
 - **At load.** Both sources are bounded to 500 characters: `content-source.yaml` in `Source.validateContract`, and `manifest.yaml` in `Manifest.Validate`.
-- **At render.** `collectionBlurb`, the one path into tool definitions, drops control and format characters (ANSI escapes, bidi overrides and isolates, zero-width characters, tag characters), which are how text is hidden from a human reviewer while a model still reads it. It also caps what it renders.
+- **At render.** `collectionBlurb`, the one path into tool definitions, drops control and format characters (ANSI escapes, bidi overrides and isolates, zero-width characters, tag characters), which are how text is hidden from a human reviewer while a model still reads it. It also caps what it renders. `mk_list_collections` returns the full description and the contract's fields (repo, host, branch, path, instructions) uncapped, but with the same characters dropped (`stripHidden`, meerkat-mob#64); newlines are kept there.
 
 Neither step can make hostile prose harmless. Review a description like any
 other agent-facing instruction.

@@ -590,7 +590,7 @@ func (s *HostedServer) routes() http.Handler {
 	// rather than a gap. With no telemetry configured traceHTTP returns
 	// its argument unchanged — not a wrapper — so this composes to
 	// exactly the two middlewares it always did.
-	return s.traceHTTP(s.accessLog(s.metrics.instrumentHTTP(mux)))
+	return noSniff(s.traceHTTP(s.accessLog(s.metrics.instrumentHTTP(mux))))
 }
 
 // Handler exposes the fully-wrapped mux, for tests and for embedding
@@ -610,7 +610,18 @@ func (s *HostedServer) metricsHandler() http.Handler {
 func (s *HostedServer) MetricsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET "+MetricsPath, s.metricsHandler())
-	return mux
+	return noSniff(mux)
+}
+
+// noSniff marks every response, 401s and 404s included, as not to be
+// content-sniffed: each is JSON, an event stream, plain text or an error
+// document, and none should be reinterpreted as anything else
+// (meerkat-mob#64). mk http serve's auth gate does the same.
+func noSniff(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Addr returns the address the server serves on.
