@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -106,6 +107,7 @@ func newMCPServeHTTPCmd() *cobra.Command {
 		trustProxyHost bool
 		securityTxt    bool
 		insecureNoAuth bool
+		metricsAddr    string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve-http",
@@ -226,9 +228,17 @@ systemd passes in, and --host and --port are ignored. systemd then holds
 the port across a restart: a client that connects while the service
 restarts waits and is served, instead of being refused. See the README.
 
+/metrics is unauthenticated. By default it is served on the API port
+beside /mcp; --metrics-addr moves it to a listener of its own (for
+example 127.0.0.1:9090, or an address only the scrape network
+reaches), and the API port stops serving it.
+
 The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := checkMetricsAddr(metricsAddr); err != nil {
+				return err
+			}
 			auth := activeAuth
 			if authConfigPath != "" {
 				loaded, err := contentsource.LoadAuthFile(authConfigPath)
@@ -284,6 +294,7 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				Stateful:                      stateful,
 				DisableDNSRebindingProtection: trustProxyHost,
 				NoSecurityTxt:                 !securityTxt,
+				MetricsAddr:                   metricsAddr,
 				Observability:                 activeObservability,
 				// This process runs exactly one hosted server, so it is the
 				// one that may own the OpenTelemetry globals — which is what
@@ -308,6 +319,9 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 				fmt.Fprintf(cmd.ErrOrStderr(),
 					"meerkat hosted MCP serving on %s%s%s (auth: %s)\n",
 					s.Addr(), s.EndpointPath(), activated, mode)
+				if metricsAddr != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "meerkat metrics serving on %s/metrics\n", metricsAddr)
+				}
 				sighup := notifyReload()
 				go reloadOnSignal(ctx, s, cmd.ErrOrStderr(), sighup)
 			})
@@ -336,7 +350,27 @@ The server has no TLS of its own; terminate TLS at a reverse proxy.`,
 	cmd.Flags().BoolVar(&securityTxt, "security-txt", true,
 		"Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. "+
 			"Turn it off when the host serves a security.txt of its own")
+	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "",
+		"Serve the unauthenticated /metrics on its own listener at this host:port instead of on the API port. "+
+			"Empty keeps /metrics on the API port")
 	return cmd
+}
+
+// checkMetricsAddr accepts "" (metrics on the API port) or a host:port
+// with a numeric port, so a typo fails at startup rather than as a
+// listener error after the server is up.
+func checkMetricsAddr(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("mcp serve-http: --metrics-addr %q: want host:port: %w", addr, err)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
+		return fmt.Errorf("mcp serve-http: --metrics-addr %q: port must be a number from 0 to 65535", addr)
+	}
+	return nil
 }
 
 // checkUnauthenticatedBind refuses to serve with no authentication on an

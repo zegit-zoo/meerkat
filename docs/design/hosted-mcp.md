@@ -810,12 +810,14 @@ reachable only where it is correct.
   `Grants.Capabilities(name)` and `Grants.Identity()`, and adds a second
   registry view (`Restrict(CanWrite)`) alongside `Restrict(CanRead)`
   rather than widening the read one.
-- **A `--metrics-addr` flag.** `HostedConfig.MetricsAddr` serves
-  `/metrics` on a listener of its own and drops it from the API port
-  (meerkat-mob#47); `mk mcp serve-http` does not expose it yet, so the
-  CLI still serves `/metrics` beside `/mcp`. Likewise the request bounds
-  above (`MaxRequestBytes`, `MaxConcurrentRequests`,
-  `MaxConcurrentStreams`) run at their defaults from the CLI.
+- ~~**A `--metrics-addr` flag.**~~ **Done** (meerkat-mob#47):
+  `mk mcp serve-http --metrics-addr host:port` sets
+  `HostedConfig.MetricsAddr`, which serves `/metrics` on a listener of
+  its own and drops it from the API port. Without the flag `/metrics`
+  stays beside `/mcp`.
+- **Request bounds from the CLI.** The request bounds above
+  (`MaxRequestBytes`, `MaxConcurrentRequests`, `MaxConcurrentStreams`)
+  run at their defaults from the CLI.
 - **OIDC for `mk http serve`.** The OpenWebUI-facing server still takes
   a single static token. `internal/authn.Gate` is transport-agnostic and
   would drop straight in.

@@ -793,6 +793,11 @@ systemd passes in, and --host and --port are ignored. systemd then holds
 the port across a restart: a client that connects while the service
 restarts waits and is served, instead of being refused. See the README.
 
+/metrics is unauthenticated. By default it is served on the API port
+beside /mcp; --metrics-addr moves it to a listener of its own (for
+example 127.0.0.1:9090, or an address only the scrape network
+reaches), and the API port stops serving it.
+
 The server has no TLS of its own; terminate TLS at a reverse proxy.
 ```
 
@@ -805,14 +810,15 @@ meerkat mcp serve-http [flags]
 #### Flags
 
 ```text
-      --auth-config string   Path to a standalone YAML policy file with a top-level auth: block. Overrides the auth: block in content-source.yaml.
-      --host string          Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
-      --insecure-no-auth     Allow binding a non-loopback address with no authentication configured. Without it the server refuses to start in that state; use it only when a gateway in front authenticates every request.
-      --path string          Path the MCP Streamable HTTP endpoint is mounted at (default "/mcp")
-      --port int             Bind port (default 4005)
-      --security-txt         Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
-      --stateful             Keep per-session state in this process instead of accepting any well-formed session ID. Requires sticky routing when more than one replica sits behind a load balancer.
-      --trust-proxy-host     Disable DNS-rebinding protection (which rejects loopback requests whose Host header is not a localhost value). Only for a same-host reverse proxy that preserves the original Host header; prefer rewriting Host at the proxy instead.
+      --auth-config string    Path to a standalone YAML policy file with a top-level auth: block. Overrides the auth: block in content-source.yaml.
+      --host string           Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
+      --insecure-no-auth      Allow binding a non-loopback address with no authentication configured. Without it the server refuses to start in that state; use it only when a gateway in front authenticates every request.
+      --metrics-addr string   Serve the unauthenticated /metrics on its own listener at this host:port instead of on the API port. Empty keeps /metrics on the API port
+      --path string           Path the MCP Streamable HTTP endpoint is mounted at (default "/mcp")
+      --port int              Bind port (default 4005)
+      --security-txt          Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
+      --stateful              Keep per-session state in this process instead of accepting any well-formed session ID. Requires sticky routing when more than one replica sits behind a load balancer.
+      --trust-proxy-host      Disable DNS-rebinding protection (which rejects loopback requests whose Host header is not a localhost value). Only for a same-host reverse proxy that preserves the original Host header; prefer rewriting Host at the proxy instead.
 ```
 
 #### Inherited flags
