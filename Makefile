@@ -186,6 +186,46 @@ PRE_COMMIT ?= pre-commit
 hygiene: ## Run the commit-stage hygiene hooks over the whole tree (CI backstop)
 	@for h in $(HYGIENE_HOOKS); do $(PRE_COMMIT) run $$h --all-files --show-diff-on-failure || exit 1; done
 
+# chart-check validates charts/meerkat offline-ish: `helm lint --strict`
+# and `helm template | kubeconform -strict` for the defaults and every
+# values file under charts/meerkat/ci/, then one values.schema.json
+# negative case that must FAIL to render. kubeconform fetches schemas:
+# core kinds from its default location, ServiceMonitor and HTTPRoute
+# from the datree CRDs catalog pinned to one commit. Without helm or
+# kubeconform on PATH it skips, unless CHART_TOOLS_REQUIRED=1 (CI).
+# The render goes to kubeconform on stdin: given a file path, v0.8.0
+# skips any name without a .yaml/.yml/.json suffix and reports
+# "0 resource found" with exit 0.
+CHART            := charts/meerkat
+HELM             ?= helm
+KUBECONFORM      ?= kubeconform
+CHART_KUBE_VERSION := 1.31.0
+CRDS_CATALOG_REF := 63669a570e231d4f1f8396d229a1de512bcf0a34
+CRDS_CATALOG     := https://raw.githubusercontent.com/datreeio/CRDs-catalog/$(CRDS_CATALOG_REF)/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+.PHONY: chart-check
+chart-check: ## helm lint + template | kubeconform over charts/meerkat and its ci/ values
+	@for t in $(HELM) $(KUBECONFORM); do \
+		if ! command -v $$t >/dev/null 2>&1; then \
+			if [ -n "$(CHART_TOOLS_REQUIRED)" ]; then echo "FAIL: $$t not on PATH"; exit 1; fi; \
+			echo "SKIP: chart-check needs $$t on PATH"; exit 0; \
+		fi; \
+	done; \
+	set -e; \
+	out=$$(mktemp); trap 'rm -f "$$out"' EXIT; \
+	for v in "" $(CHART)/ci/*-values.yaml; do \
+		f=$${v:+-f $$v}; \
+		echo "--- $${v:-defaults}"; \
+		$(HELM) lint --strict $(CHART) $$f; \
+		$(HELM) template chart-check $(CHART) $$f > "$$out"; \
+		grep -q '^kind: Deployment$$' "$$out" || { echo "FAIL: no Deployment rendered"; exit 1; }; \
+		$(KUBECONFORM) -strict -summary -kubernetes-version $(CHART_KUBE_VERSION) \
+			-schema-location default -schema-location '$(CRDS_CATALOG)' < "$$out"; \
+	done; \
+	if $(HELM) template chart-check $(CHART) --set server.mode=grpc >/dev/null 2>&1; then \
+		echo "FAIL: values.schema.json accepted server.mode=grpc"; exit 1; \
+	fi; \
+	echo "OK: schema rejects server.mode=grpc"
+
 .PHONY: pre-push
 pre-push: lint test docs-check ## CI parity (lint + test + docs-check) — fast gate before git push
 	@echo ""

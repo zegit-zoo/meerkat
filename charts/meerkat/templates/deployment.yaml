@@ -1,0 +1,229 @@
+{{- include "meerkat.validate" . }}
+{{- $port := include "meerkat.port" . | int }}
+{{- $cm := include "meerkat.contentSourceConfigMap" . }}
+{{- $mcp := eq .Values.server.mode "mcp" }}
+{{- $apiKeyFile := and (not $mcp) .Values.server.apiKey.mountAsFile }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "meerkat.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "meerkat.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "meerkat.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if and $cm (not .Values.contentSource.existingConfigMap) }}
+        # Roll the pod when the rendered content-source.yaml changes.
+        checksum/content-source: {{ include "meerkat.contentSourceBody" . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "meerkat.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "meerkat.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: meerkat
+          image: {{ include "meerkat.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            {{- if $mcp }}
+            - mcp
+            - serve-http
+            - --host=0.0.0.0
+            - --port={{ $port }}
+            - --path={{ .Values.server.path }}
+            {{- if .Values.server.stateful }}
+            - --stateful
+            {{- end }}
+            {{- if .Values.server.insecureNoAuth }}
+            - --insecure-no-auth
+            {{- end }}
+            {{- else }}
+            - http
+            - serve
+            - --host=0.0.0.0
+            - --port={{ $port }}
+            {{- if $apiKeyFile }}
+            - --api-key-file=/var/run/secrets/meerkat/api-key
+            {{- end }}
+            {{- end }}
+            - --security-txt={{ .Values.server.securityTxt }}
+            {{- with .Values.server.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $port }}
+              protocol: TCP
+          env:
+            # The cache volume below; the image sets the same value.
+            - name: XDG_CACHE_HOME
+              value: /home/nonroot/.cache
+            # A server pod never checks GitHub for a newer release.
+            - name: MEERKAT_NO_UPDATE_CHECK
+              value: "1"
+            {{- if $cm }}
+            - name: MEERKAT_CONTENT_SOURCE
+              value: /home/nonroot/.config/content-source.yaml
+            {{- end }}
+            {{- if and (not $mcp) (not $apiKeyFile) }}
+            - name: MEERKAT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server.apiKey.existingSecret }}
+                  key: {{ .Values.server.apiKey.key }}
+            {{- end }}
+            {{- with .Values.secrets.traversalLogKey }}
+            {{- if .existingSecret }}
+            - name: {{ .envName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .existingSecret }}
+                  key: {{ .key }}
+            {{- end }}
+            {{- end }}
+            {{- range .Values.secrets.env }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: {{ .key }}
+                  {{- if hasKey . "optional" }}
+                  optional: {{ .optional }}
+                  {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if or .Values.secrets.s3.existingSecret .Values.extraEnvFrom }}
+          envFrom:
+            {{- with .Values.secrets.s3.existingSecret }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.probes.startup }}
+          {{- if .enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ ternary "/livez" "/healthz" $mcp }}
+              port: http
+            {{- toYaml (omit . "enabled") | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.probes.liveness }}
+          {{- if .enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ ternary "/livez" "/healthz" $mcp }}
+              port: http
+            {{- toYaml (omit . "enabled") | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.probes.readiness }}
+          {{- if .enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ ternary "/readyz" "/healthz" $mcp }}
+              port: http
+            {{- toYaml (omit . "enabled") | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: cache
+              mountPath: /home/nonroot/.cache
+            {{- if $cm }}
+            - name: content-source
+              mountPath: /home/nonroot/.config/content-source.yaml
+              subPath: content-source.yaml
+              readOnly: true
+            {{- end }}
+            {{- if $apiKeyFile }}
+            - name: api-key
+              mountPath: /var/run/secrets/meerkat
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: cache
+          {{- if .Values.cache.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.cache.existingClaim }}
+          {{- else }}
+          emptyDir:
+            {{- with .Values.cache.sizeLimit }}
+            sizeLimit: {{ . }}
+            {{- end }}
+            {{- with .Values.cache.medium }}
+            medium: {{ . }}
+            {{- end }}
+          {{- end }}
+        {{- if $cm }}
+        - name: content-source
+          configMap:
+            name: {{ $cm }}
+            items:
+              - key: {{ .Values.contentSource.key }}
+                path: content-source.yaml
+        {{- end }}
+        {{- if $apiKeyFile }}
+        - name: api-key
+          secret:
+            secretName: {{ .Values.server.apiKey.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.server.apiKey.key }}
+                path: api-key
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,5 @@
+# Content cache on an existing PersistentVolumeClaim.
+server:
+  insecureNoAuth: true
+cache:
+  existingClaim: meerkat-cache

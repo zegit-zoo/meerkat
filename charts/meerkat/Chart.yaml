@@ -1,0 +1,21 @@
+apiVersion: v2
+name: meerkat
+description: >-
+  meerkat knowledge-base server: the hosted MCP server (mk mcp serve-http)
+  or the HTTP/OpenAPI server (mk http serve) from ghcr.io/zegit-zoo/meerkat.
+type: application
+# The chart's own version; bumped independently of the app.
+version: 0.1.0
+# The meerkat release this chart defaults to. Image tags carry no leading
+# "v": git tag v0.18.0 publishes ghcr.io/zegit-zoo/meerkat:0.18.0.
+appVersion: "0.18.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/zegit-zoo/meerkat
+sources:
+  - https://github.com/zegit-zoo/meerkat
+keywords:
+  - mcp
+  - knowledge-base
+  - meerkat
+annotations:
+  artifacthub.io/license: Apache-2.0

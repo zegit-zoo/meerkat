@@ -1,0 +1,34 @@
+{{- if .Values.httpRoute.enabled }}
+{{- $svc := include "meerkat.fullname" . }}
+{{- $port := include "meerkat.servicePort" . | int }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $svc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "meerkat.labels" . | nindent 4 }}
+  {{- with .Values.httpRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml .Values.httpRoute.parentRefs | nindent 4 }}
+  {{- with .Values.httpRoute.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- if .Values.httpRoute.rules }}
+    {{- toYaml .Values.httpRoute.rules | nindent 4 }}
+    {{- else }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ $svc }}
+          port: {{ $port }}
+    {{- end }}
+{{- end }}

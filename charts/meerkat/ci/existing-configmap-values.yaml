@@ -1,0 +1,3 @@
+# content-source.yaml from a ConfigMap managed outside the chart.
+contentSource:
+  existingConfigMap: meerkat-content-source

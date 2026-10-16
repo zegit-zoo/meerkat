@@ -1,0 +1,5 @@
+# http mode with the bearer key in MEERKAT_API_KEY.
+server:
+  mode: http
+  apiKey:
+    existingSecret: meerkat-api-key

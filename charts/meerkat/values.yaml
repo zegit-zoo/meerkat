@@ -1,0 +1,232 @@
+# Default values for the meerkat chart. See README.md for the full table.
+#
+# Secrets never go in this file: every credential is a reference to a
+# Secret you create out of band (sealed-secrets, SOPS, external-secrets…).
+
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/zegit-zoo/meerkat
+  # Defaults to .Chart.AppVersion. Image tags have NO leading "v"
+  # (git tag v0.18.0 -> image tag 0.18.0); a leading "v" is stripped.
+  tag: ""
+  # Pin by digest ("sha256:…"). When set the reference becomes
+  # repository:tag@digest: the tag stays for readability and the digest
+  # decides what runs.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+server:
+  # mcp  -> `mcp serve-http`: hosted MCP (Streamable HTTP) with OIDC auth,
+  #         /livez, /readyz and /metrics. Port 4005 unless server.port.
+  # http -> `http serve`: HTTP/OpenAPI server with a static bearer key
+  #         (server.apiKey), /healthz only, no /metrics. Port 4004.
+  mode: mcp
+  # Container and Service port; null uses the mode's default.
+  port: null
+  # mcp mode: path the MCP endpoint is mounted at (--path).
+  path: /mcp
+  # mcp mode: --stateful keeps session state in-process; needs sticky
+  # routing with more than one replica.
+  stateful: false
+  # mcp mode: --insecure-no-auth. With no auth: block in contentSource
+  # the server REFUSES to bind 0.0.0.0 unless this is true. Set it only
+  # when a gateway in front authenticates every request.
+  insecureNoAuth: false
+  # Serve /.well-known/security.txt (--security-txt).
+  securityTxt: true
+  # http mode only: the bearer key, from an existing Secret.
+  apiKey:
+    existingSecret: ""
+    key: api-key
+    # false: MEERKAT_API_KEY env from the Secret.
+    # true:  mount the Secret and pass --api-key-file.
+    mountAsFile: false
+  # Appended after the generated arguments.
+  extraArgs: []
+
+# content-source.yaml, rendered into a ConfigMap and mounted read-only at
+# /home/nonroot/.config/content-source.yaml with MEERKAT_CONTENT_SOURCE
+# pointing at it. No config, raw or existingConfigMap: no file, and the
+# image serves its embedded content (empty in every published release).
+contentSource:
+  # The file as an object, rendered with toYaml. An auth: block here is
+  # what lets mcp mode start without insecureNoAuth (README.md,
+  # "Authentication").
+  config: {}
+  # The same file as a YAML string, written verbatim (keeps comments).
+  # Set config or raw, not both.
+  raw: ""
+  # Use an existing ConfigMap instead of rendering one.
+  existingConfigMap: ""
+  # Key in the (existing or rendered) ConfigMap holding the file.
+  key: content-source.yaml
+
+# Writable cache for type: url/gcs/s3 content (XDG_CACHE_HOME). The root
+# filesystem is read-only; this is the only writable path.
+cache:
+  # Use an existing PersistentVolumeClaim instead of an emptyDir.
+  existingClaim: ""
+  # emptyDir settings.
+  sizeLimit: 1Gi
+  medium: ""
+
+# Credentials, as references only. All are optional.
+secrets:
+  # envFrom one Secret holding the AWS default-chain variables for
+  # type: s3 sources and S3 memory/intake/traversal stores
+  # (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, optionally AWS_REGION).
+  s3:
+    existingSecret: ""
+  # The traversal-log HMAC key. envName must equal
+  # observability.traversal_log.hmac_key_env in contentSource.
+  traversalLogKey:
+    existingSecret: ""
+    key: hmac-key
+    envName: MEERKAT_TRAVERSAL_KEY
+  # Any other variable from a Secret key, e.g. OTEL_EXPORTER_OTLP_HEADERS
+  # or a token an OIDC-adjacent integration names:
+  #   - name: OTEL_EXPORTER_OTLP_HEADERS
+  #     secretName: otel-collector-auth
+  #     key: headers
+  #     optional: false
+  env: []
+
+# Plain extra environment (EnvVar objects), e.g. OTEL_* or GOMEMLIMIT.
+extraEnv: []
+# Extra envFrom sources (EnvFromSource objects).
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []
+
+serviceAccount:
+  create: true
+  name: ""
+  # e.g. eks.amazonaws.com/role-arn or iam.gke.io/gcp-service-account.
+  annotations: {}
+
+# meerkat never talks to the Kubernetes API.
+automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
+# No CPU limit by default: throttling a search server hurts latency more
+# than it protects neighbours. Memory is limited.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# Probe timings. The paths follow server.mode (mcp: /livez and /readyz;
+# http: /healthz for both). The listener opens only after content is
+# resolved and indexed, so the startup probe allows up to 10 minutes.
+probes:
+  startup:
+    enabled: true
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 120
+  liveness:
+    enabled: true
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 2
+
+terminationGracePeriodSeconds: 30
+
+service:
+  type: ClusterIP
+  # null: same as the container port.
+  port: null
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: meerkat.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Gateway API HTTPRoute (gateway.networking.k8s.io/v1).
+httpRoute:
+  enabled: false
+  annotations: {}
+  parentRefs: []
+  #  - name: shared-gateway
+  #    namespace: gateway-system
+  #    sectionName: https
+  hostnames: []
+  # Defaults to one rule matching PathPrefix / to the Service.
+  rules: []
+
+# Prometheus Operator ServiceMonitor scraping /metrics (mcp mode only).
+serviceMonitor:
+  enabled: false
+  labels: {}
+  interval: 30s
+  scrapeTimeout: 10s
+
+podDisruptionBudget:
+  # null: create one when replicaCount > 1 or autoscaling is enabled.
+  enabled: null
+  minAvailable: 1
+  maxUnavailable: null
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: null
+
+networkPolicy:
+  enabled: false
+  # Peers allowed to reach the server port (NetworkPolicyPeer objects).
+  # Empty: any source may connect to that port, and to nothing else.
+  ingressFrom: []
+  egress:
+    # When true, egress is restricted to DNS plus the rules below.
+    enabled: false
+    rules: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""

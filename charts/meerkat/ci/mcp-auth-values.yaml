@@ -1,0 +1,26 @@
+# mcp mode with an OIDC auth: block: the shape of a real install.
+contentSource:
+  config:
+    content:
+      type: s3
+      bucket: my-org-knowledge
+      prefix: kb/live/
+      endpoint: https://s3.example.net
+      region: garage
+      path_style: true
+    auth:
+      resource: https://mcp.example.com/mcp
+      providers:
+        - issuer: https://login.example.com
+          audience: api://meerkat
+    observability:
+      traversal_log:
+        backend: local
+        # The cache volume is the only writable path.
+        path: /home/nonroot/.cache/traversal
+        hmac_key_env: MEERKAT_TRAVERSAL_KEY
+secrets:
+  s3:
+    existingSecret: meerkat-s3
+  traversalLogKey:
+    existingSecret: meerkat-traversal

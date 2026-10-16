@@ -102,6 +102,7 @@ locally before you push:
 | Vulnerability scan | `make vuln` | govulncheck against the actual import graph |
 | gosec | `make gosec` | gosec's own high-severity pass over our code (HIGH severity + medium confidence fails); `release.yml`'s `verify` job runs this same target as a release gate |
 | gitleaks | `make gitleaks` | scans history + working tree for committed secrets, per `.gitleaks.toml` |
+| Helm chart | `make chart-check` (needs `helm` and `kubeconform` on `PATH`; skips without them) | `charts/meerkat` passes `helm lint --strict`, and its render for the defaults and each `charts/meerkat/ci/*-values.yaml` passes `kubeconform -strict` against Kubernetes 1.31; `values.schema.json` rejects an invalid `server.mode` |
 | Markdown lint | `npx markdownlint-cli@0.45.0 --config .markdownlint.yaml '**/*.md'` (or the pre-commit hook) | every `*.md` outside `.markdownlintignore` passes `markdownlint` |
 | Object store conformance (garage) | `eval "$(scripts/garage-up.sh)"`, then `go test -race -count=1 -run S3Conformance ./internal/contentsource/ ./internal/memory/` (the script exports `MEERKAT_TEST_S3_*`; `scripts/garage-up.sh down` stops it) | replays the object-store assumptions the unit-test fakes encode (ETags, `If-Match`, conditional writes, pagination) against a real [Garage](https://garagehq.deuxfleurs.fr/) |
 | Object store conformance (versitygw) | `eval "$(scripts/versitygw-up.sh)"`, then the same test command | the same conformance suite against a real [Versity Gateway](https://github.com/versity/versitygw); the two providers are one `fail-fast: false` matrix, so a drift in one still reports the other. Skipped when `MEERKAT_TEST_S3_ENDPOINT` is unset, so a plain `make test` is unaffected |
@@ -203,7 +204,7 @@ not a landing spot for outside work.
    title/commits feed the changelog.
 
 CI must pass (lint, test+coverage, vuln, gosec, gitleaks, markdown lint,
-object-store conformance) before a PR is merged. Maintainers hold to
+Helm chart, object-store conformance) before a PR is merged. Maintainers hold to
 that by hand: no required status check enforces it yet.
 
 ## Branch and tag protection

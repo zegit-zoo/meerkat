@@ -1,0 +1,13 @@
+# Patterns to ignore when packaging the chart (helm package).
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/
+# Validation fixtures are for `make chart-check`, not for installs.
+ci/

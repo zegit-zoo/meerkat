@@ -23,6 +23,7 @@ Jump to:
 - [Verifying the image (cosign)](#verifying-the-image-cosign)
 - [SBOM and provenance](#sbom-and-provenance)
 - [Kubernetes / Cloud Run notes](#kubernetes--cloud-run-notes)
+- [Helm chart](#helm-chart)
 
 ## Pulling the image
 
@@ -205,6 +206,26 @@ unless an in-memory volume is configured) — point `--content-source`'s
 cache dir at `/tmp` via `XDG_CACHE_HOME=/tmp/meerkat-cache` if `type:
 url` content is in use; the default embedded-content path needs no
 change at all.
+
+## Helm chart
+
+[`charts/meerkat`](../charts/meerkat/README.md) deploys this image on
+Kubernetes with the security context above (plus `seccompProfile:
+RuntimeDefault` and no service-account token), the cache directory as an
+`emptyDir` or an existing PVC, and `content-source.yaml` from a ConfigMap.
+It runs `mcp serve-http` by default, or `http serve` with
+`server.mode: http`, and adds the Service, probes, and optional Ingress,
+HTTPRoute, ServiceMonitor, PodDisruptionBudget, HPA and NetworkPolicy.
+Credentials are only ever Secret references.
+
+The chart is not published to a chart repository or as an OCI artifact
+yet; install it from a checkout:
+
+```bash
+helm install meerkat ./charts/meerkat -f my-values.yaml
+```
+
+`make chart-check` lints it and validates its rendered manifests.
 
 ## OpenTelemetry collector sidecar
 

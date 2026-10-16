@@ -1,0 +1,6 @@
+# http mode: OpenAPI server with the bearer key mounted as a file.
+server:
+  mode: http
+  apiKey:
+    existingSecret: meerkat-api-key
+    mountAsFile: true

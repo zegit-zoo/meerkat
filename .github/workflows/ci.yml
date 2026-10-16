@@ -141,6 +141,41 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - run: npx --yes markdownlint-cli@0.45.0 --config .markdownlint.yaml '**/*.md' --ignore node_modules
 
+  # charts/meerkat: helm lint --strict and helm template | kubeconform for
+  # the defaults and every charts/meerkat/ci/*-values.yaml, plus a schema
+  # negative case (Makefile: chart-check). No setup action: helm and
+  # kubeconform come from their release tarballs, each pinned by version
+  # and sha256, the same posture as the SHA-pinned actions above. Literal
+  # ubuntu-latest: the tarballs are linux-amd64, and kubeconform fetches
+  # schemas from GitHub, which the ARC pool's egress does not promise.
+  chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    env:
+      HELM_VERSION: v3.22.0
+      HELM_SHA256: 1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb
+      KUBECONFORM_VERSION: v0.8.0
+      KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install helm and kubeconform (pinned, checksum-verified)
+        run: |
+          set -eu
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz -C "$bin" --strip-components=1 linux-amd64/helm
+          curl -fsSLo kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+          tar -xzf kubeconform.tgz -C "$bin" kubeconform
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: Lint, render and validate the chart
+        run: make chart-check CHART_TOOLS_REQUIRED=1
+
   gitleaks:
     name: gitleaks
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
