@@ -892,8 +892,11 @@ network unauthenticated and in plaintext. Versions are pruned and `sha256:`
 pins are keyed as for `type: gcs`.
 
 In prefix mode the fingerprint covers every listed object's
-`(key, ETag, size)`. Setting `etag:` pins a bundle exactly as
-`generation:` pins a GCS one. Which providers enforce which
+`(key, ETag, size)`. Setting `etag:` pins a bundle as `generation:`
+pins a GCS one, with one difference: the store reports the ETag, so the
+pin stops meerkat following a later overwrite only on a store that
+enforces `If-Match`, and a store you do not trust can report whatever it
+likes. Pin `sha256:` when the bytes themselves must be verified. Which providers enforce which
 preconditions — and what that means for a `memory:` store on Garage — is
 recorded in [docs/design/object-stores.md](docs/design/object-stores.md).
 
