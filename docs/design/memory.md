@@ -768,7 +768,11 @@ Minimal, on purpose.
   ID, and which capability would promote it — so the model can tell the
   user where it went instead of reporting a success that wasn't one. It
   does not return the storage location (an object URL or a server path):
-  that names infrastructure, not the memory (meerkat-mob#62).
+  that names infrastructure, not the memory (meerkat-mob#62). Neither
+  does an error: when the store itself fails (not a conflict or a quota,
+  whose messages name no location), the caller is told which operation
+  failed and that the server log has the details, and the store's own
+  error, which names its path or bucket, goes only to that log.
 
 Promotion today is `mv <store>/_staging/<scope>/<ns>/<slug>.md
 <store>/<scope>/<slug>.md`, plus flipping the document's

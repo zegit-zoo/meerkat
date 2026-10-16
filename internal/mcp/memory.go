@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -387,7 +388,14 @@ func saveMemory(ctx context.Context, col *collections.Collection, args saveMemor
 		}
 		telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeError)
 		telemetry.Fail(span, telemetry.OutcomeError)
-		return nil, fmt.Errorf("save memory: %w", err)
+		if errors.Is(err, memory.ErrQuotaExceeded) {
+			// A QuotaError names the limit, never a key or a location.
+			return nil, fmt.Errorf("save memory: %w", err)
+		}
+		if version != "" {
+			return nil, storeError("save memory", fmt.Sprintf("the memory was stored as version %s but could not be indexed", version), err)
+		}
+		return nil, storeError("save memory", "", err)
 	}
 	telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeSaved)
 	span.SetAttributes(telemetry.Outcome(telemetry.OutcomeSaved))
@@ -429,7 +437,10 @@ func stageMemory(ctx context.Context, col *collections.Collection, args saveMemo
 	if err != nil {
 		telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeError)
 		telemetry.Fail(span, telemetry.OutcomeError)
-		return nil, fmt.Errorf("stage memory: %w", err)
+		if errors.Is(err, memory.ErrQuotaExceeded) {
+			return nil, fmt.Errorf("stage memory: %w", err)
+		}
+		return nil, storeError("stage memory", "", err)
 	}
 	telemetry.Record(ctx).MemorySaved(string(ref.Scope), telemetry.OutcomeStaged)
 	span.SetAttributes(telemetry.Outcome(telemetry.OutcomeStaged))
@@ -447,6 +458,21 @@ func stageMemory(ctx context.Context, col *collections.Collection, args saveMemo
 			ref.Scope, col.Name, ref.Scope.Capability()),
 	}
 	return jsonResult(out)
+}
+
+// storeError is what the caller gets when a memory store operation
+// fails for a reason other than a conflict or a quota. The store's own
+// error names its location: an absolute server path, or the bucket and
+// object key inside an S3 or GCS SDK message, and an MCP handler's
+// error text reaches the caller verbatim. So the full error goes to the
+// server log and the caller gets the operation and, when there is one,
+// what did happen (meerkat-mob#62).
+func storeError(op, what string, err error) error {
+	slog.Default().Error("meerkat: memory store failure", "op", op, "error", err.Error())
+	if what != "" {
+		return fmt.Errorf("%s: %s; the server log has the details", op, what)
+	}
+	return fmt.Errorf("%s: the memory store failed; the server log has the details", op)
 }
 
 // precondition builds the optimistic-locking condition for a write.
@@ -470,7 +496,7 @@ func precondition(ctx context.Context, store memory.Store, key string, args save
 	}
 	current, exists, err := store.Stat(ctx, key)
 	if err != nil {
-		return memory.Precondition{}, fmt.Errorf("read the current memory: %w", err)
+		return memory.Precondition{}, storeError("read the current memory", "", err)
 	}
 	if !exists {
 		return memory.CreateOnly(), nil
