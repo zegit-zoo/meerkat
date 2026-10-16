@@ -4,18 +4,83 @@ Deploys [meerkat](../../README.md) from `ghcr.io/zegit-zoo/meerkat` on
 Kubernetes: the hosted MCP server (`mk mcp serve-http`, the default) or the
 HTTP/OpenAPI server (`mk http serve`, `server.mode: http`).
 
-The chart is not published to a chart repository or as an OCI artifact
-yet. Install it from a checkout:
+## Installing
+
+Each meerkat release publishes the chart as a signed OCI artifact, versioned
+in lockstep with the app: git tag `vX.Y.Z` publishes
+`oci://ghcr.io/zegit-zoo/charts/meerkat` version `X.Y.Z`, whose `appVersion`
+(the default image tag) is `X.Y.Z` too. Chart and image versions have no
+leading `v`. The first release that publishes the chart is the one after
+v0.19.0.
 
 ```bash
-helm install meerkat ./charts/meerkat -n meerkat --create-namespace -f my-values.yaml
+helm install meerkat oci://ghcr.io/zegit-zoo/charts/meerkat --version 0.20.0 \
+  -n meerkat --create-namespace -f my-values.yaml
 ```
 
-Chart `0.1.0` defaults to meerkat `0.18.0` (`appVersion`). Image tags have
-no leading `v`: git tag `v0.18.0` publishes image tag `0.18.0`, and the
-chart strips a `v` from `image.tag` if you give one. Pin by digest with
-`image.digest`; see [docs/CONTAINER.md](../../docs/CONTAINER.md) for
-verifying the image with cosign first.
+Verify the chart before you install it. It is signed keyless by the release
+workflow, the same identity as the image:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  ghcr.io/zegit-zoo/charts/meerkat:0.20.0
+```
+
+Pin the image by digest with `image.digest`; see
+[docs/CONTAINER.md](../../docs/CONTAINER.md) for verifying the image with
+cosign first. `image.tag` overrides the chart's `appVersion`, and a leading
+`v` in it is stripped.
+
+### Flux
+
+Point an `OCIRepository` at the chart and let Flux verify the signature, then
+reference it from the `HelmRelease`. Renovate reads OCI tags (the `docker`
+datasource), so pinning `ref.tag` gets you a bump PR for each release:
+
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: meerkat
+  namespace: meerkat
+spec:
+  interval: 1h
+  url: oci://ghcr.io/zegit-zoo/charts/meerkat
+  ref:
+    tag: 0.20.0
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: ^https://token\.actions\.githubusercontent\.com$
+        subject: ^https://github\.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: meerkat
+  namespace: meerkat
+spec:
+  interval: 1h
+  chartRef:
+    kind: OCIRepository
+    name: meerkat
+  values: {}
+```
+
+### From a checkout
+
+In git the chart carries the placeholder version `0.0.0-dev`, so a checkout
+has no real default image tag. Set one:
+
+```bash
+helm install meerkat ./charts/meerkat -n meerkat --create-namespace \
+  -f my-values.yaml --set image.tag=0.20.0
+```
 
 ## Authentication
 

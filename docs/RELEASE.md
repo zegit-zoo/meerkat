@@ -38,6 +38,7 @@ exact tagged SHA before anything is published.
    parallel. The jobs:
    - **`verify` job** — first fails unless the tagged commit is an ancestor of `origin/master`, then re-runs the full gate (lint + test + vuln + gosec + gitleaks) on the exact tagged SHA.
    - **`goreleaser` job** (runs only after `verify` passes) — builds cross-platform binaries (darwin/linux/windows, amd64/arm64), creates archives and a checksums file, generates SPDX SBOMs via syft, signs the checksums file with cosign (keyless, GitHub OIDC), and publishes a GitHub Release with all artifacts attached.
+   - **`chart` job** (runs only after both `goreleaser` and `docker` succeed, so the image it defaults to exists) — packages `charts/meerkat` as version `X.Y.Z` with `appVersion` `X.Y.Z`, pushes it to `oci://ghcr.io/zegit-zoo/charts/meerkat`, signs its digest with cosign (keyless, GitHub OIDC) and attaches a SLSA provenance attestation. It has no `environment:` of its own, because a job that starts after the approval would ask for a second one; depending on both approved jobs keeps it behind the same approval.
    - **`docker` job** (runs only after `verify` passes, in parallel with `goreleaser`) — builds the hardened multi-stage [`Dockerfile`](../Dockerfile) for `linux/amd64` + `linux/arm64` via QEMU + buildx, pushes the manifest list to `ghcr.io/zegit-zoo/meerkat`, signs it with cosign (keyless, GitHub OIDC), and attaches a Syft SBOM + SLSA provenance attestation via buildx's native `--sbom`/`--provenance`. See [docs/CONTAINER.md](CONTAINER.md).
 
 The released artifacts are:
@@ -61,6 +62,9 @@ The released artifacts are:
   signed + attested), plus `:latest` when the tag is the highest
   release tag. Note these image tags drop the git tag's leading `v`
   — see [docs/CONTAINER.md](CONTAINER.md)
+- `oci://ghcr.io/zegit-zoo/charts/meerkat:X.Y.Z` (the Helm chart, signed +
+  attested; version and `appVersion` are both `X.Y.Z`). In git the chart
+  carries the placeholder `0.0.0-dev`: never bump it by hand
 
 The binaries and archives are reproducible: the embedded build date
 and every file timestamp are the tagged commit's, and GoReleaser is
@@ -199,3 +203,17 @@ than checking an embedded offline inclusion proof, which is what
 `verify-blob --bundle` does). See [docs/CONTAINER.md](CONTAINER.md) for
 running the image itself, including the read-only-filesystem flags and
 the SBOM/provenance inspection commands.
+
+## Verifying the Helm chart (consumer side)
+
+```sh
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/zegit-zoo/meerkat/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  ghcr.io/zegit-zoo/charts/meerkat:X.Y.Z
+gh attestation verify oci://ghcr.io/zegit-zoo/charts/meerkat:X.Y.Z -R zegit-zoo/meerkat
+```
+
+The chart is signed by the same `release.yml` identity as the image. A Flux
+`OCIRepository` can check it with `verify:`; see
+[charts/meerkat/README.md](../charts/meerkat/README.md#flux).
