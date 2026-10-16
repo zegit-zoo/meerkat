@@ -136,8 +136,9 @@ all, and `type: url`/`gcs`/`s3` need only `/home/nonroot/.cache` to be
 writable. See [docs/CONTAINER.md](docs/CONTAINER.md) for the full run
 reference (read-only-fs flags, the content-cache mount, and cosign
 verification). For Kubernetes there is a Helm chart in
-[charts/meerkat](charts/meerkat/README.md); it is not published to a chart
-repository yet, so install it from a checkout.
+[charts/meerkat](charts/meerkat/README.md), published with each release as
+the signed OCI artifact `oci://ghcr.io/zegit-zoo/charts/meerkat`, versioned
+in lockstep with meerkat.
 
 ## Use
 

@@ -218,11 +218,13 @@ It runs `mcp serve-http` by default, or `http serve` with
 HTTPRoute, ServiceMonitor, PodDisruptionBudget, HPA and NetworkPolicy.
 Credentials are only ever Secret references.
 
-The chart is not published to a chart repository or as an OCI artifact
-yet; install it from a checkout:
+Each release publishes it as a signed OCI artifact, versioned in lockstep
+with the image: git tag `vX.Y.Z` publishes chart `X.Y.Z` with `appVersion`
+`X.Y.Z`. The chart README covers installing, cosign verification and a Flux
+`OCIRepository`:
 
 ```bash
-helm install meerkat ./charts/meerkat -f my-values.yaml
+helm install meerkat oci://ghcr.io/zegit-zoo/charts/meerkat --version X.Y.Z -f my-values.yaml
 ```
 
 `make chart-check` lints it and validates its rendered manifests.

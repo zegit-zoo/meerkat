@@ -286,3 +286,96 @@ jobs:
       # container image" section for the consumer-side `cosign verify`.
       - name: Sign image (keyless)
         run: cosign sign --yes "ghcr.io/zegit-zoo/meerkat@${{ steps.build.outputs.digest }}"
+
+  # The Helm chart, versioned in lockstep with the app: charts/meerkat in git
+  # carries the placeholder 0.0.0-dev, and this job packages it as chart
+  # version X.Y.Z with appVersion X.Y.Z (no leading `v`, like the image
+  # tags), so a release can never ship a chart that points at an older
+  # image. It pushes oci://ghcr.io/zegit-zoo/charts/meerkat:X.Y.Z, signs the
+  # digest with cosign (keyless, the same release.yml@refs/tags identity as
+  # the image) and attaches SLSA provenance (meerkat-mob#10).
+  #
+  # No `environment:` of its own: a job that starts after the approval would
+  # ask for a second one. It needs both approved jobs, so it runs only once
+  # a release manager other than the tagger has approved this release, and
+  # only after the image it defaults to exists.
+  chart:
+    name: Package, sign & push Helm chart
+    needs: [goreleaser, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write      # cosign keyless OIDC (Fulcio) and the attestation
+      packages: write      # push to ghcr.io
+      attestations: write  # SLSA build provenance for the chart artifact
+    env:
+      # Same pin as ci.yml's chart job; raise both together.
+      HELM_VERSION: v3.22.0
+      HELM_SHA256: 1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb
+      CHART_REPO: ghcr.io/zegit-zoo/charts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install helm (pinned, checksum-verified)
+        run: |
+          set -eu
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
+          tar -xzf helm.tgz -C "$bin" --strip-components=1 linux-amd64/helm
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: Package the chart at the release version
+        id: pkg
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          helm lint --strict charts/meerkat
+          helm package charts/meerkat --version "$version" --app-version "$version" -d "$RUNNER_TEMP/chart"
+          f="$RUNNER_TEMP/chart/meerkat-${version}.tgz"
+          if [ ! -s "$f" ]; then
+            echo "::error::$f is missing or empty"
+            ls "$RUNNER_TEMP/chart"
+            exit 1
+          fi
+          # The packaged Chart.yaml must carry the release on both fields.
+          meta="$(tar -xzOf "$f" meerkat/Chart.yaml)"
+          echo "$meta" | grep -qx "version: ${version}" || { echo "::error::packaged chart version is not ${version}"; exit 1; }
+          echo "$meta" | grep -qx "appVersion: ${version}" || { echo "::error::packaged appVersion is not ${version}"; exit 1; }
+          echo "path=$f" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Push to ghcr.io
+        id: push
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHART_PATH: ${{ steps.pkg.outputs.path }}
+        run: |
+          set -euo pipefail
+          echo "$REGISTRY_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          out="$(helm push "$CHART_PATH" "oci://${CHART_REPO}" 2>&1)"
+          echo "$out"
+          digest="$(echo "$out" | sed -n 's/^Digest: \(sha256:[0-9a-f]\{64\}\)$/\1/p')"
+          if [ -z "$digest" ]; then
+            echo "::error::helm push printed no digest"
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      # Signs the chart's manifest digest, so the signature covers exactly
+      # the pushed artifact. Flux's OCIRepository `verify:` and `cosign
+      # verify` check it (docs/RELEASE.md, charts/meerkat/README.md).
+      - name: Sign chart (keyless)
+        run: cosign sign --yes "${CHART_REPO}/meerkat@${{ steps.push.outputs.digest }}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ env.CHART_REPO }}/meerkat
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
