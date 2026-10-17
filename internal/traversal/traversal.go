@@ -113,6 +113,13 @@ type Config struct {
 	Endpoint  string `yaml:"endpoint,omitempty"`
 	Region    string `yaml:"region,omitempty"`
 	PathStyle bool   `yaml:"path_style,omitempty"`
+	// Insecure accepts a plaintext http:// Endpoint (backend: s3 only).
+	// Without it an http:// endpoint is refused at load: over plaintext
+	// the signed requests and the entries, which carry callers' queries
+	// under query: plaintext, are visible to, and changeable by, the
+	// network path (meerkat-mob#68). The same rule as a type: s3 content
+	// source and a type: s3 memory: or intake: store.
+	Insecure bool `yaml:"insecure,omitempty"`
 	// HMACKeyEnv names the environment variable holding the hashing
 	// key. The key itself never appears in configuration. Required.
 	HMACKeyEnv string `yaml:"hmac_key_env"`
@@ -165,8 +172,8 @@ func (c *Config) Validate(label string) error {
 		if c.Path == "" {
 			return fmt.Errorf("%s.path is required for backend: local", label)
 		}
-		if c.Bucket != "" || c.Endpoint != "" {
-			return fmt.Errorf("%s: bucket/endpoint apply to backend: s3, not local", label)
+		if c.Bucket != "" || c.Endpoint != "" || c.Insecure {
+			return fmt.Errorf("%s: bucket/endpoint/insecure apply to backend: s3, not local", label)
 		}
 	case BackendS3:
 		if c.Bucket == "" {
@@ -177,6 +184,9 @@ func (c *Config) Validate(label string) error {
 		}
 		if c.Endpoint != "" && !strings.HasPrefix(c.Endpoint, "https://") && !strings.HasPrefix(c.Endpoint, "http://") {
 			return fmt.Errorf("%s.endpoint must be an http(s):// URL, got %q", label, c.Endpoint)
+		}
+		if strings.HasPrefix(c.Endpoint, "http://") && !c.Insecure {
+			return fmt.Errorf("%s.endpoint %q is plaintext http; use https, or set insecure: true to accept an unencrypted connection (a local test store, a trusted private network)", label, c.Endpoint)
 		}
 		if c.Path != "" {
 			return fmt.Errorf("%s: path applies to backend: local, not s3", label)
