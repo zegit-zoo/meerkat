@@ -18,10 +18,12 @@ type MeerkatMobSpec struct {
 	// Root names the tree's root KnowledgeBase, in the same namespace.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Root string `json:"root"`
 
 	// Placement is perTier, perKB or single (the default).
 	// +optional
+	// +kubebuilder:default=single
 	// +kubebuilder:validation:Enum=perTier;perKB;single
 	Placement string `json:"placement,omitempty"`
 
@@ -56,14 +58,33 @@ type ScaleToZero struct {
 	// Idle is how long an instance may go without a traversal before
 	// it is scaled to zero. Defaults to 30m; at least 1m.
 	// +optional
+	// +kubebuilder:default="30m"
 	Idle *metav1.Duration `json:"idle,omitempty"`
 }
 
-// Telemetry names the OTLP collector.
+// OTLP protocols, as the server's observability.otlp.protocol.
+const (
+	ProtocolGRPC = "grpc"
+	ProtocolHTTP = "http/protobuf"
+)
+
+// Telemetry names the OTLP collector, as the server's
+// observability.otlp block.
 // +kubebuilder:validation:XValidation:rule="!self.endpoint.startsWith('http://') || (has(self.insecure) && self.insecure)",message="a plaintext http:// endpoint needs insecure: true"
 type Telemetry struct {
-	// +kubebuilder:validation:Pattern=`^https?://`
+	// Endpoint is the collector: a URL, or a bare host:port. grpc drops
+	// the scheme and lets insecure alone decide TLS; http/protobuf gives
+	// a bare host:port https://, or http:// with insecure: true.
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:Pattern=`^(https?://[^\s]+|[^/\s]+:[0-9]{1,5})$`
 	Endpoint string `json:"endpoint"`
+	// Protocol is grpc (the default) or http/protobuf. An OTLP/HTTP
+	// collector (usually port 4318) needs http/protobuf.
+	// +optional
+	// +kubebuilder:default=grpc
+	// +kubebuilder:validation:Enum=grpc;http/protobuf
+	Protocol string `json:"protocol,omitempty"`
+	// Insecure turns TLS off, and accepts a plaintext http:// Endpoint.
 	// +optional
 	Insecure bool `json:"insecure,omitempty"`
 }
@@ -90,6 +111,10 @@ type Librarian struct {
 
 // MeerkatMobStatus is what the operator last observed.
 type MeerkatMobStatus struct {
+	// ObservedGeneration is the metadata.generation the operator last
+	// acted on.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// Instances is the number of Deployments the mob renders to.
 	// +optional
 	Instances int32 `json:"instances,omitempty"`

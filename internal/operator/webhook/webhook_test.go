@@ -197,6 +197,86 @@ func TestKnowledgeBase_UnrelatedPreexistingViolationDoesNotBlock(t *testing.T) {
 	}
 }
 
+func TestKnowledgeBase_EditsThatKeepTheTreeAreAdmittedInsideAViolation(t *testing.T) {
+	// root - c1 - ... - c6 was admitted while the webhook was down, so
+	// c6 sits at depth 6. Edits that cannot change the tree, on an
+	// ancestor or on the leaf itself, are not blocked by it.
+	ctx := context.Background()
+	c := chain(6)
+	v := &KnowledgeBaseValidator{Reader: reader(t, c...)}
+
+	c3 := kb("c3", "c2")
+	c3.Spec.Description = "platform runbooks"
+	if _, err := v.ValidateUpdate(ctx, c[3], c3); err != nil {
+		t.Fatalf("description-only update of ancestor c3: %v", err)
+	}
+	c6 := kb("c6", "c5")
+	c6.Labels = map[string]string{"team": "platform"}
+	c6.Finalizers = []string{"meerkat-mob.dev/finalizer"}
+	if _, err := v.ValidateUpdate(ctx, c[6], c6); err != nil {
+		t.Fatalf("label-only update of leaf c6: %v", err)
+	}
+
+	// The source is still checked on such an edit.
+	bad := kb("c6", "c5")
+	bad.Spec.Source.GCS = &v1alpha1.GCSSource{Bucket: "g"}
+	_, err := v.ValidateUpdate(ctx, c[6], bad)
+	wantErr(t, err, "exactly one")
+
+	// A re-parent is checked: one that fixes the tree is admitted, and
+	// one that still leaves c6 at depth 6 is refused.
+	if _, err := v.ValidateUpdate(ctx, c[3], kb("c3", "c1")); err != nil {
+		t.Fatalf("c3 under c1 brings c6 to depth 5: %v", err)
+	}
+	v = &KnowledgeBaseValidator{Reader: reader(t, append(chain(6), kb("x", "c4"))...)}
+	_, err = v.ValidateUpdate(ctx, c[6], kb("c6", "x"))
+	wantErr(t, err, `"c6" would be at depth 6`)
+
+	// So is a new depthLimit, which can strand what is below it.
+	_, err = v.ValidateUpdate(ctx, c[2], withLimit(kb("c2", "c1"), 1))
+	wantErr(t, err, "over the depthLimit 3")
+}
+
+func TestKnowledgeBase_TreeChanged(t *testing.T) {
+	one, two := int32(1), int32(2)
+	base := kb("a", "p")
+	for _, tc := range []struct {
+		name   string
+		edit   func(*v1alpha1.KnowledgeBase)
+		change bool
+	}{
+		{"nothing", func(*v1alpha1.KnowledgeBase) {}, false},
+		{"description", func(k *v1alpha1.KnowledgeBase) { k.Spec.Description = "d" }, false},
+		{"parent", func(k *v1alpha1.KnowledgeBase) { k.Spec.Parent = "q" }, true},
+		{"limit set", func(k *v1alpha1.KnowledgeBase) { k.Spec.DepthLimit = &one }, true},
+	} {
+		k := kb("a", "p")
+		tc.edit(k)
+		if got := treeChanged(base, k); got != tc.change {
+			t.Errorf("%s: treeChanged = %v, want %v", tc.name, got, tc.change)
+		}
+	}
+	a, b := withLimit(kb("a", "p"), 1), withLimit(kb("a", "p"), 1)
+	if treeChanged(a, b) {
+		t.Error("same limit counted as a change")
+	}
+	b.Spec.DepthLimit = &two
+	if !treeChanged(a, b) {
+		t.Error("changed limit not counted")
+	}
+	if !treeChanged(a, kb("a", "p")) {
+		t.Error("removed limit not counted")
+	}
+}
+
+func TestKnowledgeBase_ParentMustBeAnObjectName(t *testing.T) {
+	v := &KnowledgeBaseValidator{Reader: reader(t, kb("root", ""))}
+	_, err := v.ValidateCreate(context.Background(), kb("a", "Foo Bar"))
+	wantErr(t, err, `spec.parent "Foo Bar" is not a KnowledgeBase name`)
+	_, err = v.ValidateUpdate(context.Background(), kb("a", "root"), kb("a", "Foo Bar"))
+	wantErr(t, err, "is not a KnowledgeBase name")
+}
+
 func TestKnowledgeBase_SourceMustBeExactlyOne(t *testing.T) {
 	v := &KnowledgeBaseValidator{Reader: reader(t)}
 	k := kb("a", "")
@@ -278,6 +358,9 @@ func TestMeerkatMob(t *testing.T) {
 	m.Spec.ScaleToZero = &v1alpha1.ScaleToZero{Enabled: true, Idle: &metav1.Duration{Duration: 10 * time.Second}}
 	_, err := v.ValidateCreate(ctx, m)
 	wantErr(t, err, "at least 1m0s")
+
+	_, err = v.ValidateCreate(ctx, mob("Foo Bar"))
+	wantErr(t, err, `spec.root "Foo Bar" is not a KnowledgeBase name`)
 
 	m = mob("root")
 	m.Spec.Telemetry = &v1alpha1.Telemetry{Endpoint: "http://collector:4318"}
