@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.23.0
-  name: meerkatmobs.meerkat.zegit.dev
+  name: meerkatmobs.meerkat-mob.dev
 spec:
-  group: meerkat.zegit.dev
+  group: meerkat-mob.dev
   names:
     kind: MeerkatMob
     listKind: MeerkatMobList

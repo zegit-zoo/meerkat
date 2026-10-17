@@ -10,7 +10,7 @@
 // cycle rules at admission.
 //
 // +kubebuilder:object:generate=true
-// +groupName=meerkat.zegit.dev
+// +groupName=meerkat-mob.dev
 package v1alpha1
 
 import (
@@ -21,7 +21,7 @@ import (
 
 var (
 	// GroupVersion is the API group and version of these resources.
-	GroupVersion = schema.GroupVersion{Group: "meerkat.zegit.dev", Version: "v1alpha1"}
+	GroupVersion = schema.GroupVersion{Group: "meerkat-mob.dev", Version: "v1alpha1"}
 
 	// SchemeBuilder registers the types with a runtime.Scheme. Only
 	// apimachinery is imported, so the package stays cheap to import.
