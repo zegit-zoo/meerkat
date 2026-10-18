@@ -69,6 +69,11 @@ jobs:
       - name: Docs check
         run: make docs-check
 
+      # The operator CRDs and deep-copy methods are generated from
+      # internal/operator/api (meerkat-mob#10).
+      - name: Operator CRDs check
+        run: make crds-check
+
   test:
     name: Test
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}

@@ -1,0 +1,320 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: knowledgebases.meerkat.zegit.dev
+spec:
+  group: meerkat.zegit.dev
+  names:
+    kind: KnowledgeBase
+    listKind: KnowledgeBaseList
+    plural: knowledgebases
+    shortNames:
+    - kb
+    singular: knowledgebase
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.parent
+      name: Parent
+      type: string
+    - jsonPath: .status.depth
+      name: Depth
+      type: integer
+    - jsonPath: .status.mounted
+      name: Mounted
+      type: boolean
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: KnowledgeBase is one node of a knowledge-base tree.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              KnowledgeBaseSpec is where one knowledge base's content lives and
+              where it sits in the tree.
+            properties:
+              access:
+                description: |-
+                  Access restricts who may reach this KnowledgeBase and by which
+                  tree path. It maps to the hosted server's authz rules.
+                properties:
+                  identities:
+                    description: |-
+                      Identities lists the principals (authz subjects) that may reach
+                      it; empty means anyone the server's own rules admit.
+                    items:
+                      type: string
+                    maxItems: 256
+                    type: array
+                  paths:
+                    description: |-
+                      Paths lists the tree paths (root/platform/flux) this
+                      KnowledgeBase may be reached through; empty means any.
+                    items:
+                      type: string
+                    maxItems: 64
+                    type: array
+                type: object
+              contract:
+                description: |-
+                  Contract is the update contract shown to callers, as a tree
+                  manifest's contract: a short description of how this knowledge
+                  base may be changed.
+                maxLength: 2000
+                type: string
+              depthLimit:
+                description: |-
+                  DepthLimit may lower the five-level cap for the subtree below
+                  this KnowledgeBase, never raise it: a child may sit at most
+                  DepthLimit levels below this one.
+                format: int32
+                maximum: 5
+                minimum: 0
+                type: integer
+              description:
+                description: Description is shown by mk_list_collections.
+                maxLength: 500
+                type: string
+              mount:
+                description: |-
+                  Mount is eager (the default) or lazy: a lazy KnowledgeBase is
+                  mounted on its first traversal.
+                enum:
+                - eager
+                - lazy
+                type: string
+              parent:
+                description: |-
+                  Parent names the KnowledgeBase, in the same namespace, that this
+                  one hangs under. Empty for a tree's root. The webhook refuses a
+                  parent chain that loops or that puts this KnowledgeBase, or any
+                  below it, deeper than five levels (root = 0).
+                maxLength: 253
+                type: string
+              placement:
+                description: Placement is shared (the default) or dedicated.
+                enum:
+                - shared
+                - dedicated
+                type: string
+              refresh:
+                description: |-
+                  Refresh makes an object-store source follow new versions instead
+                  of serving the one it started on.
+                properties:
+                  interval:
+                    description: |-
+                      Interval is how often the source is polled. The server's floor
+                      is 5s.
+                    type: string
+                required:
+                - interval
+                type: object
+              resources:
+                description: Resources bound what this KnowledgeBase may hold resident.
+                properties:
+                  maxResidentBytes:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: MaxResidentBytes caps what this KnowledgeBase keeps
+                      in memory.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                type: object
+              source:
+                description: |-
+                  Source is where the content lives: exactly one of s3, gcs or
+                  bundle.
+                properties:
+                  bundle:
+                    description: |-
+                      BundleSource is a released knowledge-base bundle fetched over https
+                      and verified against its digest.
+                    properties:
+                      sha256:
+                        description: SHA256 is the bundle's hex digest.
+                        pattern: ^[0-9a-f]{64}$
+                        type: string
+                      url:
+                        pattern: ^https://
+                        type: string
+                    required:
+                    - sha256
+                    - url
+                    type: object
+                  gcs:
+                    description: |-
+                      GCSSource is a prefix in a Google Cloud Storage bucket, read with the
+                      pod's application default credentials.
+                    properties:
+                      bucket:
+                        maxLength: 222
+                        minLength: 1
+                        pattern: ^[^/]+$
+                        type: string
+                      prefix:
+                        maxLength: 1024
+                        type: string
+                    required:
+                    - bucket
+                    type: object
+                  s3:
+                    description: |-
+                      S3Source is a prefix in an S3-compatible bucket. Credentials come
+                      from the pod's environment, never from this resource.
+                    properties:
+                      bucket:
+                        description: |-
+                          Bucket is a bucket name, never a path: providers differ on the
+                          rest (Garage accepts names AWS refuses), so only a slash is
+                          refused here, as the content source does.
+                        maxLength: 255
+                        minLength: 1
+                        pattern: ^[^/]+$
+                        type: string
+                      endpoint:
+                        description: Endpoint is the store's URL; empty for AWS.
+                        pattern: ^https?://
+                        type: string
+                      insecure:
+                        description: |-
+                          Insecure accepts a plaintext http:// Endpoint, as in a type: s3
+                          content source.
+                        type: boolean
+                      pathStyle:
+                        type: boolean
+                      prefix:
+                        maxLength: 1024
+                        type: string
+                      region:
+                        type: string
+                    required:
+                    - bucket
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'a plaintext http:// endpoint needs insecure: true'
+                      rule: '!has(self.endpoint) || !self.endpoint.startsWith(''http://'')
+                        || (has(self.insecure) && self.insecure)'
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one of s3, gcs or bundle must be set
+                  rule: '(has(self.s3) ? 1 : 0) + (has(self.gcs) ? 1 : 0) + (has(self.bundle)
+                    ? 1 : 0) == 1'
+              tier:
+                description: |-
+                  Tier groups KnowledgeBases for a MeerkatMob with placement:
+                  perTier. 0 is the hot, fast surface.
+                format: int32
+                maximum: 5
+                minimum: 0
+                type: integer
+            required:
+            - source
+            type: object
+          status:
+            description: KnowledgeBaseStatus is what the operator last observed.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              depth:
+                description: Depth is its depth in the tree (root = 0).
+                format: int32
+                type: integer
+              generation:
+                description: Generation is the content version being served.
+                type: string
+              lastTraversal:
+                description: LastTraversal is when a retrieval last crossed into it.
+                format: date-time
+                type: string
+              mounted:
+                description: Mounted is true while some instance serves this KnowledgeBase.
+                type: boolean
+              pages:
+                description: Pages is the number of pages served.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
