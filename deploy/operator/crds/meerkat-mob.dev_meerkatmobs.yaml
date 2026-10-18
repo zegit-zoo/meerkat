@@ -91,6 +91,7 @@ spec:
                 - schedule
                 type: object
               placement:
+                default: single
                 description: Placement is perTier, perKB or single (the default).
                 enum:
                 - perTier
@@ -102,6 +103,7 @@ spec:
                   namespace.
                 maxLength: 253
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                 type: string
               scaleToZero:
                 description: |-
@@ -111,6 +113,7 @@ spec:
                   enabled:
                     type: boolean
                   idle:
+                    default: 30m
                     description: |-
                       Idle is how long an instance may go without a traversal before
                       it is scaled to zero. Defaults to 30m; at least 1m.
@@ -122,10 +125,26 @@ spec:
                 description: Telemetry is the OTLP export every instance shares.
                 properties:
                   endpoint:
-                    pattern: ^https?://
+                    description: |-
+                      Endpoint is the collector: a URL, or a bare host:port. grpc drops
+                      the scheme and lets insecure alone decide TLS; http/protobuf gives
+                      a bare host:port https://, or http:// with insecure: true.
+                    maxLength: 1024
+                    pattern: ^(https?://[^\s]+|[^/\s]+:[0-9]{1,5})$
                     type: string
                   insecure:
+                    description: Insecure turns TLS off, and accepts a plaintext http://
+                      Endpoint.
                     type: boolean
+                  protocol:
+                    default: grpc
+                    description: |-
+                      Protocol is grpc (the default) or http/protobuf. An OTLP/HTTP
+                      collector (usually port 4318) needs http/protobuf.
+                    enum:
+                    - grpc
+                    - http/protobuf
+                    type: string
                 required:
                 - endpoint
                 type: object
@@ -207,6 +226,12 @@ spec:
                 description: KnowledgeBases is the number of KnowledgeBases in the
                   tree.
                 format: int32
+                type: integer
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the metadata.generation the operator last
+                  acted on.
+                format: int64
                 type: integer
             type: object
         type: object

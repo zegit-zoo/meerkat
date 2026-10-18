@@ -29,9 +29,11 @@ type KnowledgeBaseSpec struct {
 	// Parent names the KnowledgeBase, in the same namespace, that this
 	// one hangs under. Empty for a tree's root. The webhook refuses a
 	// parent chain that loops or that puts this KnowledgeBase, or any
-	// below it, deeper than five levels (root = 0).
+	// below it, deeper than five levels (root = 0). It must be a
+	// Kubernetes object name (a DNS-1123 subdomain).
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Parent string `json:"parent,omitempty"`
 
 	// Tier groups KnowledgeBases for a MeerkatMob with placement:
@@ -44,11 +46,13 @@ type KnowledgeBaseSpec struct {
 	// Mount is eager (the default) or lazy: a lazy KnowledgeBase is
 	// mounted on its first traversal.
 	// +optional
+	// +kubebuilder:default=eager
 	// +kubebuilder:validation:Enum=eager;lazy
 	Mount string `json:"mount,omitempty"`
 
 	// Placement is shared (the default) or dedicated.
 	// +optional
+	// +kubebuilder:default=shared
 	// +kubebuilder:validation:Enum=shared;dedicated
 	Placement string `json:"placement,omitempty"`
 
@@ -181,9 +185,13 @@ type KnowledgeBaseStatus struct {
 	// Mounted is true while some instance serves this KnowledgeBase.
 	// +optional
 	Mounted bool `json:"mounted,omitempty"`
-	// Generation is the content version being served.
+	// ObservedGeneration is the metadata.generation the operator last
+	// acted on.
 	// +optional
-	Generation string `json:"generation,omitempty"`
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// ContentGeneration is the content version being served.
+	// +optional
+	ContentGeneration string `json:"contentGeneration,omitempty"`
 	// Pages is the number of pages served.
 	// +optional
 	Pages int64 `json:"pages,omitempty"`

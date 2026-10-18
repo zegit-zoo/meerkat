@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -30,13 +31,27 @@ var _ admission.Validator[*v1alpha1.KnowledgeBase] = (*KnowledgeBaseValidator)(n
 
 // ValidateCreate checks a new KnowledgeBase's place in the tree.
 func (v *KnowledgeBaseValidator) ValidateCreate(ctx context.Context, kb *v1alpha1.KnowledgeBase) (admission.Warnings, error) {
-	return v.validate(ctx, kb)
+	return v.validate(ctx, kb, true)
 }
 
-// ValidateUpdate checks the tree again: a new parent can create a loop
-// or push the subtree below the KnowledgeBase too deep.
-func (v *KnowledgeBaseValidator) ValidateUpdate(ctx context.Context, _, kb *v1alpha1.KnowledgeBase) (admission.Warnings, error) {
-	return v.validate(ctx, kb)
+// ValidateUpdate checks the tree again only when the update moves the
+// KnowledgeBase or changes its depthLimit: a new parent can create a
+// loop or push the subtree below it too deep, and a lower limit can
+// strand what is already below it. Any other edit (a description, a
+// label, a finalizer) cannot change the tree, so it is admitted even
+// inside a tree that already breaks the rules.
+func (v *KnowledgeBaseValidator) ValidateUpdate(ctx context.Context, old, kb *v1alpha1.KnowledgeBase) (admission.Warnings, error) {
+	return v.validate(ctx, kb, treeChanged(old, kb))
+}
+
+// treeChanged reports whether an update touches the fields the tree
+// rules read.
+func treeChanged(old, kb *v1alpha1.KnowledgeBase) bool {
+	if old.Spec.Parent != kb.Spec.Parent {
+		return true
+	}
+	a, b := old.Spec.DepthLimit, kb.Spec.DepthLimit
+	return (a == nil) != (b == nil) || (a != nil && *a != *b)
 }
 
 // ValidateDelete always admits, and warns when children are left
@@ -53,9 +68,19 @@ func (v *KnowledgeBaseValidator) ValidateDelete(ctx context.Context, kb *v1alpha
 	return nil, nil
 }
 
-func (v *KnowledgeBaseValidator) validate(ctx context.Context, kb *v1alpha1.KnowledgeBase) (admission.Warnings, error) {
+func (v *KnowledgeBaseValidator) validate(ctx context.Context, kb *v1alpha1.KnowledgeBase, tree bool) (admission.Warnings, error) {
 	if err := validateSource(&kb.Spec.Source); err != nil {
 		return nil, err
+	}
+	if !tree {
+		return nil, nil
+	}
+	if p := kb.Spec.Parent; p != "" {
+		// The CRD's pattern says the same; a name no object can have
+		// would otherwise be a "does not exist yet" warning forever.
+		if errs := validation.IsDNS1123Subdomain(p); len(errs) > 0 {
+			return nil, fmt.Errorf("spec.parent %q is not a KnowledgeBase name: %s", p, strings.Join(errs, "; "))
+		}
 	}
 	var list v1alpha1.KnowledgeBaseList
 	if err := v.Reader.List(ctx, &list, client.InNamespace(kb.Namespace)); err != nil {
@@ -122,6 +147,9 @@ func (v *MeerkatMobValidator) validate(ctx context.Context, mob *v1alpha1.Meerka
 		if f := strings.Fields(s.Librarian.Schedule); len(f) != 5 {
 			return nil, fmt.Errorf("spec.librarian.schedule must be a five-field cron expression, got %q", s.Librarian.Schedule)
 		}
+	}
+	if errs := validation.IsDNS1123Subdomain(s.Root); len(errs) > 0 {
+		return nil, fmt.Errorf("spec.root %q is not a KnowledgeBase name: %s", s.Root, strings.Join(errs, "; "))
 	}
 	var root v1alpha1.KnowledgeBase
 	err := v.Reader.Get(ctx, client.ObjectKey{Namespace: mob.Namespace, Name: s.Root}, &root)

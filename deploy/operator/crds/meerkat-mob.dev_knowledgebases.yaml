@@ -96,6 +96,7 @@ spec:
                 maxLength: 500
                 type: string
               mount:
+                default: eager
                 description: |-
                   Mount is eager (the default) or lazy: a lazy KnowledgeBase is
                   mounted on its first traversal.
@@ -108,10 +109,13 @@ spec:
                   Parent names the KnowledgeBase, in the same namespace, that this
                   one hangs under. Empty for a tree's root. The webhook refuses a
                   parent chain that loops or that puts this KnowledgeBase, or any
-                  below it, deeper than five levels (root = 0).
+                  below it, deeper than five levels (root = 0). It must be a
+                  Kubernetes object name (a DNS-1123 subdomain).
                 maxLength: 253
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                 type: string
               placement:
+                default: shared
                 description: Placement is shared (the default) or dedicated.
                 enum:
                 - shared
@@ -294,13 +298,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              contentGeneration:
+                description: ContentGeneration is the content version being served.
+                type: string
               depth:
                 description: Depth is its depth in the tree (root = 0).
                 format: int32
                 type: integer
-              generation:
-                description: Generation is the content version being served.
-                type: string
               lastTraversal:
                 description: LastTraversal is when a retrieval last crossed into it.
                 format: date-time
@@ -308,6 +312,12 @@ spec:
               mounted:
                 description: Mounted is true while some instance serves this KnowledgeBase.
                 type: boolean
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the metadata.generation the operator last
+                  acted on.
+                format: int64
+                type: integer
               pages:
                 description: Pages is the number of pages served.
                 format: int64

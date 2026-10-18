@@ -31,9 +31,11 @@ type node struct {
 // cannot be checked yet, and an error for a cycle or a depth that the
 // manifest loader would refuse.
 //
-// Only rules the candidate can break are checked: its own ancestors
-// cannot move, so a violation elsewhere in the namespace (one admitted
-// while the webhook was down) does not block an unrelated edit.
+// Only rules the candidate can break are checked: a violation
+// elsewhere in the namespace (one admitted while the webhook was down)
+// is not reported. The caller runs it only on a create and on an update
+// that changes spec.parent or spec.depthLimit, so other edits inside a
+// violating tree are not blocked either.
 func checkTree(candidate *v1alpha1.KnowledgeBase, existing []v1alpha1.KnowledgeBase) (warnings []string, err error) {
 	name := candidate.Name
 	nodes := make(map[string]node, len(existing)+1)
