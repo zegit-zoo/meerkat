@@ -6,7 +6,7 @@ Deployments from them does not yet, and nothing ships the operator.
 
 ## Resources
 
-Both are namespaced, in the group `meerkat.zegit.dev`, version
+Both are namespaced, in the group `meerkat-mob.dev`, version
 `v1alpha1`. The manifests are generated into `deploy/operator/crds/`
 from `internal/operator/api/v1alpha1` by `make crds`, and CI fails when
 they are stale (`make crds-check`).
@@ -16,7 +16,7 @@ tree. Its keys mean what the same keys mean in a `tree:` manifest
 ([tree.md](tree.md)):
 
 ```yaml
-apiVersion: meerkat.zegit.dev/v1alpha1
+apiVersion: meerkat-mob.dev/v1alpha1
 kind: KnowledgeBase
 metadata: {name: platform, namespace: kb}
 spec:
