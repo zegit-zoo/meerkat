@@ -19,13 +19,30 @@ exact tagged SHA before anything is published.
 ## Release flow
 
 1. Ensure the working tree is clean and tests pass locally (`make pre-release`).
-2. Tag the release commit. It must be a commit on `master`; the
-   workflow refuses any other:
+2. Tag the release commit with `scripts/release-tag.sh`:
 
    ```sh
-   git tag -s v1.2.3 -m "release v1.2.3"
-   git push origin v1.2.3
+   bash scripts/release-tag.sh v1.2.3            # origin/master's head
+   bash scripts/release-tag.sh v1.2.3 <commit>   # an earlier master commit
    ```
+
+   The script fetches `master` and the tags, then refuses before
+   tagging when:
+
+   - the name is not `vX.Y.Z`;
+   - the commit is not on `master` (the workflow refuses any other);
+   - the tag already exists;
+   - the commit's checks failed or are still pending (`--force-ci`
+     overrides).
+
+   It warns when the version is not the highest (an older-line patch).
+   It prints the tag, the commit and the commits since the previous
+   tag, and asks before acting (`--yes` skips the prompt). Then it
+   creates a signed tag (`git tag -s`), verifies the signature, and
+   pushes it over HTTPS, because an SSH key can map to a GitHub account
+   the tag ruleset refuses. The push runs with `umask 022` (meerkat#203)
+   and through the pre-push hooks. If the push fails, it deletes the
+   local tag so a retry starts clean.
 
    Only Markus and Jonas can create `v*` tags (see
    [Tag protection](#tag-protection)).
