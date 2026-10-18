@@ -295,6 +295,23 @@ crds-check: crds ## CI gate: fail if the generated CRDs or deep-copy methods are
 	fi
 	@echo "operator CRDs are in sync"
 
+# The operator's envtest suite runs the reconciler and the webhook
+# against a real kube-apiserver and etcd. setup-envtest has no tagged
+# releases, so it is pinned to a commit of controller-runtime's
+# release-0.25 branch (the controller-runtime minor in go.mod), and the
+# binaries to the Kubernetes minor of k8s.io/client-go. setup-envtest
+# checks each download against the release index's digest. Without
+# KUBEBUILDER_ASSETS, `make test` skips TestEnvtest.
+SETUP_ENVTEST_VERSION := v0.25.3-0.20261012174806-32759fab3119
+SETUP_ENVTEST := $(TOOLS_DIR)/setup-envtest@$(SETUP_ENVTEST_VERSION)/setup-envtest
+ENVTEST_K8S_VERSION := 1.37.0
+
+.PHONY: test-envtest
+test-envtest: sync ## Run the operator tests against a real API server (envtest)
+	$(call tool-install,setup-envtest,sigs.k8s.io/controller-runtime/tools/setup-envtest,$(SETUP_ENVTEST_VERSION))
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(TOOLS_DIR)/envtest -p path)" \
+		go test -race -count=1 ./internal/operator/... ./cmd/meerkat-operator/...
+
 .PHONY: docs
 docs: ## Regenerate docs/CLI.md from the cobra command tree
 	@echo "regenerating docs/CLI.md..."

@@ -91,6 +91,26 @@ jobs:
       - name: Run tests with coverage (enforce floor)
         run: make cover-check
 
+  # The operator's reconciler and webhook against a real kube-apiserver
+  # (meerkat-mob#10). `make test` skips TestEnvtest without the envtest
+  # binaries, so this job is where it runs.
+  envtest:
+    name: Operator envtest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    container: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER && (vars.CI_IMAGE || 'gitea.langenoja.se/zegit-zoo/zegit-arc-runner:2.337.0-ci2@sha256:af9d54c83a2f5ca64a1e26568d97c9480c7338e4605736467ea44a5c2b36ae2a') || '' }}
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Operator tests against a real API server
+        run: make test-envtest
+
   vuln:
     name: Vulnerability scan
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
