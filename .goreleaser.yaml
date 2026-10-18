@@ -234,4 +234,6 @@ release:
 # `brews:` / `homebrew_casks:` blocks are deliberately NOT used, because
 # they would require a cross-repo write token in this repository's
 # secrets — a credential a release pipeline has no business holding.
-# Bumping runs in the tap, scoped to the tap. See docs/RELEASE.md.
+# Bumping runs in the tap, scoped to the tap; release.yml only
+# dispatches it, with an App token limited to Actions: write on the
+# tap. See docs/RELEASE.md.

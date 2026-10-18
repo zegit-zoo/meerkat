@@ -391,3 +391,61 @@ jobs:
           subject-name: ${{ env.CHART_REPO }}/meerkat
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+  # Dispatches the Homebrew tap's bump.yml for this release, so brew picks it
+  # up within minutes rather than at the tap's next 6-hourly cron. The built-in
+  # GITHUB_TOKEN cannot dispatch a workflow in another repository, so this job
+  # mints a short-lived token from a GitHub App that holds only Actions: write,
+  # installed on zegit-zoo/homebrew-tap alone (docs/RELEASE.md has the setup).
+  # The token can start bump.yml and nothing else: the bump still cosign-
+  # verifies this release against release.yml@refs/tags/vX.Y.Z and runs brew
+  # test before it pushes, so the dispatch grants no path to publish an
+  # unverified formula. Until the App exists the variable is unset and the job
+  # is skipped; the cron still picks the release up.
+  #
+  # No `environment:` for the same reason as the chart job, and no
+  # permissions: the job reads nothing from this repo and signs nothing.
+  homebrew:
+    name: Dispatch Homebrew tap bump
+    needs: goreleaser
+    if: vars.TAP_DISPATCH_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      # bump.yml pins the formula to the tag it is given, so dispatching a
+      # patch for an older line (v0.19.1 after v0.20.0) would downgrade brew.
+      # No checkout here, hence the URL instead of `origin`.
+      - name: Is this the highest release tag?
+        id: latest
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          highest="$(git ls-remote --tags --refs https://github.com/zegit-zoo/meerkat.git 'refs/tags/v*' \
+            | sed -n 's|.*refs/tags/\(v[0-9]*\.[0-9]*\.[0-9]*\)$|\1|p' \
+            | sort -V | tail -n 1)"
+          if [ "$highest" = "$REF_NAME" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${REF_NAME} is not the highest release tag (${highest}); not dispatching the tap bump."
+          fi
+          echo "highest release tag: $highest; this tag: $REF_NAME"
+
+      - name: Mint a tap dispatch token
+        if: steps.latest.outputs.latest == 'true'
+        id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3.3.0
+        with:
+          client-id: ${{ vars.TAP_DISPATCH_CLIENT_ID }}
+          private-key: ${{ secrets.TAP_DISPATCH_PRIVATE_KEY }}
+          owner: zegit-zoo
+          repositories: homebrew-tap
+          permission-actions: write
+
+      - name: Dispatch bump.yml
+        if: steps.latest.outputs.latest == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh workflow run bump.yml --repo zegit-zoo/homebrew-tap -f tag="$TAG"

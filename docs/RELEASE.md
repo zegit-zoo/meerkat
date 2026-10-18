@@ -101,18 +101,18 @@ archive and binary checksums.
 holding a single binary formula (`Formula/meerkat.rb`) that downloads
 the tarballs this release publishes.
 
-**Nothing in this repository's release workflow changes, and nothing
-here needs to know the tap exists.** The tap pulls; meerkat does not
-push. That is deliberate: goreleaser's `brews:`/`homebrew_casks:`
-blocks would require a cross-repo write token to live in *this* repo's
+The bump runs in the tap, with only the tap's own contents in scope.
+goreleaser's `brews:`/`homebrew_casks:` blocks are deliberately not
+used: they would put a token that can write the tap in *this* repo's
 secrets, which is exactly the kind of credential a release pipeline
-should not be holding. The bump runs in the tap instead, with only its
-own contents in scope.
+should not be holding. All this repo holds is the right to *start* the
+tap's bump (see [Release dispatch](#release-dispatch) below).
 
 The tap's `bump.yml` workflow:
 
-1. runs on a 6-hourly cron (so a release is picked up within ~6 hours
-   with no action from anyone) or on manual dispatch;
+1. runs when `release.yml` dispatches it, on a 6-hourly cron (the
+   fallback: a release is picked up within ~6 hours with no action from
+   anyone), or on manual dispatch;
 2. resolves the target tag — the newest `vX.Y.Z` release, or the one
    given to the dispatch;
 3. downloads `meerkat_<v>_checksums.txt` and its
@@ -129,7 +129,47 @@ If the signature doesn't verify, the workflow fails and the formula
 keeps pointing at the previous release: a bad or unsigned release can
 never be pinned into the tap.
 
-To publish the bump immediately rather than waiting for the cron:
+### Release dispatch
+
+`release.yml`'s `homebrew` job dispatches `bump.yml` with the release
+tag as soon as the GoReleaser job has published the archives, so brew
+users get the release within minutes. It dispatches only when the tag is
+the highest `vX.Y.Z` tag: `bump.yml` pins the formula to the tag it is
+given, so a patch for an older line (v0.19.1 after v0.20.0) would
+downgrade brew. For such a tag the job logs a notice and does nothing.
+
+The built-in `GITHUB_TOKEN` cannot dispatch a workflow in another
+repository, so the job mints a one-hour token from a GitHub App that
+holds only **Actions: Read and write**, installed on `homebrew-tap`
+alone. That token can start `bump.yml` but cannot push to the tap: the
+bump still cosign-verifies the release and runs `brew test` before it
+pushes, so the dispatch grants no path to publish an unverified formula.
+
+The job is skipped while the Actions variable `TAP_DISPATCH_CLIENT_ID`
+is unset, so a release succeeds before the App exists and the cron
+keeps picking releases up. One-time setup, by an org owner:
+
+1. Create a GitHub App owned by the `zegit-zoo` organisation
+   (*Organization settings → Developer settings → GitHub Apps → New
+   GitHub App*): any name and homepage URL, **Webhook → Active**
+   unchecked, and under *Repository permissions* only **Actions: Read
+   and write** (Metadata: Read-only is added automatically). No
+   organisation or account permissions. *Where can this GitHub App be
+   installed?* → **Only on this account**.
+2. On the App's page, note the **Client ID**, then *Private keys →
+   Generate a private key* and keep the downloaded `.pem`.
+3. *Install App* → `zegit-zoo` → **Only select repositories** →
+   `homebrew-tap`. No other repository.
+4. In `zegit-zoo/meerkat` → *Settings → Secrets and variables →
+   Actions*: add the variable `TAP_DISPATCH_CLIENT_ID` (the Client ID)
+   and the secret `TAP_DISPATCH_PRIVATE_KEY` (the whole `.pem`,
+   including the `BEGIN`/`END` lines). Then delete the local `.pem`.
+
+The next release's `homebrew` job then runs; its log shows the
+dispatch, and the tap's Actions tab shows the `bump.yml` run it started.
+
+To dispatch by hand (a release from before the setup, or a re-run after
+a failed bump):
 
 ```sh
 gh workflow run bump.yml --repo zegit-zoo/homebrew-tap -f tag=vX.Y.Z
@@ -139,8 +179,7 @@ Users on a brew install upgrade with `brew update && brew upgrade meerkat`; `mk
 update` refuses there (see
 [docs/INSTALL.md](INSTALL.md#updating-a-homebrew-install)), so the tap
 being stale is the only thing standing between a release and its
-Homebrew users — worth the manual dispatch on a release you care about
-landing fast.
+Homebrew users.
 
 ## Tag protection
 
