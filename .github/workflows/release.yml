@@ -347,6 +347,18 @@ jobs:
           echo "path=$f" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # For cosign and the attestation's push-to-registry, which read only the
+      # Docker config (~/.docker/config.json). `helm registry login` below
+      # writes helm's own registry config, so with that alone the chart was
+      # pushed but its signature upload got a 401 and 0.20.0 shipped unsigned
+      # and unattested (#205). Helm keeps its own login.
+      - name: Log in to ghcr.io (cosign, attestation)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Push to ghcr.io
         id: push
         env:
