@@ -275,18 +275,22 @@ smoke: build ## End-to-end smoke after a build
 CONTROLLER_GEN_VERSION := v0.23.0
 CONTROLLER_GEN := $(TOOLS_DIR)/controller-gen@$(CONTROLLER_GEN_VERSION)/controller-gen
 CRD_DIR := deploy/operator/crds
+OPERATOR_RBAC_DIR := deploy/operator/rbac
+OPERATOR_WEBHOOK_DIR := deploy/operator/webhook
 
 .PHONY: crds
 crds: ## Regenerate the operator CRDs and deep-copy methods from internal/operator/api
 	$(call tool-install,controller-gen,sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_GEN_VERSION))
 	$(CONTROLLER_GEN) object paths=./internal/operator/api/...
 	$(CONTROLLER_GEN) crd paths=./internal/operator/api/... output:crd:artifacts:config=$(CRD_DIR)
+	$(CONTROLLER_GEN) rbac:roleName=meerkat-operator webhook paths="./internal/operator/...;./cmd/meerkat-operator/..." \
+		output:rbac:artifacts:config=$(OPERATOR_RBAC_DIR) output:webhook:artifacts:config=$(OPERATOR_WEBHOOK_DIR)
 
 .PHONY: crds-check
 crds-check: crds ## CI gate: fail if the generated CRDs or deep-copy methods are stale
-	@if [ -n "$$(git status --porcelain -- $(CRD_DIR) internal/operator/api)" ]; then \
+	@if [ -n "$$(git status --porcelain -- $(CRD_DIR) $(OPERATOR_RBAC_DIR) $(OPERATOR_WEBHOOK_DIR) internal/operator/api)" ]; then \
 		echo "ERROR: generated operator files are out of date; run 'make crds' and commit"; \
-		git status --short -- $(CRD_DIR) internal/operator/api; \
+		git status --short -- $(CRD_DIR) $(OPERATOR_RBAC_DIR) $(OPERATOR_WEBHOOK_DIR) internal/operator/api; \
 		exit 1; \
 	fi
 	@echo "operator CRDs are in sync"

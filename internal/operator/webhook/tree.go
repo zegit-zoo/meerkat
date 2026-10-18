@@ -138,3 +138,33 @@ func childrenOf(name string, existing []v1alpha1.KnowledgeBase) []string {
 	sort.Strings(out)
 	return out
 }
+
+// CheckTree is checkTree for the reconciler. Admission is
+// time-of-check: two concurrent writes can each pass the webhook and
+// together close a loop or exceed the cap, so the reconciler runs the
+// same rules again against what the namespace holds now.
+func CheckTree(kb *v1alpha1.KnowledgeBase, existing []v1alpha1.KnowledgeBase) (warnings []string, err error) {
+	return checkTree(kb, existing)
+}
+
+// Depth is name's depth (root = 0) in the tree that existing forms,
+// counted the way checkTree counts it: a topmost KnowledgeBase whose
+// parent does not exist yet sits at depth 1 at least. On a loop it
+// counts up to where the chain repeats, so for a tree CheckTree refuses
+// it is a lower bound, not a depth the server would serve.
+func Depth(name string, existing []v1alpha1.KnowledgeBase) int32 {
+	parents := make(map[string]string, len(existing))
+	for i := range existing {
+		parents[existing[i].Name] = existing[i].Spec.Parent
+	}
+	var depth int32
+	seen := map[string]bool{name: true}
+	for cur := parents[name]; cur != "" && !seen[cur]; cur = parents[cur] {
+		depth++
+		if _, ok := parents[cur]; !ok {
+			break
+		}
+		seen[cur] = true
+	}
+	return depth
+}

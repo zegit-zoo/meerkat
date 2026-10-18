@@ -19,6 +19,24 @@ const (
 	PlacementDedicated = "dedicated"
 )
 
+// The TreeValid condition says whether a KnowledgeBase's place in the
+// tree passes the depth and cycle rules the manifest loader applies. The
+// webhook applies them at admission; the operator applies them again
+// after it, because two writes admitted together can break them.
+const (
+	ConditionTreeValid = "TreeValid"
+
+	// ReasonTreeValid: the parent chain ends at a root, without a loop,
+	// and nothing in this KnowledgeBase's subtree is too deep.
+	ReasonTreeValid = "TreeValid"
+	// ReasonParentMissing: a parent in the chain does not exist yet, so
+	// the depth is checked only as far as the chain goes (Unknown).
+	ReasonParentMissing = "ParentMissing"
+	// ReasonTreeRefused: the chain loops, or this KnowledgeBase or one
+	// below it is deeper than the cap or an ancestor's depthLimit.
+	ReasonTreeRefused = "TreeRefused"
+)
+
 // KnowledgeBaseSpec is where one knowledge base's content lives and
 // where it sits in the tree.
 type KnowledgeBaseSpec struct {
