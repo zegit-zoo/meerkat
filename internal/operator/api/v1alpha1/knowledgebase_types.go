@@ -30,10 +30,11 @@ type KnowledgeBaseSpec struct {
 	// one hangs under. Empty for a tree's root. The webhook refuses a
 	// parent chain that loops or that puts this KnowledgeBase, or any
 	// below it, deeper than five levels (root = 0). It must be a
-	// Kubernetes object name (a DNS-1123 subdomain).
+	// Kubernetes object name (a DNS-1123 subdomain), or empty: blanking
+	// the value in kubectl edit makes this KnowledgeBase a root again.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:Pattern=`^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	Parent string `json:"parent,omitempty"`
 
 	// Tier groups KnowledgeBases for a MeerkatMob with placement:
