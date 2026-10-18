@@ -266,6 +266,31 @@ smoke: build ## End-to-end smoke after a build
 
 # ---------- documentation ----------
 
+# ---------- operator CRDs (meerkat-mob#10) ----------
+#
+# The KnowledgeBase and MeerkatMob CRDs and their deep-copy methods are
+# generated from internal/operator/api by controller-gen, pinned here
+# like golangci-lint. `make crds` regenerates them; `make crds-check`
+# fails when a types change was committed without regenerating.
+CONTROLLER_GEN_VERSION := v0.23.0
+CONTROLLER_GEN := $(TOOLS_DIR)/controller-gen@$(CONTROLLER_GEN_VERSION)/controller-gen
+CRD_DIR := deploy/operator/crds
+
+.PHONY: crds
+crds: ## Regenerate the operator CRDs and deep-copy methods from internal/operator/api
+	$(call tool-install,controller-gen,sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_GEN_VERSION))
+	$(CONTROLLER_GEN) object paths=./internal/operator/api/...
+	$(CONTROLLER_GEN) crd paths=./internal/operator/api/... output:crd:artifacts:config=$(CRD_DIR)
+
+.PHONY: crds-check
+crds-check: crds ## CI gate: fail if the generated CRDs or deep-copy methods are stale
+	@if [ -n "$$(git status --porcelain -- $(CRD_DIR) internal/operator/api)" ]; then \
+		echo "ERROR: generated operator files are out of date; run 'make crds' and commit"; \
+		git status --short -- $(CRD_DIR) internal/operator/api; \
+		exit 1; \
+	fi
+	@echo "operator CRDs are in sync"
+
 .PHONY: docs
 docs: ## Regenerate docs/CLI.md from the cobra command tree
 	@echo "regenerating docs/CLI.md..."
