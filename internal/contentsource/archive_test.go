@@ -140,7 +140,8 @@ func TestExtractTarGz_Basic(t *testing.T) {
 // TestExtractTarGz_PermissionsNormalised guards against trusting the
 // archive's own mode bits: an entry declaring an unusual/dangerous mode
 // (e.g. world-writable, or setuid-like bits) must still land as the
-// fixed 0644 (files, subject to umask) this package always uses.
+// fixed 0644 (files, subject to umask) this package always uses. The
+// check holds under any umask that leaves the owner read+write.
 func TestExtractTarGz_PermissionsNormalised(t *testing.T) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
@@ -164,8 +165,16 @@ func TestExtractTarGz_PermissionsNormalised(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := fi.Mode().Perm(); perm != 0o644 {
-		t.Errorf("weird.md perm = %o, want 0644 regardless of the archive's declared 0777", perm)
+	// The process umask can only clear bits, so assert the guarantee
+	// rather than an exact mode: nothing outside 0644 (no exec, no
+	// group/other write, nothing taken from the declared 0777), and the
+	// owner can still read and write the file.
+	perm := fi.Mode().Perm()
+	if extra := perm &^ 0o644; extra != 0 {
+		t.Errorf("weird.md perm = %o has bits %o outside 0644; the archive's declared 0777 must not be trusted", perm, extra)
+	}
+	if perm&0o600 != 0o600 {
+		t.Errorf("weird.md perm = %o, want owner read+write", perm)
 	}
 }
 

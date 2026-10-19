@@ -277,6 +277,17 @@ func TestKnowledgeBase_ParentMustBeAnObjectName(t *testing.T) {
 	wantErr(t, err, "is not a KnowledgeBase name")
 }
 
+func TestKnowledgeBase_BlankedParentMakesARoot(t *testing.T) {
+	// kubectl edit that blanks spec.parent sends "" (meerkat#202); the
+	// CRD pattern admits it and so must the webhook.
+	v := &KnowledgeBaseValidator{Reader: reader(t, kb("root", ""), kb("a", "root"))}
+	if _, err := v.ValidateUpdate(context.Background(), kb("a", "root"), kb("a", "")); err != nil {
+		t.Fatalf("blanking the parent: %v", err)
+	}
+	_, err := v.ValidateUpdate(context.Background(), kb("a", "root"), kb("a", "Foo Bar"))
+	wantErr(t, err, "is not a KnowledgeBase name")
+}
+
 func TestKnowledgeBase_SourceMustBeExactlyOne(t *testing.T) {
 	v := &KnowledgeBaseValidator{Reader: reader(t)}
 	k := kb("a", "")
