@@ -3,8 +3,9 @@
 // and MeerkatMob objects, and the KnowledgeBase reconciler, which
 // re-checks each tree after admission and reports it in status.
 //
-// It is not released yet: .goreleaser.yaml and the image build only
-// ship cmd/meerkat and cmd/meerkat-bootstrap.
+// Each release ships it as the ghcr.io/zegit-zoo/meerkat-operator image
+// (the Dockerfile's operator target), installed by charts/meerkat with
+// operator.enabled=true.
 package main
 
 import (

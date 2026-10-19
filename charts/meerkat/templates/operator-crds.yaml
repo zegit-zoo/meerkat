@@ -1,0 +1,20 @@
+{{- /*
+The KnowledgeBase and MeerkatMob CRDs, from the copies `make crds` keeps in
+files/operator/crds/. They are templates rather than a crds/ directory so
+they install only with the operator, and so `helm upgrade` updates them.
+operator.crds.keep (default true) annotates them helm.sh/resource-policy:
+keep: uninstalling the chart must not delete every KnowledgeBase with them.
+*/ -}}
+{{- if and .Values.operator.enabled .Values.operator.crds.install }}
+{{- range $path, $_ := .Files.Glob "files/operator/crds/*.yaml" }}
+{{- $crd := $.Files.Get $path | fromYaml }}
+{{- $annotations := default dict $crd.metadata.annotations }}
+{{- if $.Values.operator.crds.keep }}
+{{- $_ := set $annotations "helm.sh/resource-policy" "keep" }}
+{{- end }}
+{{- $_ := set $crd.metadata "annotations" $annotations }}
+{{- $_ := set $crd.metadata "labels" (merge (default dict $crd.metadata.labels) (include "meerkat.operator.labels" $ | fromYaml)) }}
+---
+{{ toYaml $crd }}
+{{- end }}
+{{- end }}

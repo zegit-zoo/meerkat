@@ -1,0 +1,118 @@
+{{- /*
+The validating webhook: its Service, the ValidatingWebhookConfiguration and
+the serving certificate.
+
+The configuration comes from files/operator/manifests.yaml, which
+controller-gen generates from the +kubebuilder:webhook markers (`make
+crds`), so paths, rules and failure policies cannot drift from the code;
+only its name, Service reference and CA are set here.
+
+The certificate comes from one of two places:
+- cert-manager (operator.webhook.certManager.enabled, the default): a
+  Certificate from operator.webhook.certManager.issuerRef, or from a
+  self-signed Issuer the chart creates when that is empty. cert-manager's
+  CA injector writes the caBundle from the cert-manager.io/inject-ca-from
+  annotation, and renews the certificate.
+- Helm (certManager.enabled=false): the chart generates a CA and a serving
+  certificate on install, keeps them in the Secret, and reuses that Secret
+  on upgrade (lookup). Nothing renews it; README.md says how to rotate it.
+*/ -}}
+{{- if eq (include "meerkat.operator.webhookEnabled" .) "true" }}
+{{- $svc := include "meerkat.operator.webhookService" . }}
+{{- $secretName := include "meerkat.operator.certSecret" . }}
+{{- $certManager := .Values.operator.webhook.certManager.enabled }}
+{{- $dnsNames := list $svc (printf "%s.%s" $svc .Release.Namespace) (printf "%s.%s.svc" $svc .Release.Namespace) (printf "%s.%s.svc.cluster.local" $svc .Release.Namespace) }}
+{{- $caBundle := "" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svc }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "meerkat.operator.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+      protocol: TCP
+  selector:
+    {{- include "meerkat.operator.selectorLabels" . | nindent 4 }}
+{{- if $certManager }}
+{{- $issuerRef := .Values.operator.webhook.certManager.issuerRef }}
+{{- if not $issuerRef }}
+{{- $issuerRef = dict "name" (printf "%s-selfsigned" (include "meerkat.operator.fullname" .)) "kind" "Issuer" }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $issuerRef.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "meerkat.operator.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+{{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "meerkat.operator.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $secretName }}
+  commonName: {{ printf "%s.%s.svc" $svc .Release.Namespace }}
+  dnsNames:
+    {{- toYaml $dnsNames | nindent 4 }}
+  duration: {{ .Values.operator.webhook.certManager.duration }}
+  renewBefore: {{ .Values.operator.webhook.certManager.renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    {{- toYaml $issuerRef | nindent 4 }}
+{{- else }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}
+{{- $data := dict }}
+{{- if and $existing $existing.data (hasKey $existing.data "ca.crt") (hasKey $existing.data "tls.crt") (hasKey $existing.data "tls.key") }}
+{{- $data = pick $existing.data "ca.crt" "tls.crt" "tls.key" }}
+{{- else }}
+{{- $days := int .Values.operator.webhook.selfSigned.validityDays }}
+{{- $ca := genCA (printf "%s-webhook-ca" (include "meerkat.operator.fullname" .)) $days }}
+{{- $cert := genSignedCert (printf "%s.%s.svc" $svc .Release.Namespace) nil $dnsNames $days $ca }}
+{{- $data = dict "ca.crt" ($ca.Cert | b64enc) "tls.crt" ($cert.Cert | b64enc) "tls.key" ($cert.Key | b64enc) }}
+{{- end }}
+{{- $caBundle = index $data "ca.crt" }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "meerkat.operator.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  {{- toYaml $data | nindent 2 }}
+{{- end }}
+{{- $vwc := .Files.Get "files/operator/manifests.yaml" | fromYaml }}
+{{- $_ := set $vwc "metadata" (dict "name" (include "meerkat.operator.fullname" .) "labels" (include "meerkat.operator.labels" . | fromYaml)) }}
+{{- if $certManager }}
+{{- $_ := set $vwc.metadata "annotations" (dict "cert-manager.io/inject-ca-from" (printf "%s/%s" .Release.Namespace $secretName)) }}
+{{- end }}
+{{- range $vwc.webhooks }}
+{{- $_ := set .clientConfig.service "name" $svc }}
+{{- $_ := set .clientConfig.service "namespace" $.Release.Namespace }}
+{{- $_ := set .clientConfig.service "port" 443 }}
+{{- if $caBundle }}
+{{- $_ := set .clientConfig "caBundle" $caBundle }}
+{{- end }}
+{{- end }}
+---
+{{ toYaml $vwc }}
+{{- end }}

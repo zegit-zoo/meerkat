@@ -232,3 +232,64 @@ tolerations: []
 affinity: {}
 topologySpreadConstraints: []
 priorityClassName: ""
+
+# meerkat-operator (meerkat-mob#10, phase 2): the KnowledgeBase and
+# MeerkatMob CRDs, their validating webhook and the KnowledgeBase
+# reconciler, from ghcr.io/zegit-zoo/meerkat-operator. Off by default; it
+# installs cluster-scoped objects (CRDs, a ClusterRole and binding, a
+# ValidatingWebhookConfiguration). Install it once per cluster. README.md,
+# "Operator", has the details.
+operator:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: ghcr.io/zegit-zoo/meerkat-operator
+    # Defaults to .Chart.AppVersion, like image.tag; a leading "v" is
+    # stripped.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  crds:
+    # Install or upgrade the CRDs with the chart. Set false when another
+    # release or a GitOps tool owns them.
+    install: true
+    # Annotate them helm.sh/resource-policy: keep, so uninstalling the
+    # chart does not delete the CRDs and every KnowledgeBase with them.
+    keep: true
+  serviceAccount:
+    # Defaults to <fullname>-operator.
+    name: ""
+    annotations: {}
+  webhook:
+    # Serve the validating webhook. Off: no admission checks; the
+    # reconciler still reports each tree in status.
+    enabled: true
+    port: 9443
+    # The serving certificate. cert-manager (default) issues and renews it
+    # and injects the CA into the webhook configuration; it must be
+    # installed in the cluster.
+    certManager:
+      enabled: true
+      # An Issuer or ClusterIssuer ({name, kind, group}). Empty: the chart
+      # creates a self-signed Issuer for this certificate alone.
+      issuerRef: {}
+      duration: 2160h
+      renewBefore: 360h
+    # Without cert-manager (certManager.enabled=false) Helm generates a CA
+    # and a serving certificate on install and reuses them on upgrade.
+    # Nothing renews them: rotate by deleting the Secret and upgrading.
+    selfSigned:
+      validityDays: 365
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # Appended after the generated arguments.
+  extraArgs: []
+  podAnnotations: {}
+  priorityClassName: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

@@ -558,6 +558,162 @@
     },
     "priorityClassName": {
       "type": "string"
+    },
+    "operator": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "pullPolicy"
+          ],
+          "properties": {
+            "repository": {
+              "$ref": "#/definitions/nonEmptyString"
+            },
+            "tag": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^$|^sha256:[a-f0-9]{64}$"
+            },
+            "pullPolicy": {
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
+          }
+        },
+        "crds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "install": {
+              "type": "boolean"
+            },
+            "keep": {
+              "type": "boolean"
+            }
+          }
+        },
+        "serviceAccount": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "annotations": {
+              "$ref": "#/definitions/stringMap"
+            }
+          }
+        },
+        "webhook": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "certManager": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "issuerRef": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "$ref": "#/definitions/nonEmptyString"
+                    },
+                    "kind": {
+                      "enum": [
+                        "Issuer",
+                        "ClusterIssuer"
+                      ]
+                    },
+                    "group": {
+                      "type": "string"
+                    }
+                  },
+                  "if": {
+                    "minProperties": 1
+                  },
+                  "then": {
+                    "required": [
+                      "name"
+                    ]
+                  }
+                },
+                "duration": {
+                  "type": "string",
+                  "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+                },
+                "renewBefore": {
+                  "type": "string",
+                  "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+                }
+              }
+            },
+            "selfSigned": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "validityDays": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3650
+                }
+              }
+            }
+          }
+        },
+        "resources": {
+          "type": "object"
+        },
+        "extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "podAnnotations": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "priorityClassName": {
+          "type": "string"
+        },
+        "nodeSelector": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "tolerations": {
+          "$ref": "#/definitions/objectList"
+        },
+        "affinity": {
+          "type": "object"
+        }
+      }
     }
   }
 }

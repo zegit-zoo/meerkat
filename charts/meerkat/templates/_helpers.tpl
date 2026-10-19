@@ -124,3 +124,59 @@ existing ConfigMap cannot be inspected, so it reports "unknown".
 {{- fail "contentSource.existingConfigMap replaces contentSource.config/raw; set one, not both" }}
 {{- end }}
 {{- end }}
+
+{{/* ---------- meerkat-operator (operator.enabled) ---------- */}}
+
+{{/* Operator object name prefix, at most 63 characters. */}}
+{{- define "meerkat.operator.fullname" -}}
+{{- printf "%s-operator" (include "meerkat.fullname" . | trunc 54 | trimSuffix "-") }}
+{{- end }}
+
+{{/*
+Operator selector labels. app.kubernetes.io/name differs from the server's,
+so the server's Service, PodDisruptionBudget and NetworkPolicy never select
+operator pods.
+*/}}
+{{- define "meerkat.operator.selectorLabels" -}}
+app.kubernetes.io/name: {{ printf "%s-operator" (include "meerkat.name" . | trunc 54 | trimSuffix "-") }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: operator
+{{- end }}
+
+{{- define "meerkat.operator.labels" -}}
+helm.sh/chart: {{ include "meerkat.chart" . }}
+{{ include "meerkat.operator.selectorLabels" . }}
+app.kubernetes.io/part-of: meerkat
+app.kubernetes.io/version: {{ include "meerkat.operator.imageTag" . | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{- define "meerkat.operator.serviceAccountName" -}}
+{{- default (include "meerkat.operator.fullname" .) .Values.operator.serviceAccount.name }}
+{{- end }}
+
+{{- define "meerkat.operator.imageTag" -}}
+{{- default .Chart.AppVersion .Values.operator.image.tag | trimPrefix "v" }}
+{{- end }}
+
+{{- define "meerkat.operator.image" -}}
+{{- $ref := printf "%s:%s" .Values.operator.image.repository (include "meerkat.operator.imageTag" .) }}
+{{- if .Values.operator.image.digest }}
+{{- $ref = printf "%s@%s" $ref .Values.operator.image.digest }}
+{{- end }}
+{{- $ref }}
+{{- end }}
+
+{{/* Webhook Service and serving-certificate names. */}}
+{{- define "meerkat.operator.webhookService" -}}
+{{- printf "%s-webhook" (include "meerkat.operator.fullname" .) }}
+{{- end }}
+
+{{- define "meerkat.operator.certSecret" -}}
+{{- printf "%s-webhook-cert" (include "meerkat.operator.fullname" .) }}
+{{- end }}
+
+{{/* "true" when the chart serves the webhook. */}}
+{{- define "meerkat.operator.webhookEnabled" -}}
+{{- and .Values.operator.enabled .Values.operator.webhook.enabled }}
+{{- end }}

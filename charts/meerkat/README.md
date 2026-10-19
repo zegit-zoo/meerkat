@@ -200,8 +200,74 @@ public keys. For GCS or IRSA, annotate the ServiceAccount through
 | `networkPolicy.egress.enabled` | `false` | restrict egress to DNS plus `egress.rules` |
 | `nodeSelector`, `tolerations`, `affinity`, `topologySpreadConstraints`, `priorityClassName` | empty | |
 
+| `operator.*` | disabled | see [Operator](#operator) |
+
 `values.schema.json` validates all of it, rejects unknown top-level keys,
 and enforces the `server.mode` enum and the image fields.
+
+## Operator
+
+`operator.enabled=true` also installs `meerkat-operator`
+(meerkat-mob#10): the `KnowledgeBase` and `MeerkatMob` CRDs, their
+validating webhook, and the reconciler that reports each knowledge-base
+tree in status ([docs/design/operator.md](../../docs/design/operator.md)).
+The operator does not yet render meerkat Deployments from a `MeerkatMob`.
+
+It installs cluster-scoped objects: the two CRDs, a ClusterRole and its
+binding, and a `ValidatingWebhookConfiguration`. Install it from one
+release per cluster. The CRDs, the ClusterRole's rules and the webhook
+configuration are rendered from `files/operator/`, copies of what
+`make crds` generates from the code, so they cannot drift from the binary.
+
+| key | default | description |
+| --- | --- | --- |
+| `operator.enabled` | `false` | |
+| `operator.replicaCount` | `1` | one replica reconciles (leader election); every replica serves the webhook |
+| `operator.image.repository` | `ghcr.io/zegit-zoo/meerkat-operator` | |
+| `operator.image.tag`, `.digest`, `.pullPolicy` | as `image.*` | the tag defaults to `appVersion` |
+| `operator.crds.install` | `true` | `false` when another release or GitOps owns the CRDs |
+| `operator.crds.keep` | `true` | `helm.sh/resource-policy: keep`, so an uninstall keeps the CRDs and every KnowledgeBase; they keep the release's ownership annotations, so a later install under another release name needs `crds.install=false` |
+| `operator.serviceAccount.{name,annotations}` | `""`, `{}` | name defaults to `<fullname>-operator` |
+| `operator.webhook.enabled` | `true` | off: no admission checks, `--webhooks=false` |
+| `operator.webhook.port` | `9443` | container port; the Service listens on 443 |
+| `operator.webhook.certManager.enabled` | `true` | serving certificate from cert-manager |
+| `operator.webhook.certManager.issuerRef` | `{}` | `{name, kind, group}`; empty creates a self-signed `Issuer` |
+| `operator.webhook.certManager.duration`, `.renewBefore` | `2160h`, `360h` | |
+| `operator.webhook.selfSigned.validityDays` | `365` | Helm-generated certificate, when cert-manager is off |
+| `operator.resources` | requests `10m`/`64Mi`, limit `256Mi` memory | |
+| `operator.extraArgs` | `[]` | e.g. `--metrics-bind-address=:8080` |
+| `operator.podAnnotations`, `.priorityClassName`, `.nodeSelector`, `.tolerations`, `.affinity` | empty | |
+
+The pod uses the chart's `podSecurityContext` and `securityContext`, and
+mounts its ServiceAccount token, because it talks to the API server.
+
+### Webhook certificate
+
+The API server calls the webhook over TLS, so the operator needs a
+serving certificate for `<fullname>-operator-webhook.<namespace>.svc`,
+and the `ValidatingWebhookConfiguration` needs the CA that signed it.
+
+- **cert-manager (default).** The chart creates a `Certificate` from
+  `operator.webhook.certManager.issuerRef`, or from a self-signed `Issuer`
+  it creates when that is empty, and annotates the webhook configuration
+  with `cert-manager.io/inject-ca-from`. cert-manager's CA injector fills in
+  the `caBundle` and cert-manager renews the certificate; the operator
+  reloads it from the mounted Secret. cert-manager must be installed first.
+- **Self-signed by Helm** (`operator.webhook.certManager.enabled=false`).
+  On install the chart generates a CA and a serving certificate, valid for
+  `operator.webhook.selfSigned.validityDays`, stores them in the Secret
+  `<fullname>-operator-webhook-cert`, and writes the CA into the webhook
+  configuration. An upgrade reads the Secret back (`lookup`) and reuses
+  it. Nothing renews it, so rotate it before it expires: delete the
+  Secret and run `helm upgrade` again, which generates a new pair and
+  rolls the CA in the same release. `helm template` and a GitOps tool
+  that renders without cluster access (Flux's `helm-controller` does have
+  access) cannot read the Secret back, and generate a new pair on every
+  render; use cert-manager there.
+
+The KnowledgeBase and MeerkatMob create/update webhooks fail closed: while
+no operator replica is ready, those writes are refused. Deletes are
+admitted (`failurePolicy: Ignore`).
 
 ## What the pod looks like
 

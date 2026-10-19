@@ -1,0 +1,6 @@
+# The operator with the webhook off: no Service, certificate or webhook
+# configuration, and --webhooks=false.
+operator:
+  enabled: true
+  webhook:
+    enabled: false

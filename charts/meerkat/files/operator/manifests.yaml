@@ -1,0 +1,65 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-meerkat-mob-dev-v1alpha1-knowledgebase
+  failurePolicy: Ignore
+  name: vknowledgebase-delete.meerkat-mob.dev
+  rules:
+  - apiGroups:
+    - meerkat-mob.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - DELETE
+    resources:
+    - knowledgebases
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-meerkat-mob-dev-v1alpha1-knowledgebase
+  failurePolicy: Fail
+  name: vknowledgebase.meerkat-mob.dev
+  rules:
+  - apiGroups:
+    - meerkat-mob.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - knowledgebases
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-meerkat-mob-dev-v1alpha1-meerkatmob
+  failurePolicy: Fail
+  name: vmeerkatmob.meerkat-mob.dev
+  rules:
+  - apiGroups:
+    - meerkat-mob.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - meerkatmobs
+  sideEffects: None
