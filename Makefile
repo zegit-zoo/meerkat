@@ -275,21 +275,42 @@ smoke: build ## End-to-end smoke after a build
 CONTROLLER_GEN_VERSION := v0.23.0
 CONTROLLER_GEN := $(TOOLS_DIR)/controller-gen@$(CONTROLLER_GEN_VERSION)/controller-gen
 CRD_DIR := deploy/operator/crds
+OPERATOR_RBAC_DIR := deploy/operator/rbac
+OPERATOR_WEBHOOK_DIR := deploy/operator/webhook
 
 .PHONY: crds
 crds: ## Regenerate the operator CRDs and deep-copy methods from internal/operator/api
 	$(call tool-install,controller-gen,sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_GEN_VERSION))
 	$(CONTROLLER_GEN) object paths=./internal/operator/api/...
 	$(CONTROLLER_GEN) crd paths=./internal/operator/api/... output:crd:artifacts:config=$(CRD_DIR)
+	$(CONTROLLER_GEN) rbac:roleName=meerkat-operator webhook paths="./internal/operator/...;./cmd/meerkat-operator/..." \
+		output:rbac:artifacts:config=$(OPERATOR_RBAC_DIR) output:webhook:artifacts:config=$(OPERATOR_WEBHOOK_DIR)
 
 .PHONY: crds-check
 crds-check: crds ## CI gate: fail if the generated CRDs or deep-copy methods are stale
-	@if [ -n "$$(git status --porcelain -- $(CRD_DIR) internal/operator/api)" ]; then \
+	@if [ -n "$$(git status --porcelain -- $(CRD_DIR) $(OPERATOR_RBAC_DIR) $(OPERATOR_WEBHOOK_DIR) internal/operator/api)" ]; then \
 		echo "ERROR: generated operator files are out of date; run 'make crds' and commit"; \
-		git status --short -- $(CRD_DIR) internal/operator/api; \
+		git status --short -- $(CRD_DIR) $(OPERATOR_RBAC_DIR) $(OPERATOR_WEBHOOK_DIR) internal/operator/api; \
 		exit 1; \
 	fi
 	@echo "operator CRDs are in sync"
+
+# The operator's envtest suite runs the reconciler and the webhook
+# against a real kube-apiserver and etcd. setup-envtest has no tagged
+# releases, so it is pinned to a commit of controller-runtime's
+# release-0.25 branch (the controller-runtime minor in go.mod), and the
+# binaries to the Kubernetes minor of k8s.io/client-go. setup-envtest
+# checks each download against the release index's digest. Without
+# KUBEBUILDER_ASSETS, `make test` skips TestEnvtest.
+SETUP_ENVTEST_VERSION := v0.25.3-0.20261012174806-32759fab3119
+SETUP_ENVTEST := $(TOOLS_DIR)/setup-envtest@$(SETUP_ENVTEST_VERSION)/setup-envtest
+ENVTEST_K8S_VERSION := 1.37.0
+
+.PHONY: test-envtest
+test-envtest: sync ## Run the operator tests against a real API server (envtest)
+	$(call tool-install,setup-envtest,sigs.k8s.io/controller-runtime/tools/setup-envtest,$(SETUP_ENVTEST_VERSION))
+	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(TOOLS_DIR)/envtest -p path)" \
+		go test -race -count=1 ./internal/operator/... ./cmd/meerkat-operator/...
 
 .PHONY: docs
 docs: ## Regenerate docs/CLI.md from the cobra command tree

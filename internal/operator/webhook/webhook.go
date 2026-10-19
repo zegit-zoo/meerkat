@@ -164,6 +164,20 @@ func (v *MeerkatMobValidator) validate(ctx context.Context, mob *v1alpha1.Meerka
 	return nil, nil
 }
 
+// The paths in these markers are the ones controller-runtime's builder
+// derives from each kind; `make crds` turns them into
+// deploy/operator/webhook/manifests.yaml. They sit in a comment of
+// their own because controller-gen reads only package-level markers.
+//
+// Create and update fail closed, like the validator itself. A delete
+// is only warned about, so it has a hook of its own that a down
+// operator cannot turn into a blocked delete.
+//
+// +kubebuilder:webhook:path=/validate-meerkat-mob-dev-v1alpha1-knowledgebase,mutating=false,failurePolicy=fail,sideEffects=None,groups=meerkat-mob.dev,resources=knowledgebases,verbs=create;update,versions=v1alpha1,name=vknowledgebase.meerkat-mob.dev,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/validate-meerkat-mob-dev-v1alpha1-knowledgebase,mutating=false,failurePolicy=ignore,sideEffects=None,groups=meerkat-mob.dev,resources=knowledgebases,verbs=delete,versions=v1alpha1,name=vknowledgebase-delete.meerkat-mob.dev,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/validate-meerkat-mob-dev-v1alpha1-meerkatmob,mutating=false,failurePolicy=fail,sideEffects=None,groups=meerkat-mob.dev,resources=meerkatmobs,verbs=create;update,versions=v1alpha1,name=vmeerkatmob.meerkat-mob.dev,admissionReviewVersions=v1
+// +kubebuilder:rbac:groups=meerkat-mob.dev,resources=knowledgebases,verbs=get;list;watch
+
 // Setup registers both validators with mgr's webhook server.
 func Setup(mgr manager.Manager) error {
 	if err := builder.WebhookManagedBy(mgr, &v1alpha1.KnowledgeBase{}).

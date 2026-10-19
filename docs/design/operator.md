@@ -1,15 +1,20 @@
 # The meerkat operator: KnowledgeBase and MeerkatMob
 
-Status: first slice (meerkat-mob#10, phase 2). The CRD types, their
-manifests and the validating webhook exist. The controller that renders
-Deployments from them does not yet, and nothing ships the operator.
+Status: second slice (meerkat-mob#10, phase 2). The CRD types, their
+manifests, the validating webhook, `cmd/meerkat-operator` and a
+KnowledgeBase reconciler that reports each tree in status exist. The
+controller that renders Deployments from them does not yet, and nothing
+ships the operator.
 
 ## Resources
 
 Both are namespaced, in the group `meerkat-mob.dev`, version
 `v1alpha1`. The manifests are generated into `deploy/operator/crds/`
 from `internal/operator/api/v1alpha1` by `make crds`, and CI fails when
-they are stale (`make crds-check`).
+they are stale (`make crds-check`). The same target writes the
+operator's ClusterRole to `deploy/operator/rbac/` and its
+`ValidatingWebhookConfiguration` to `deploy/operator/webhook/`, from
+the `+kubebuilder:rbac` and `+kubebuilder:webhook` markers.
 
 A `KnowledgeBase` (short name `kb`) is one node of a knowledge-base
 tree. Its keys mean what the same keys mean in a `tree:` manifest
@@ -96,23 +101,52 @@ admits the same trees the server loads:
   but violations elsewhere in the namespace are not reported.
 - **Admission is a check at write time.** Two concurrent creates that
   together close a loop or exceed the cap can both pass. The server's
-  loader refuses such a tree at startup; the reconciler is to re-check
-  it and report a condition (not built yet).
+  loader refuses such a tree at startup, and the reconciler checks it
+  again and reports it (below).
 
 A MeerkatMob is refused for a `scaleToZero.idle` under 1m or a `root`
 that is not an object name, and warned
 about when its root does not exist yet or has a parent of its own.
 
+## The KnowledgeBase reconciler
+
+`cmd/meerkat-operator` runs a controller-runtime manager with the
+webhook (`--webhooks`, on by default; it needs a serving certificate in
+`--webhook-cert-dir`) and the KnowledgeBase reconciler
+(`internal/operator/controller`). The reconciler renders nothing. For
+each KnowledgeBase it runs the webhook's tree rules again against the
+namespace as it is now, and writes status:
+
+- `observedGeneration`: the generation it checked.
+- `depth`: the KnowledgeBase's depth (root = 0), counted as the webhook
+  counts it, so one under a missing parent is at depth 1 at least. For
+  a tree that loops it is a lower bound.
+- The `TreeValid` condition: `True` (`TreeValid`) when the chain ends
+  at a root and the subtree is within the limits, `Unknown`
+  (`ParentMissing`) while a parent in the chain does not exist yet, and
+  `False` (`TreeRefused`) for a loop or a depth over the cap or an
+  ancestor's `depthLimit`, with the webhook's message.
+
+A KnowledgeBase's condition depends on its ancestors and its subtree,
+so a create, delete or spec change of any KnowledgeBase re-queues every
+KnowledgeBase in its namespace. Status writes do not change the
+generation, so they do not re-trigger it, and a status that has not
+changed is not written. The MeerkatMob reconciler is to render only
+from KnowledgeBases whose `TreeValid` is `True`.
+
+The KnowledgeBase webhook fails closed on a create or update. Its
+delete hook is separate and set to `failurePolicy: Ignore`, because a
+delete is only warned about, and a down operator must not block it.
+
 ## Not built yet
 
-`cmd/meerkat-operator` (the manager, the webhook server and its
-certificates, `ValidatingWebhookConfiguration`, RBAC), the MeerkatMob
+Serving certificates for the webhook (cert-manager or self-signed),
+the operator's image, Deployment and release packaging, the MeerkatMob
 reconciler (one Deployment per placement unit, rendered
 `content-source.yaml`, lazy children rewritten to sibling Services,
-NetworkPolicy for dedicated KBs), status, scale-to-zero, and the
-librarian CronJob. Also still to come: `+kubebuilder:webhook` markers
-so `make crds` emits the `ValidatingWebhookConfiguration`, the CRDs
-packaged with (or referenced from) `charts/meerkat/crds/`, and a
-registry allow-list or a pin for a MeerkatMob's `spec.image`, which
+NetworkPolicy for dedicated KBs), MeerkatMob status, scale-to-zero,
+and the librarian CronJob. Also still to come: the CRDs, ClusterRole
+and webhook configuration packaged with (or referenced from)
+`charts/meerkat/crds/`, and a registry allow-list or a pin for a MeerkatMob's `spec.image`, which
 until then lets anyone who can create a MeerkatMob choose the image
 its pods run. meerkat-mob#10 tracks them.
