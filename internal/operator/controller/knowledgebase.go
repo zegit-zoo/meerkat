@@ -1,11 +1,10 @@
 // Package controller holds the meerkat operator's reconcilers
 // (meerkat-mob#10, phase 2).
 //
-// This slice has the KnowledgeBase reconciler only, and it renders
-// nothing yet: it checks each KnowledgeBase's place in the tree after
-// admission and reports it in status. The MeerkatMob reconciler, which
-// renders Deployments and content-source.yaml from a checked tree,
-// builds on the TreeValid condition it sets.
+// The KnowledgeBase reconciler renders nothing: it checks each
+// KnowledgeBase's place in the tree after admission and reports it in
+// status. The MeerkatMob reconciler (meerkatmob.go) renders a mob's
+// tree as a ConfigMap, Deployment and Service per placement unit.
 package controller
 
 import (

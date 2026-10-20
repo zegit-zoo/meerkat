@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/zegit-zoo/meerkat/internal/operator/api/v1alpha1"
+	"github.com/zegit-zoo/meerkat/internal/operator/imagepolicy"
 )
 
 // MinScaleToZeroIdle is the shortest idle window a MeerkatMob may ask
@@ -116,6 +117,9 @@ func validateSource(s *v1alpha1.KnowledgeBaseSource) error {
 // its root is missing or is not a tree's root.
 type MeerkatMobValidator struct {
 	Reader client.Reader
+	// Images refuses a spec.image the operator would not run; nil
+	// skips that check.
+	Images *imagepolicy.Policy
 }
 
 var _ admission.Validator[*v1alpha1.MeerkatMob] = (*MeerkatMobValidator)(nil)
@@ -137,6 +141,13 @@ func (v *MeerkatMobValidator) ValidateDelete(context.Context, *v1alpha1.MeerkatM
 
 func (v *MeerkatMobValidator) validate(ctx context.Context, mob *v1alpha1.MeerkatMob) (admission.Warnings, error) {
 	s := &mob.Spec
+	if v.Images != nil {
+		// The reconciler refuses it too; refusing it here says so at
+		// kubectl apply time instead of in status.
+		if _, err := v.Images.Resolve(s.Image); err != nil {
+			return nil, err
+		}
+	}
 	if s.ScaleToZero != nil && s.ScaleToZero.Idle != nil && s.ScaleToZero.Idle.Duration < MinScaleToZeroIdle {
 		return nil, fmt.Errorf("spec.scaleToZero.idle must be at least %s, got %s", MinScaleToZeroIdle, s.ScaleToZero.Idle.Duration)
 	}
@@ -178,15 +189,16 @@ func (v *MeerkatMobValidator) validate(ctx context.Context, mob *v1alpha1.Meerka
 // +kubebuilder:webhook:path=/validate-meerkat-mob-dev-v1alpha1-meerkatmob,mutating=false,failurePolicy=fail,sideEffects=None,groups=meerkat-mob.dev,resources=meerkatmobs,verbs=create;update,versions=v1alpha1,name=vmeerkatmob.meerkat-mob.dev,admissionReviewVersions=v1
 // +kubebuilder:rbac:groups=meerkat-mob.dev,resources=knowledgebases,verbs=get;list;watch
 
-// Setup registers both validators with mgr's webhook server.
-func Setup(mgr manager.Manager) error {
+// Setup registers both validators with mgr's webhook server. images is
+// the operator's image policy for MeerkatMob's spec.image.
+func Setup(mgr manager.Manager, images *imagepolicy.Policy) error {
 	if err := builder.WebhookManagedBy(mgr, &v1alpha1.KnowledgeBase{}).
 		WithValidator(&KnowledgeBaseValidator{Reader: mgr.GetAPIReader()}).
 		Complete(); err != nil {
 		return fmt.Errorf("KnowledgeBase webhook: %w", err)
 	}
 	if err := builder.WebhookManagedBy(mgr, &v1alpha1.MeerkatMob{}).
-		WithValidator(&MeerkatMobValidator{Reader: mgr.GetAPIReader()}).
+		WithValidator(&MeerkatMobValidator{Reader: mgr.GetAPIReader(), Images: images}).
 		Complete(); err != nil {
 		return fmt.Errorf("MeerkatMob webhook: %w", err)
 	}

@@ -353,6 +353,14 @@ func Load(repoRoot string) (Config, error) {
 	return parseConfig(body, ConfigFile)
 }
 
+// Parse is parseConfig for a content-source.yaml held in memory: the
+// meerkat operator checks each file it renders the way the server loads
+// it, before any pod starts on it. displayPath is used only in error
+// messages.
+func Parse(body []byte, displayPath string) (Config, error) {
+	return parseConfig(body, displayPath)
+}
+
 // parseConfig unmarshals + defaults + validates the bytes of a
 // content-source.yaml already read from disk (by Load or LoadFile).
 // displayPath is used only in error messages.

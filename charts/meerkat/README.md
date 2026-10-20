@@ -209,15 +209,24 @@ and enforces the `server.mode` enum and the image fields.
 
 `operator.enabled=true` also installs `meerkat-operator`
 (meerkat-mob#10): the `KnowledgeBase` and `MeerkatMob` CRDs, their
-validating webhook, and the reconciler that reports each knowledge-base
-tree in status ([docs/design/operator.md](../../docs/design/operator.md)).
-The operator does not yet render meerkat Deployments from a `MeerkatMob`.
+validating webhook, the reconciler that reports each knowledge-base
+tree in status, and the reconciler that serves a `MeerkatMob`'s tree as
+meerkat Deployments ([docs/design/operator.md](../../docs/design/operator.md)).
+
+A `MeerkatMob`'s instances run `operator.serverImage`, which defaults to
+this chart's own `image.*`, so a chart upgrade moves the operator and
+the servers it renders together. `spec.image` may override it only with
+a repository in `operator.allowedImages`: whoever can write a
+`MeerkatMob` would otherwise pick the image its pods run.
 
 It installs cluster-scoped objects: the two CRDs, a ClusterRole and its
 binding, and a `ValidatingWebhookConfiguration`. Install it from one
 release per cluster. The CRDs, the ClusterRole's rules and the webhook
 configuration are rendered from `files/operator/`, copies of what
 `make crds` generates from the code, so they cannot drift from the binary.
+The ClusterRole lets the operator create, change and delete Deployments,
+Services and ConfigMaps in every namespace, because a `MeerkatMob` may
+live in any of them. It grants no access to Secrets.
 
 | key | default | description |
 | --- | --- | --- |
@@ -225,6 +234,8 @@ configuration are rendered from `files/operator/`, copies of what
 | `operator.replicaCount` | `1` | one replica reconciles (leader election); every replica serves the webhook |
 | `operator.image.repository` | `ghcr.io/zegit-zoo/meerkat-operator` | |
 | `operator.image.tag`, `.digest`, `.pullPolicy` | as `image.*` | the tag defaults to `appVersion` |
+| `operator.serverImage` | `""` | `--server-image`: what a `MeerkatMob` runs without `spec.image`; empty is this chart's `image.*` |
+| `operator.allowedImages` | `[ghcr.io/zegit-zoo/meerkat]` | `--allowed-images`: repositories `spec.image` may name, exact or, ending in `/`, as a prefix; empty allows no override |
 | `operator.crds.install` | `true` | `false` when another release or GitOps owns the CRDs |
 | `operator.crds.keep` | `true` | `helm.sh/resource-policy: keep`, so an uninstall keeps the CRDs and every KnowledgeBase; they keep the release's ownership annotations, so a later install under another release name needs `crds.install=false` |
 | `operator.serviceAccount.{name,annotations}` | `""`, `{}` | name defaults to `<fullname>-operator` |

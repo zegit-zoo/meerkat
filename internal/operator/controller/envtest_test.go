@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	"github.com/zegit-zoo/meerkat/internal/operator/api/v1alpha1"
+	"github.com/zegit-zoo/meerkat/internal/operator/imagepolicy"
 	opwebhook "github.com/zegit-zoo/meerkat/internal/operator/webhook"
 )
 
@@ -65,7 +66,14 @@ func TestEnvtest(t *testing.T) {
 	if err := (&KnowledgeBaseReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
 		t.Fatal(err)
 	}
-	if err := opwebhook.Setup(mgr); err != nil {
+	images, err := imagepolicy.New("ghcr.io/zegit-zoo/meerkat:0.21.0", []string{imagepolicy.DefaultRepository})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&MeerkatMobReconciler{Client: mgr.GetClient(), Images: images}).SetupWithManager(mgr); err != nil {
+		t.Fatal(err)
+	}
+	if err := opwebhook.Setup(mgr, images); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -109,6 +117,8 @@ func TestEnvtest(t *testing.T) {
 		}
 	}
 
+	mobs := newMobHarness(ctx, t, c)
+
 	t.Run("valid tree", func(t *testing.T) {
 		for _, k := range []*v1alpha1.KnowledgeBase{newKB("root", ""), newKB("platform", "root")} {
 			if err := c.Create(ctx, k); err != nil {
@@ -141,6 +151,12 @@ func TestEnvtest(t *testing.T) {
 		}
 		waitFor(t, "orphan", metav1.ConditionTrue, v1alpha1.ReasonTreeValid)
 	})
+
+	t.Run("mob renders one instance per KnowledgeBase", mobs.perKB)
+	t.Run("mob placement change prunes the old instances", mobs.toSingle)
+	t.Run("mob reports availability from its Deployments", mobs.available)
+	t.Run("mob without its root keeps what it rendered", mobs.rootMissing)
+	t.Run("webhook refuses a mob image off the allow-list", mobs.imageAdmission)
 
 	t.Run("loop past admission is reported, and clears when fixed", func(t *testing.T) {
 		// Stand in for two concurrent creates that each passed the
@@ -186,4 +202,8 @@ func TestEnvtest(t *testing.T) {
 		waitFor(t, "a", metav1.ConditionTrue, v1alpha1.ReasonTreeValid)
 		waitFor(t, "b", metav1.ConditionTrue, v1alpha1.ReasonTreeValid)
 	})
+
+	// The loop test took the webhook out, so this mob reaches the
+	// reconciler, which refuses the image again.
+	t.Run("reconciler refuses a mob image off the allow-list", mobs.imageReconciler)
 }

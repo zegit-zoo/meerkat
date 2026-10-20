@@ -15,6 +15,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/operator/api/v1alpha1"
+	"github.com/zegit-zoo/meerkat/internal/operator/imagepolicy"
 )
 
 const ns = "kb"
@@ -385,5 +386,29 @@ func TestMeerkatMob(t *testing.T) {
 	m.Spec.Librarian.Schedule = "0 3 * * *"
 	if _, err := v.ValidateCreate(ctx, m); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMeerkatMob_ImagePolicy(t *testing.T) {
+	ctx := context.Background()
+	images, err := imagepolicy.New("ghcr.io/zegit-zoo/meerkat:0.21.0", []string{imagepolicy.DefaultRepository})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &MeerkatMobValidator{Reader: reader(t, kb("root", "")), Images: images}
+
+	m := mob("root")
+	m.Spec.Image = "ghcr.io/zegit-zoo/meerkat:0.20.0"
+	if _, err := v.ValidateCreate(ctx, m); err != nil {
+		t.Fatalf("an allowed image: %v", err)
+	}
+	m.Spec.Image = "ghcr.io/attacker/meerkat:0.20.0"
+	_, err = v.ValidateUpdate(ctx, mob("root"), m)
+	wantErr(t, err, "is not allowed")
+
+	// Without a policy (the webhook alone, in tests) nothing is checked.
+	v.Images = nil
+	if _, err := v.ValidateCreate(ctx, m); err != nil {
+		t.Fatalf("no policy: %v", err)
 	}
 }
