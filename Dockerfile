@@ -3,7 +3,9 @@
 # Hardened, multi-arch OCI image for meerkat (see docs/CONTAINER.md for
 # how to run it — read-only-fs flags, the cache-dir mount, etc).
 #
-# Two stages:
+# Two stages for the meerkat image (the builder is split into a shared
+# `source` stage and the compile; `--target operator` builds the
+# operator image, see below):
 #   builder — golang:1.26.9-bookworm, matching go.mod's toolchain
 #             (`toolchain go1.26.9`) exactly, so the binary this image
 #             ships is built with the same compiler `make build`/CI use.
@@ -31,7 +33,7 @@ ARG GO_VERSION=1.26.9
 # build` RUN below), so this avoids running the compiler itself under
 # QEMU emulation for the non-native arch — only the trivial final-stage
 # COPY needs to happen per target platform, not the compile.
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS builder
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS source
 WORKDIR /src
 
 # Cache module downloads independently of source changes.
@@ -49,6 +51,9 @@ COPY . .
 RUN go run ./internal/contentsync
 RUN go run gen-third-party-licenses.go
 
+# Each binary compiles in its own stage from this one, so building the
+# operator image does not compile meerkat, and the reverse.
+FROM source AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
@@ -78,6 +83,41 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 # image run with a fully read-only root filesystem out of the box.
 RUN mkdir -p /home/nonroot/.cache /home/nonroot/.config \
     && chown -R 65532:65532 /home/nonroot
+
+# meerkat-operator (meerkat-mob#10, phase 2): `docker build --target
+# operator` builds ghcr.io/zegit-zoo/meerkat-operator from the same
+# sources and pins. These two stages sit before `final` on purpose: a
+# build with no --target builds the last stage, and that must stay the
+# meerkat image. BuildKit skips both stages unless --target operator
+# asks for them.
+FROM source AS operator-builder
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+# The operator links client-go and controller-runtime, so its license
+# file lists its own module set, not meerkat's.
+RUN mkdir -p /out && go run gen-third-party-licenses.go -pkg ./cmd/meerkat-operator -out /out/THIRD-PARTY-LICENSES.txt
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+      -o /out/meerkat-operator ./cmd/meerkat-operator
+
+# No $HOME, cache or config: the operator writes nothing to disk except
+# the webhook serving certificate, which is mounted read-only.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS operator
+
+COPY --from=operator-builder --chown=65532:65532 /out/meerkat-operator /usr/local/bin/meerkat-operator
+COPY --from=operator-builder --chown=65532:65532 /src/LICENSE /LICENSE
+COPY --from=operator-builder --chown=65532:65532 /src/NOTICE /NOTICE
+COPY --from=operator-builder --chown=65532:65532 /out/THIRD-PARTY-LICENSES.txt /THIRD-PARTY-LICENSES.txt
+
+USER 65532:65532
+
+LABEL org.opencontainers.image.source="https://github.com/zegit-zoo/meerkat" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="meerkat-operator" \
+      org.opencontainers.image.description="Kubernetes operator for meerkat mob: KnowledgeBase and MeerkatMob validation and reconciliation."
+
+ENTRYPOINT ["/usr/local/bin/meerkat-operator"]
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS final
 

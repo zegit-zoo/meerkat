@@ -6,6 +6,14 @@ alongside the binary release described in [docs/INSTALL.md](INSTALL.md).
 See [.github/workflows/release.yml](../.github/workflows/release.yml) and
 the root [`Dockerfile`](../Dockerfile) for exactly how it's built.
 
+The same release publishes `ghcr.io/zegit-zoo/meerkat-operator`, the
+Kubernetes operator (meerkat-mob#10), from the same Dockerfile's
+`operator` target (`docker build --target operator .`), with the same
+tags, base image, signature and attestations. It is meant to be run by
+the Helm chart (`operator.enabled`, see
+[charts/meerkat/README.md](../charts/meerkat/README.md#operator)); this
+page covers the meerkat image.
+
 **Git tags and image tags are not spelled the same way.** The git tag is
 `vX.Y.Z`, but the published image tags drop the leading `v` — a
 `v1.2.3` git tag publishes the image aliases `1.2.3`, `1.2`, and, when

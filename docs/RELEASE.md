@@ -56,7 +56,7 @@ exact tagged SHA before anything is published.
    - **`verify` job** — first fails unless the tagged commit is an ancestor of `origin/master`, then re-runs the full gate (lint + test + vuln + gosec + gitleaks) on the exact tagged SHA.
    - **`goreleaser` job** (runs only after `verify` passes) — builds cross-platform binaries (darwin/linux/windows, amd64/arm64), creates archives and a checksums file, generates SPDX SBOMs via syft, signs the checksums file with cosign (keyless, GitHub OIDC), and publishes a GitHub Release with all artifacts attached.
    - **`chart` job** (runs only after both `goreleaser` and `docker` succeed, so the image it defaults to exists) — packages `charts/meerkat` as version `X.Y.Z` with `appVersion` `X.Y.Z`, pushes it to `oci://ghcr.io/zegit-zoo/charts/meerkat`, signs its digest with cosign (keyless, GitHub OIDC) and attaches a SLSA provenance attestation. It has no `environment:` of its own, because a job that starts after the approval would ask for a second one; depending on both approved jobs keeps it behind the same approval.
-   - **`docker` job** (runs only after `verify` passes, in parallel with `goreleaser`) — builds the hardened multi-stage [`Dockerfile`](../Dockerfile) for `linux/amd64` + `linux/arm64` via QEMU + buildx, pushes the manifest list to `ghcr.io/zegit-zoo/meerkat`, signs it with cosign (keyless, GitHub OIDC), and attaches a Syft SBOM + SLSA provenance attestation via buildx's native `--sbom`/`--provenance`. See [docs/CONTAINER.md](CONTAINER.md).
+   - **`docker` job** (runs only after `verify` passes, in parallel with `goreleaser`; one leg per image) — builds the hardened multi-stage [`Dockerfile`](../Dockerfile) for `linux/amd64` + `linux/arm64` via QEMU + buildx, pushes the manifest list to `ghcr.io/zegit-zoo/meerkat` (and, from `--target operator`, to `ghcr.io/zegit-zoo/meerkat-operator`), signs each with cosign (keyless, GitHub OIDC), and attaches a Syft SBOM + SLSA provenance attestation via buildx's native `--sbom`/`--provenance`. See [docs/CONTAINER.md](CONTAINER.md).
 
 The released artifacts are:
 
@@ -79,6 +79,9 @@ The released artifacts are:
   signed + attested), plus `:latest` when the tag is the highest
   release tag. Note these image tags drop the git tag's leading `v`
   — see [docs/CONTAINER.md](CONTAINER.md)
+- `ghcr.io/zegit-zoo/meerkat-operator:X.Y.Z` / `:X.Y` / `:latest` (the
+  Kubernetes operator, meerkat-mob#10; same tag rules, signing and
+  attestations as the meerkat image)
 - `oci://ghcr.io/zegit-zoo/charts/meerkat:X.Y.Z` (the Helm chart, signed +
   attested; version and `appVersion` are both `X.Y.Z`). In git the chart
   carries the placeholder `0.0.0-dev`: never bump it by hand
@@ -245,6 +248,9 @@ cosign verify \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   ghcr.io/zegit-zoo/meerkat:X.Y.Z
 ```
+
+The operator image, `ghcr.io/zegit-zoo/meerkat-operator:X.Y.Z`, verifies
+with the same command.
 
 Note `X.Y.Z` here is the *image* tag (no leading `v`), even though the
 `--certificate-identity-regexp` above still matches `refs/tags/vX.Y.Z` —

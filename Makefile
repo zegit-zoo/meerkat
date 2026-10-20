@@ -195,7 +195,10 @@ hygiene: ## Run the commit-stage hygiene hooks over the whole tree (CI backstop)
 # kubeconform on PATH it skips, unless CHART_TOOLS_REQUIRED=1 (CI).
 # The render goes to kubeconform on stdin: given a file path, v0.8.0
 # skips any name without a .yaml/.yml/.json suffix and reports
-# "0 resource found" with exit 0.
+# "0 resource found" with exit 0. CustomResourceDefinition is skipped:
+# neither location publishes its schema, and the operator CRDs the chart
+# renders are controller-gen output the envtest job applies to a real
+# API server.
 CHART            := charts/meerkat
 HELM             ?= helm
 KUBECONFORM      ?= kubeconform
@@ -218,7 +221,7 @@ chart-check: ## helm lint + template | kubeconform over charts/meerkat and its c
 		$(HELM) lint --strict $(CHART) $$f; \
 		$(HELM) template chart-check $(CHART) $$f > "$$out"; \
 		grep -q '^kind: Deployment$$' "$$out" || { echo "FAIL: no Deployment rendered"; exit 1; }; \
-		$(KUBECONFORM) -strict -summary -kubernetes-version $(CHART_KUBE_VERSION) \
+		$(KUBECONFORM) -strict -summary -kubernetes-version $(CHART_KUBE_VERSION) -skip CustomResourceDefinition \
 			-schema-location default -schema-location '$(CRDS_CATALOG)' < "$$out"; \
 	done; \
 	if $(HELM) template chart-check $(CHART) --set server.mode=grpc >/dev/null 2>&1; then \
@@ -277,6 +280,9 @@ CONTROLLER_GEN := $(TOOLS_DIR)/controller-gen@$(CONTROLLER_GEN_VERSION)/controll
 CRD_DIR := deploy/operator/crds
 OPERATOR_RBAC_DIR := deploy/operator/rbac
 OPERATOR_WEBHOOK_DIR := deploy/operator/webhook
+# charts/meerkat renders the operator from copies of the generated files
+# (Helm reads files only from inside the chart), refreshed by `make crds`.
+CHART_OPERATOR_DIR := charts/meerkat/files/operator
 
 .PHONY: crds
 crds: ## Regenerate the operator CRDs and deep-copy methods from internal/operator/api
@@ -285,12 +291,16 @@ crds: ## Regenerate the operator CRDs and deep-copy methods from internal/operat
 	$(CONTROLLER_GEN) crd paths=./internal/operator/api/... output:crd:artifacts:config=$(CRD_DIR)
 	$(CONTROLLER_GEN) rbac:roleName=meerkat-operator webhook paths="./internal/operator/...;./cmd/meerkat-operator/..." \
 		output:rbac:artifacts:config=$(OPERATOR_RBAC_DIR) output:webhook:artifacts:config=$(OPERATOR_WEBHOOK_DIR)
+	rm -rf $(CHART_OPERATOR_DIR)
+	mkdir -p $(CHART_OPERATOR_DIR)/crds
+	cp $(CRD_DIR)/*.yaml $(CHART_OPERATOR_DIR)/crds/
+	cp $(OPERATOR_RBAC_DIR)/role.yaml $(OPERATOR_WEBHOOK_DIR)/manifests.yaml $(CHART_OPERATOR_DIR)/
 
 .PHONY: crds-check
 crds-check: crds ## CI gate: fail if the generated CRDs or deep-copy methods are stale
-	@if [ -n "$$(git status --porcelain -- $(CRD_DIR) $(OPERATOR_RBAC_DIR) $(OPERATOR_WEBHOOK_DIR) internal/operator/api)" ]; then \
+	@if [ -n "$$(git status --porcelain -- $(CRD_DIR) $(OPERATOR_RBAC_DIR) $(OPERATOR_WEBHOOK_DIR) $(CHART_OPERATOR_DIR) internal/operator/api)" ]; then \
 		echo "ERROR: generated operator files are out of date; run 'make crds' and commit"; \
-		git status --short -- $(CRD_DIR) $(OPERATOR_RBAC_DIR) $(OPERATOR_WEBHOOK_DIR) internal/operator/api; \
+		git status --short -- $(CRD_DIR) $(OPERATOR_RBAC_DIR) $(OPERATOR_WEBHOOK_DIR) $(CHART_OPERATOR_DIR) internal/operator/api; \
 		exit 1; \
 	fi
 	@echo "operator CRDs are in sync"

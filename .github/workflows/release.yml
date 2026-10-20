@@ -139,7 +139,7 @@ jobs:
           subject-checksums: ${{ steps.sums.outputs.path }}
 
   docker:
-    name: Build, sign & push OCI image
+    name: Build, sign & push OCI image (${{ matrix.image }})
     needs: verify
     environment: release
     runs-on: ubuntu-latest
@@ -147,6 +147,22 @@ jobs:
     # (see Dockerfile), different artifact type (OCI image vs. tarballs).
     # Only this job needs packages: write (ghcr.io push) alongside the
     # id-token used by cosign's keyless OIDC flow.
+    #
+    # One leg per image, both from the one Dockerfile: meerkat (its default
+    # `final` target) and meerkat-operator (`--target operator`,
+    # meerkat-mob#10). fail-fast is off so a failing leg cannot cancel the
+    # other between its push and its signature, which would leave an
+    # unsigned image on ghcr.io. The chart job needs both legs.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: meerkat
+            target: final
+          - image: meerkat-operator
+            target: operator
+    env:
+      IMAGE: ghcr.io/zegit-zoo/${{ matrix.image }}
     permissions:
       contents: read
       id-token: write   # cosign keyless OIDC (Fulcio)
@@ -197,7 +213,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
         with:
-          images: ghcr.io/zegit-zoo/meerkat
+          images: ${{ env.IMAGE }}
           # {{version}}/{{major}}.{{minor}} both come from the vX.Y.Z tag
           # this workflow triggers on (see the `on.push.tags` filter
           # above) — no separate semver parsing needed. `latest=auto`
@@ -232,7 +248,7 @@ jobs:
 
           version="${REF_NAME#v}"
           major_minor="${version%.*}"
-          image="ghcr.io/zegit-zoo/meerkat"
+          image="$IMAGE"
 
           expected="$(printf '%s:%s\n%s:%s' "$image" "$version" "$image" "$major_minor")"
           if [ "$IS_LATEST" = "true" ]; then
@@ -265,6 +281,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
+          target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: mode=max
@@ -285,7 +302,7 @@ jobs:
       # transparency log. See docs/RELEASE.md's "Verifying the
       # container image" section for the consumer-side `cosign verify`.
       - name: Sign image (keyless)
-        run: cosign sign --yes "ghcr.io/zegit-zoo/meerkat@${{ steps.build.outputs.digest }}"
+        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
 
   # The Helm chart, versioned in lockstep with the app: charts/meerkat in git
   # carries the placeholder 0.0.0-dev, and this job packages it as chart

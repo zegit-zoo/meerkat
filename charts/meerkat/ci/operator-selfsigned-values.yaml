@@ -1,0 +1,9 @@
+# The operator without cert-manager: Helm generates the webhook's CA and
+# serving certificate, and the CRDs are left to another owner.
+operator:
+  enabled: true
+  crds:
+    install: false
+  webhook:
+    certManager:
+      enabled: false

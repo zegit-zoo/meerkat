@@ -15,11 +15,14 @@
 // network access, no third-party tool required.
 //
 // Run via: go run gen-third-party-licenses.go
-// Wired into .goreleaser.yaml's before.hooks.
+// Wired into .goreleaser.yaml's before.hooks. The Dockerfile's operator
+// stage runs it with -pkg ./cmd/meerkat-operator -out <file>, so the
+// operator image lists the modules linked into that binary instead.
 package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,7 +31,12 @@ import (
 	"strings"
 )
 
-const outFile = "THIRD-PARTY-LICENSES.txt"
+// pkg is the main package whose linked modules are listed, and outFile
+// the file written; the defaults describe the meerkat binary.
+var (
+	pkg     = flag.String("pkg", "./cmd/meerkat", "main package whose linked modules are listed")
+	outFile = flag.String("out", "THIRD-PARTY-LICENSES.txt", "file to write")
+)
 
 // mainModule is excluded: its own LICENSE/NOTICE ship separately via
 // archives.files ("LICENSE*" and "NOTICE" in .goreleaser.yaml).
@@ -49,18 +57,19 @@ type module struct {
 }
 
 func main() {
+	flag.Parse()
 	mods, err := deps()
 	if err != nil {
 		fatal(err)
 	}
 	if len(mods) == 0 {
-		fatal(fmt.Errorf("no third-party modules resolved — refusing to write an empty %s", outFile))
+		fatal(fmt.Errorf("no third-party modules resolved — refusing to write an empty %s", *outFile))
 	}
 
 	var buf bytes.Buffer
 	buf.WriteString("Third-party licenses\n")
 	buf.WriteString("=====================\n\n")
-	buf.WriteString("meerkat statically links the Go modules listed below (built with\n")
+	fmt.Fprintf(&buf, "%s statically links the Go modules listed below (built with\n", filepath.Base(*pkg))
 	buf.WriteString("CGO_ENABLED=0, so cgo-only dependencies such as blevesearch/go-faiss\n")
 	buf.WriteString("are present in go.mod but not linked into this binary and are not\n")
 	buf.WriteString("listed here). This file reproduces their license and notice texts\n")
@@ -93,27 +102,27 @@ func main() {
 		fatal(fmt.Errorf("no LICENSE/NOTICE file found for module(s): %s", strings.Join(missing, "; ")))
 	}
 
-	if err := os.WriteFile(outFile, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(*outFile, buf.Bytes(), 0o644); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("gen-third-party-licenses: wrote %s covering %d third-party modules\n", outFile, len(mods))
+	fmt.Printf("gen-third-party-licenses: wrote %s covering %d third-party modules\n", *outFile, len(mods))
 }
 
 // deps returns the de-duplicated, sorted set of third-party modules
-// reachable from ./cmd/meerkat under CGO_ENABLED=0 — the same build
+// reachable from *pkg under CGO_ENABLED=0 — the same build
 // configuration goreleaser uses, so cgo-only modules that are present
 // in go.mod but never actually compiled in (e.g. blevesearch/go-faiss)
 // are correctly excluded.
 func deps() ([]module, error) {
 	cmd := exec.Command("go", "list", "-deps", "-f",
 		`{{if .Module}}{{.Module.Path}}|{{.Module.Version}}|{{.Module.Dir}}{{end}}`,
-		"./cmd/meerkat")
+		*pkg)
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("go list -deps ./cmd/meerkat: %w\n%s", err, stderr.String())
+		return nil, fmt.Errorf("go list -deps %s: %w\n%s", *pkg, err, stderr.String())
 	}
 
 	seen := map[string]module{}

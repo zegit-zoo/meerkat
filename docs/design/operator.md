@@ -1,10 +1,11 @@
 # The meerkat operator: KnowledgeBase and MeerkatMob
 
-Status: second slice (meerkat-mob#10, phase 2). The CRD types, their
+Status: third slice (meerkat-mob#10, phase 2). The CRD types, their
 manifests, the validating webhook, `cmd/meerkat-operator` and a
-KnowledgeBase reconciler that reports each tree in status exist. The
-controller that renders Deployments from them does not yet, and nothing
-ships the operator.
+KnowledgeBase reconciler that reports each tree in status exist, and
+each release ships the operator as an image that the Helm chart installs
+(`operator.enabled`, below). The controller that renders Deployments
+from them does not exist yet.
 
 ## Resources
 
@@ -138,15 +139,38 @@ The KnowledgeBase webhook fails closed on a create or update. Its
 delete hook is separate and set to `failurePolicy: Ignore`, because a
 delete is only warned about, and a down operator must not block it.
 
+## Packaging
+
+`release.yml` builds `ghcr.io/zegit-zoo/meerkat-operator` from the
+Dockerfile's `operator` target (distroless, non-root, its own
+`THIRD-PARTY-LICENSES.txt`) and signs it like the meerkat image.
+`charts/meerkat` installs it behind `operator.enabled` (off by default):
+the CRDs, a ServiceAccount, the ClusterRole and its binding, a
+Deployment with leader election, the webhook Service and the
+`ValidatingWebhookConfiguration`. `make crds` copies the generated CRDs,
+ClusterRole and webhook configuration into `charts/meerkat/files/operator/`
+and `make crds-check` covers the copies, so the chart renders the same
+rules and paths the code declares. The chart sets only the names, the
+Service reference and the CA.
+
+The CRDs are templates, not a `crds/` directory: they install only with
+the operator, `helm upgrade` updates them, and they carry
+`helm.sh/resource-policy: keep` so an uninstall does not delete every
+KnowledgeBase.
+
+The webhook's serving certificate comes from cert-manager by default (a
+`Certificate` from a given issuer or a chart-made self-signed `Issuer`,
+with the CA injected through `cert-manager.io/inject-ca-from`), or,
+without cert-manager, from a CA and certificate Helm generates once and
+reuses on upgrade. The chart README has the rotation steps.
+
 ## Not built yet
 
-Serving certificates for the webhook (cert-manager or self-signed),
-the operator's image, Deployment and release packaging, the MeerkatMob
-reconciler (one Deployment per placement unit, rendered
+The MeerkatMob reconciler (one Deployment per placement unit, rendered
 `content-source.yaml`, lazy children rewritten to sibling Services,
-NetworkPolicy for dedicated KBs), MeerkatMob status, scale-to-zero,
-and the librarian CronJob. Also still to come: the CRDs, ClusterRole
-and webhook configuration packaged with (or referenced from)
-`charts/meerkat/crds/`, and a registry allow-list or a pin for a MeerkatMob's `spec.image`, which
-until then lets anyone who can create a MeerkatMob choose the image
-its pods run. meerkat-mob#10 tracks them.
+NetworkPolicy for dedicated KBs), MeerkatMob status, scale-to-zero, and
+the librarian CronJob. Also still to come: a chart switch to install the
+operator without the meerkat server, a NetworkPolicy for the operator
+pod, and a registry allow-list or a pin for a MeerkatMob's
+`spec.image`, which until then lets anyone who can create a MeerkatMob
+choose the image its pods run. meerkat-mob#10 tracks them.

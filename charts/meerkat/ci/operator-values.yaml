@@ -1,0 +1,16 @@
+# The operator with a cert-manager ClusterIssuer and a pinned image digest
+# (meerkat-mob#10). make chart-check renders it with kubeconform.
+operator:
+  enabled: true
+  replicaCount: 2
+  image:
+    tag: v0.21.0
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  webhook:
+    certManager:
+      issuerRef:
+        name: cluster-ca
+        kind: ClusterIssuer
+        group: cert-manager.io
+  extraArgs:
+    - --metrics-bind-address=:8080
