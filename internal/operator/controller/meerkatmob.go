@@ -253,7 +253,7 @@ func count32(n int) int32 {
 	if n > math.MaxInt32 {
 		return math.MaxInt32
 	}
-	return int32(n) //nolint:gosec // bounded above
+	return int32(n) // #nosec G115 -- bounded above
 }
 
 // writeStatus updates mob's status when it changed.
