@@ -1,11 +1,12 @@
 # The meerkat operator: KnowledgeBase and MeerkatMob
 
-Status: third slice (meerkat-mob#10, phase 2). The CRD types, their
-manifests, the validating webhook, `cmd/meerkat-operator` and a
-KnowledgeBase reconciler that reports each tree in status exist, and
-each release ships the operator as an image that the Helm chart installs
-(`operator.enabled`, below). The controller that renders Deployments
-from them does not exist yet.
+Status: fourth slice (meerkat-mob#10, phase 2). The CRD types, their
+manifests, the validating webhook, `cmd/meerkat-operator`, a
+KnowledgeBase reconciler that reports each tree in status, and a
+MeerkatMob reconciler that serves a tree as meerkat Deployments exist,
+and each release ships the operator as an image that the Helm chart
+installs (`operator.enabled`, below). Cross-process hops, scale-to-zero
+and the librarian CronJob do not exist yet (see the end of this page).
 
 ## Resources
 
@@ -132,12 +133,98 @@ A KnowledgeBase's condition depends on its ancestors and its subtree,
 so a create, delete or spec change of any KnowledgeBase re-queues every
 KnowledgeBase in its namespace. Status writes do not change the
 generation, so they do not re-trigger it, and a status that has not
-changed is not written. The MeerkatMob reconciler is to render only
-from KnowledgeBases whose `TreeValid` is `True`.
+changed is not written.
 
 The KnowledgeBase webhook fails closed on a create or update. Its
 delete hook is separate and set to `failurePolicy: Ignore`, because a
 delete is only warned about, and a down operator must not block it.
+
+## The MeerkatMob reconciler
+
+For each MeerkatMob, the reconciler takes `spec.root` and every
+KnowledgeBase below it in the mob's namespace, depth first with
+siblings by name, and splits them into placement units:
+
+| `spec.placement` | units |
+| --- | --- |
+| `single` (default) | one, `<mob>-all` |
+| `perTier` | one per `spec.tier`, `<mob>-tier-<n>` |
+| `perKB` | one per KnowledgeBase, `<mob>-kb-<name>` |
+
+A KnowledgeBase with `placement: dedicated` gets a `<mob>-kb-<name>`
+unit of its own under every placement. A name that is not a DNS-1035
+label (a Service name) is shortened and given a hash suffix.
+
+Each unit is a ConfigMap holding a `content-source.yaml`, a Deployment
+of one replica and a ClusterIP Service on port 4005, all named after
+the unit, labelled `meerkat-mob.dev/mob` and `meerkat-mob.dev/unit`, and
+controlled by the mob through an owner reference, so deleting the mob
+deletes them. They are written with server-side apply (field manager
+`meerkat-operator`, forcing ownership), so a hand edit of a field the
+operator sets is put back on the next reconcile. A unit the mob no
+longer has is deleted. Only objects the mob controls are ever pruned.
+
+The `content-source.yaml` is a `collections:` list, one entry per
+KnowledgeBase in tree order, named after it: an `s3` source becomes
+`type: s3` with the same bucket, prefix, endpoint, region, path style
+and `insecure`; `gcs` becomes `type: gcs`; a `bundle` becomes `type:
+url` with its `sha256`; `refresh.interval` and `description` carry
+over. `spec.telemetry` becomes `observability:` (traces on, exported to
+that one collector). `spec.auth` becomes `auth:`: the `auth.yaml` key of
+the ConfigMap `spec.auth.configMapRef` names is the server's `auth:`
+block (its `resource`, `rules` and any further providers), and the
+operator adds `issuer` and `audience` as a provider unless the block
+already lists that issuer. The operator then loads the file with the
+server's own loader (`contentsource.Parse`), so a file the server would
+refuse at startup is never deployed.
+
+The Deployment runs `mcp serve-http` on port 4005 with the Helm
+chart's pod: non-root 65532, read-only root filesystem, no privilege
+escalation, every capability dropped, `RuntimeDefault` seccomp, no
+ServiceAccount token, an `emptyDir` cache, and the chart's probes and
+resources. A checksum of the `content-source.yaml` on the pod template
+rolls the pods when it changes.
+
+The mob is not rendered, and what its last good spec rendered keeps
+running, when:
+
+- `spec.root` names no KnowledgeBase (`RootMissing`);
+- a KnowledgeBase under the root breaks the depth or cycle rules, run
+  again here because admission is time-of-check (`TreeRefused`);
+- `spec.image` is refused (`ImageRefused`, below);
+- `spec.auth` is unset, its ConfigMap or key is missing, or a rendered
+  file does not load: for example a KnowledgeBase name with a dot (a
+  valid object name, not a collection name), a `refresh` on a bundle, or
+  an `auth:` block without a `resource` (`ConfigRefused`, with the
+  loader's message). The operator never starts a hosted server without
+  authentication.
+
+Status carries `observedGeneration`, `image`, `instances` and
+`knowledgeBases`, and two conditions. `Rendered` is `True` once every
+unit was applied, or `False` with one of the reasons above. `Available`
+is `True` once every unit's Deployment has rolled out its generation
+with an available replica, `False` (`Progressing`) before that, and
+`Unknown` (`NotRendered`) while the current spec is not rendered.
+
+The mob is reconciled again when it changes, when any KnowledgeBase in
+its namespace is created, deleted or changes spec (any of them can join
+or leave its tree), when its auth ConfigMap changes, and when an object
+it rendered changes.
+
+### Which image a mob runs
+
+`spec.image` is a privilege boundary: without a check, whoever can write
+a MeerkatMob picks the image its pods run, with the S3, GCS and OIDC
+configuration the operator gives them. The operator's
+`--server-image` is what a mob runs when `spec.image` is empty (the
+chart passes its own `image.*`). `--allowed-images` lists the
+repositories an override may name: an entry matches one repository
+exactly (`ghcr.io/zegit-zoo/meerkat`, the default), or every repository
+below it when it ends in `/`. An entry must name its registry host, and
+a repository that only starts with an allowed one
+(`ghcr.io/zegit-zoo/meerkat-evil`) does not match. The webhook refuses
+any other image at admission, and the reconciler refuses it again
+(`ImageRefused`) in case it got in while the webhook was down.
 
 ## Packaging
 
@@ -166,11 +253,23 @@ reuses on upgrade. The chart README has the rotation steps.
 
 ## Not built yet
 
-The MeerkatMob reconciler (one Deployment per placement unit, rendered
-`content-source.yaml`, lazy children rewritten to sibling Services,
-NetworkPolicy for dedicated KBs), MeerkatMob status, scale-to-zero, and
-the librarian CronJob. Also still to come: a chart switch to install the
-operator without the meerkat server, a NetworkPolicy for the operator
-pod, and a registry allow-list or a pin for a MeerkatMob's
-`spec.image`, which until then lets anyone who can create a MeerkatMob
-choose the image its pods run. meerkat-mob#10 tracks them.
+meerkat-mob#10 tracks these:
+
+- **Cross-process hops.** Each instance serves its unit's
+  KnowledgeBases as flat collections. A parent's pointer to a child in
+  another unit is not yet rewritten to the sibling Service, so a hop
+  does not cross processes, and `mount: lazy` is not yet rendered
+  (`collections:` has no lazy mount).
+- **Access and dedicated isolation.** `access.paths` and
+  `access.identities` are not yet mapped to authz rules, and a dedicated
+  unit has its own Deployment but no NetworkPolicy yet.
+- **Credentials and sizing.** Instances get no S3 credentials, no
+  ServiceAccount for workload identity and no per-KnowledgeBase
+  `maxResidentBytes`; the pod's resources are the chart's defaults.
+  `contract` is not rendered, because the server's `update:` block is
+  structured and the CRD field is free text.
+- **KnowledgeBase status from instances.** `mounted`, `pages`,
+  `contentGeneration` and `lastTraversal` are not filled in.
+- Scale-to-zero, the librarian CronJob, a chart switch to install the
+  operator without the meerkat server, a NetworkPolicy for the operator
+  pod, and acceptance on a real k3s cluster.

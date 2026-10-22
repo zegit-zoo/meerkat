@@ -7,10 +7,35 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - events
   verbs:
   - create
   - patch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - coordination.k8s.io
   resources:
@@ -27,6 +52,7 @@ rules:
   - meerkat-mob.dev
   resources:
   - knowledgebases
+  - meerkatmobs
   verbs:
   - get
   - list
@@ -35,7 +61,14 @@ rules:
   - meerkat-mob.dev
   resources:
   - knowledgebases/status
+  - meerkatmobs/status
   verbs:
   - get
   - patch
+  - update
+- apiGroups:
+  - meerkat-mob.dev
+  resources:
+  - meerkatmobs/finalizers
+  verbs:
   - update

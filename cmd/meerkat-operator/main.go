@@ -1,7 +1,8 @@
 // Command meerkat-operator runs the meerkat mob operator
 // (meerkat-mob#10, phase 2): the validating webhook for KnowledgeBase
-// and MeerkatMob objects, and the KnowledgeBase reconciler, which
-// re-checks each tree after admission and reports it in status.
+// and MeerkatMob objects, the KnowledgeBase reconciler, which re-checks
+// each tree after admission and reports it in status, and the
+// MeerkatMob reconciler, which serves a tree as meerkat instances.
 //
 // Each release ships it as the ghcr.io/zegit-zoo/meerkat-operator image
 // (the Dockerfile's operator target), installed by charts/meerkat with
@@ -15,6 +16,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/zegit-zoo/meerkat/internal/operator/api/v1alpha1"
 	"github.com/zegit-zoo/meerkat/internal/operator/controller"
+	"github.com/zegit-zoo/meerkat/internal/operator/imagepolicy"
 	opwebhook "github.com/zegit-zoo/meerkat/internal/operator/webhook"
 )
 
@@ -45,6 +48,17 @@ type options struct {
 	webhooks       bool
 	webhookPort    int
 	webhookCertDir string
+	serverImage    string
+	allowedImages  string
+}
+
+// defaultServerImage is the meerkat image released with this operator.
+func defaultServerImage() string {
+	tag := strings.TrimPrefix(version, "v")
+	if tag == "dev" {
+		tag = "latest"
+	}
+	return imagepolicy.DefaultRepository + ":" + tag
 }
 
 // parseFlags reads args (without the program name).
@@ -58,6 +72,8 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.BoolVar(&o.webhooks, "webhooks", true, "serve the validating webhook (needs a serving certificate in --webhook-cert-dir)")
 	fs.IntVar(&o.webhookPort, "webhook-port", 9443, "port the webhook server listens on")
 	fs.StringVar(&o.webhookCertDir, "webhook-cert-dir", "", "directory holding tls.crt and tls.key for the webhook (default: controller-runtime's)")
+	fs.StringVar(&o.serverImage, "server-image", defaultServerImage(), "meerkat server image a MeerkatMob runs when spec.image is empty")
+	fs.StringVar(&o.allowedImages, "allowed-images", imagepolicy.DefaultRepository, `comma-separated repositories a MeerkatMob's spec.image may name: exact ("ghcr.io/zegit-zoo/meerkat"), or every repository below a prefix ending in "/"; empty allows no override`)
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return o, err
@@ -94,6 +110,10 @@ func run(o options) error {
 	if err != nil {
 		return fmt.Errorf("building the scheme: %w", err)
 	}
+	images, err := imagepolicy.New(o.serverImage, strings.Split(o.allowedImages, ","))
+	if err != nil {
+		return err
+	}
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return fmt.Errorf("loading the kubeconfig: %w", err)
@@ -115,8 +135,11 @@ func run(o options) error {
 	if err := (&controller.KnowledgeBaseReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("KnowledgeBase controller: %w", err)
 	}
+	if err := (&controller.MeerkatMobReconciler{Client: mgr.GetClient(), Images: images}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("MeerkatMob controller: %w", err)
+	}
 	if o.webhooks {
-		if err := opwebhook.Setup(mgr); err != nil {
+		if err := opwebhook.Setup(mgr, images); err != nil {
 			return err
 		}
 	}
@@ -126,7 +149,7 @@ func run(o options) error {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return fmt.Errorf("readyz check: %w", err)
 	}
-	log.Info("starting meerkat-operator", "version", version, "webhooks", o.webhooks)
+	log.Info("starting meerkat-operator", "version", version, "webhooks", o.webhooks, "server_image", images.Default)
 	return mgr.Start(ctrl.SetupSignalHandler())
 }
 

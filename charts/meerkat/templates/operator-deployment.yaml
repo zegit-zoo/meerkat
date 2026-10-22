@@ -42,6 +42,8 @@ spec:
             # One replica reconciles at a time; every replica serves the webhook.
             - --leader-elect
             - --health-probe-bind-address=:8081
+            - --server-image={{ .Values.operator.serverImage | default (include "meerkat.image" .) }}
+            - --allowed-images={{ join "," .Values.operator.allowedImages }}
             {{- if $webhook }}
             - --webhook-port={{ .Values.operator.webhook.port }}
             - --webhook-cert-dir=/tmp/k8s-webhook-server/serving-certs

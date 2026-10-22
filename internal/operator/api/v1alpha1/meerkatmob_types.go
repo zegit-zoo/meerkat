@@ -13,6 +13,41 @@ const (
 	PlacementSingle  = "single"
 )
 
+// The MeerkatMob conditions. Rendered says whether the operator could
+// turn the mob into instances; Available says whether every instance it
+// rendered has a ready replica.
+const (
+	ConditionRendered  = "Rendered"
+	ConditionAvailable = "Available"
+
+	// ReasonRendered: every instance's ConfigMap, Deployment and Service
+	// was applied.
+	ReasonRendered = "Rendered"
+	// ReasonRootMissing: spec.root names no KnowledgeBase.
+	ReasonRootMissing = "RootMissing"
+	// ReasonImageRefused: spec.image is not on the operator's
+	// allow-list.
+	ReasonImageRefused = "ImageRefused"
+	// ReasonConfigRefused: a KnowledgeBase or spec.auth cannot become a
+	// content-source.yaml the server loads. The message is the server's
+	// own load error, or names the missing piece.
+	ReasonConfigRefused = "ConfigRefused"
+	// ReasonTreeRefused (shared with KnowledgeBase's TreeValid): a
+	// KnowledgeBase under the root breaks the depth or cycle rules.
+
+	// ReasonAvailable: every instance has an available replica.
+	ReasonAvailable = "Available"
+	// ReasonProgressing: some instance has no available replica yet.
+	ReasonProgressing = "Progressing"
+	// ReasonNotRendered: the mob was not rendered (see Rendered), so
+	// availability says nothing about the current spec.
+	ReasonNotRendered = "NotRendered"
+)
+
+// AuthConfigMapKey is the key, in the ConfigMap spec.auth.configMapRef
+// names, holding the server's auth: block.
+const AuthConfigMapKey = "auth.yaml"
+
 // MeerkatMobSpec is a tree to serve and how to serve it.
 type MeerkatMobSpec struct {
 	// Root names the tree's root KnowledgeBase, in the same namespace.
@@ -28,8 +63,10 @@ type MeerkatMobSpec struct {
 	Placement string `json:"placement,omitempty"`
 
 	// Image overrides the meerkat server image. Empty means the image
-	// the operator was released with.
+	// the operator was released with. The operator admits only images
+	// from the repositories its --allowed-images flag lists.
 	// +optional
+	// +kubebuilder:validation:MaxLength=512
 	Image string `json:"image,omitempty"`
 
 	// ScaleToZero scales an instance whose KnowledgeBases go unvisited
@@ -96,9 +133,14 @@ type Auth struct {
 	Issuer string `json:"issuer"`
 	// +kubebuilder:validation:MinLength=1
 	Audience string `json:"audience"`
-	// ConfigMapRef names a ConfigMap holding the server's auth: policy
-	// block (authz rules), in the mob's namespace.
+	// ConfigMapRef names a ConfigMap, in the mob's namespace, whose
+	// auth.yaml key holds the server's auth: block (resource, rules,
+	// and any further providers). The operator adds Issuer and Audience
+	// as a provider unless the block already lists that issuer. The
+	// server requires a resource once a provider is configured, so in
+	// practice the ConfigMap is required.
 	// +optional
+	// +kubebuilder:validation:MaxLength=253
 	ConfigMapRef string `json:"configMapRef,omitempty"`
 }
 
@@ -118,6 +160,9 @@ type MeerkatMobStatus struct {
 	// Instances is the number of Deployments the mob renders to.
 	// +optional
 	Instances int32 `json:"instances,omitempty"`
+	// Image is the server image the instances run.
+	// +optional
+	Image string `json:"image,omitempty"`
 	// KnowledgeBases is the number of KnowledgeBases in the tree.
 	// +optional
 	KnowledgeBases int32 `json:"knowledgeBases,omitempty"`

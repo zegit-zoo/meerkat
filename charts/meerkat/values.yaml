@@ -249,6 +249,17 @@ operator:
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
+  # The meerkat server image a MeerkatMob runs when its spec.image is
+  # empty. Empty: this chart's own image (image.repository, image.tag,
+  # image.digest above).
+  serverImage: ""
+  # Repositories a MeerkatMob's spec.image may name instead. An entry
+  # matches one repository exactly, or, ending in "/", every repository
+  # below it. The webhook and the reconciler both refuse anything else,
+  # since whoever writes spec.image picks the image the mob's pods run.
+  # Empty: no MeerkatMob may override the image.
+  allowedImages:
+    - ghcr.io/zegit-zoo/meerkat
   crds:
     # Install or upgrade the CRDs with the chart. Set false when another
     # release or a GitOps tool owns them.

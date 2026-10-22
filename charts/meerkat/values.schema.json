@@ -597,6 +597,17 @@
             }
           }
         },
+        "serverImage": {
+          "type": "string",
+          "pattern": "^[^\\s,]*$"
+        },
+        "allowedImages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\s,@]+$"
+          }
+        },
         "crds": {
           "type": "object",
           "additionalProperties": false,

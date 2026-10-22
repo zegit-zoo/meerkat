@@ -63,8 +63,13 @@ spec:
                     type: string
                   configMapRef:
                     description: |-
-                      ConfigMapRef names a ConfigMap holding the server's auth: policy
-                      block (authz rules), in the mob's namespace.
+                      ConfigMapRef names a ConfigMap, in the mob's namespace, whose
+                      auth.yaml key holds the server's auth: block (resource, rules,
+                      and any further providers). The operator adds Issuer and Audience
+                      as a provider unless the block already lists that issuer. The
+                      server requires a resource once a provider is configured, so in
+                      practice the ConfigMap is required.
+                    maxLength: 253
                     type: string
                   issuer:
                     pattern: ^https://
@@ -76,7 +81,9 @@ spec:
               image:
                 description: |-
                   Image overrides the meerkat server image. Empty means the image
-                  the operator was released with.
+                  the operator was released with. The operator admits only images
+                  from the repositories its --allowed-images flag lists.
+                maxLength: 512
                 type: string
               librarian:
                 description: |-
@@ -217,6 +224,9 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              image:
+                description: Image is the server image the instances run.
+                type: string
               instances:
                 description: Instances is the number of Deployments the mob renders
                   to.
