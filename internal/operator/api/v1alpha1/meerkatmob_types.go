@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -28,9 +29,10 @@ const (
 	// ReasonImageRefused: spec.image is not on the operator's
 	// allow-list.
 	ReasonImageRefused = "ImageRefused"
-	// ReasonConfigRefused: a KnowledgeBase or spec.auth cannot become a
-	// content-source.yaml the server loads. The message is the server's
-	// own load error, or names the missing piece.
+	// ReasonConfigRefused: a KnowledgeBase, spec.auth, spec.credentials
+	// or spec.resources cannot become an instance the server runs. The
+	// message is the server's own load error, or names the missing or
+	// conflicting piece.
 	ReasonConfigRefused = "ConfigRefused"
 	// ReasonTreeRefused (shared with KnowledgeBase's TreeValid): a
 	// KnowledgeBase under the root breaks the depth or cycle rules.
@@ -87,6 +89,59 @@ type MeerkatMobSpec struct {
 	// temporary full-tree instance.
 	// +optional
 	Librarian *Librarian `json:"librarian,omitempty"`
+
+	// Credentials are what the instances authenticate to their object
+	// stores with. They are referenced, never written here.
+	// +optional
+	Credentials *Credentials `json:"credentials,omitempty"`
+
+	// Resources are every instance's container resources. Empty means
+	// the operator's defaults (requests 50m CPU and 128Mi memory, a
+	// 512Mi memory limit). Each instance's memory request and limit are
+	// then raised by the maxResidentBytes of the KnowledgeBases it
+	// serves.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// The S3 credential keys an instance reads from Credentials.S3SecretRef:
+// the AWS default chain's variables. The session token is optional.
+const (
+	S3AccessKeyIDKey     = "AWS_ACCESS_KEY_ID"     //nolint:gosec // G101: false positive — a Secret key name, not a credential.
+	S3SecretAccessKeyKey = "AWS_SECRET_ACCESS_KEY" //nolint:gosec // G101: false positive — a Secret key name, not a credential.
+	S3SessionTokenKey    = "AWS_SESSION_TOKEN"     //nolint:gosec // G101: false positive — a Secret key name, not a credential.
+)
+
+// Credentials point the instances at a static S3 key or a cloud
+// workload identity, or both.
+type Credentials struct {
+	// S3SecretRef names a Secret, in the mob's namespace, holding
+	// AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (and optionally
+	// AWS_SESSION_TOKEN) for the s3 sources. Only those keys reach the
+	// pods. The operator never reads the Secret; a pod waits until it
+	// exists. Pods read it at start, so a rotation needs a restart.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	S3SecretRef string `json:"s3SecretRef,omitempty"`
+
+	// ServiceAccount configures the ServiceAccount the operator creates
+	// for the mob's instances.
+	// +optional
+	ServiceAccount *ServiceAccount `json:"serviceAccount,omitempty"`
+}
+
+// ServiceAccount is the mob's own ServiceAccount, named after the mob
+// (<mob>-meerkat). The instances run as it, without a mounted API
+// token: meerkat never talks to the Kubernetes API.
+type ServiceAccount struct {
+	// Annotations bind it to a cloud identity, such as
+	// eks.amazonaws.com/role-arn or iam.gke.io/gcp-service-account.
+	// The cloud side's trust policy names this ServiceAccount, so a mob
+	// can only assume a role that trusts it.
+	// +optional
+	// +kubebuilder:validation:MaxProperties=32
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // ScaleToZero is the idle scale-down.

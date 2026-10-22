@@ -187,7 +187,9 @@ type Access struct {
 
 // KnowledgeBaseResources bound a KnowledgeBase's resident footprint.
 type KnowledgeBaseResources struct {
-	// MaxResidentBytes caps what this KnowledgeBase keeps in memory.
+	// MaxResidentBytes is what this KnowledgeBase may keep in memory.
+	// The instance serving it gets this much more memory, added to its
+	// request and its limit; the server does not enforce it itself.
 	// +optional
 	MaxResidentBytes *resource.Quantity `json:"maxResidentBytes,omitempty"`
 }

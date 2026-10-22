@@ -142,8 +142,10 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: MaxResidentBytes caps what this KnowledgeBase keeps
-                      in memory.
+                    description: |-
+                      MaxResidentBytes is what this KnowledgeBase may keep in memory.
+                      The instance serving it gets this much more memory, added to its
+                      request and its limit; the server does not enforce it itself.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                 type: object

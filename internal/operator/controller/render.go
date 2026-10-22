@@ -12,8 +12,10 @@ import (
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	appsv1ac "k8s.io/client-go/applyconfigurations/apps/v1"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
@@ -330,9 +332,130 @@ func serviceFor(mob *v1alpha1.MeerkatMob, u *unit) *corev1ac.ServiceApplyConfigu
 				WithProtocol(corev1.ProtocolTCP)))
 }
 
+// serviceAccountName names the ServiceAccount every instance of mob
+// runs as.
+func serviceAccountName(mob *v1alpha1.MeerkatMob) string {
+	return objectName(mob.Name + "-meerkat")
+}
+
+// serviceAccountFor is mob's ServiceAccount, carrying the annotations
+// that bind it to a cloud identity. It mounts no API token: meerkat
+// never talks to the Kubernetes API, and a workload identity webhook
+// projects its own token.
+func serviceAccountFor(mob *v1alpha1.MeerkatMob) *corev1ac.ServiceAccountApplyConfiguration {
+	sa := corev1ac.ServiceAccount(serviceAccountName(mob), mob.Namespace).
+		WithLabels(mobLabels(mob)).
+		WithOwnerReferences(ownerRef(mob)).
+		WithAutomountServiceAccountToken(false)
+	if c := mob.Spec.Credentials; c != nil && c.ServiceAccount != nil && len(c.ServiceAccount.Annotations) > 0 {
+		sa.WithAnnotations(c.ServiceAccount.Annotations)
+	}
+	return sa
+}
+
+// checkServiceAccount refuses annotations the API server would refuse,
+// so a bad key is a status message rather than a retry loop.
+func checkServiceAccount(c *v1alpha1.Credentials) error {
+	if c == nil || c.ServiceAccount == nil {
+		return nil
+	}
+	if errs := apivalidation.ValidateAnnotations(c.ServiceAccount.Annotations, field.NewPath("spec", "credentials", "serviceAccount", "annotations")); len(errs) > 0 {
+		return errs.ToAggregate()
+	}
+	return nil
+}
+
+// The resources an instance gets when spec.resources is empty, as the
+// chart's defaults.
+var (
+	defaultCPURequest    = resource.MustParse("50m")
+	defaultMemoryRequest = resource.MustParse("128Mi")
+	defaultMemoryLimit   = resource.MustParse("512Mi")
+)
+
+// resourcesFor is u's container resources: spec.resources (or the
+// defaults), with the memory request and limit each raised by the sum
+// of u's KnowledgeBases' maxResidentBytes. A memory request or limit
+// that spec.resources leaves out stays out (the API server defaults a
+// missing request to the limit); with neither, the resident bytes
+// become the request.
+func resourcesFor(mob *v1alpha1.MeerkatMob, u *unit) (corev1.ResourceRequirements, error) {
+	res := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: defaultCPURequest.DeepCopy(), corev1.ResourceMemory: defaultMemoryRequest.DeepCopy()},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: defaultMemoryLimit.DeepCopy()},
+	}
+	if r := mob.Spec.Resources; r != nil {
+		if len(r.Claims) > 0 {
+			return res, fmt.Errorf("spec.resources.claims is not supported: an instance needs no dynamic resources")
+		}
+		res = corev1.ResourceRequirements{Requests: r.Requests.DeepCopy(), Limits: r.Limits.DeepCopy()}
+	}
+	var resident resource.Quantity
+	for i := range u.KBs {
+		kb := &u.KBs[i]
+		if kb.Spec.Resources == nil || kb.Spec.Resources.MaxResidentBytes == nil {
+			continue
+		}
+		q := *kb.Spec.Resources.MaxResidentBytes
+		if q.Sign() < 0 {
+			return res, fmt.Errorf("KnowledgeBase %q: resources.maxResidentBytes %s is negative", kb.Name, q.String())
+		}
+		resident.Add(q)
+	}
+	if resident.IsZero() {
+		return res, nil
+	}
+	_, hasRequest := res.Requests[corev1.ResourceMemory]
+	_, hasLimit := res.Limits[corev1.ResourceMemory]
+	for _, l := range []corev1.ResourceList{res.Requests, res.Limits} {
+		if m, ok := l[corev1.ResourceMemory]; ok {
+			m.Add(resident)
+			l[corev1.ResourceMemory] = m
+		}
+	}
+	if !hasRequest && !hasLimit {
+		// Nothing to raise: the resident bytes are the request.
+		if res.Requests == nil {
+			res.Requests = corev1.ResourceList{}
+		}
+		res.Requests[corev1.ResourceMemory] = resident
+	}
+	return res, nil
+}
+
+// goMemLimit is GOMEMLIMIT for a container with res: 90% of its memory
+// limit, so the Go collector works harder before the kernel kills the
+// pod. Empty without a memory limit.
+func goMemLimit(res corev1.ResourceRequirements) string {
+	m, ok := res.Limits[corev1.ResourceMemory]
+	if !ok || m.Value() <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(m.Value()/10*9, 10)
+}
+
+// s3CredentialEnv maps the keys of the Secret spec.credentials names to
+// the AWS default chain's variables. Only those keys are read: envFrom
+// would let the Secret set any variable, MEERKAT_* among them.
+func s3CredentialEnv(c *v1alpha1.Credentials) []*corev1ac.EnvVarApplyConfiguration {
+	if c == nil || c.S3SecretRef == "" {
+		return nil
+	}
+	ref := func(key string, optional bool) *corev1ac.EnvVarApplyConfiguration {
+		return corev1ac.EnvVar().WithName(key).WithValueFrom(corev1ac.EnvVarSource().
+			WithSecretKeyRef(corev1ac.SecretKeySelector().WithName(c.S3SecretRef).WithKey(key).WithOptional(optional)))
+	}
+	return []*corev1ac.EnvVarApplyConfiguration{
+		ref(v1alpha1.S3AccessKeyIDKey, false),
+		ref(v1alpha1.S3SecretAccessKeyKey, false),
+		ref(v1alpha1.S3SessionTokenKey, true),
+	}
+}
+
 // deploymentFor is u's Deployment, with the chart's security context
-// and probes. body is the content-source.yaml it mounts.
-func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte) *appsv1ac.DeploymentApplyConfiguration {
+// and probes. body is the content-source.yaml it mounts; res are the
+// container's resources (resourcesFor).
+func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte, res corev1.ResourceRequirements) *appsv1ac.DeploymentApplyConfiguration {
 	sum := sha256.Sum256(body)
 	probe := func(path string, period, failures int32) *corev1ac.ProbeApplyConfiguration {
 		return corev1ac.Probe().
@@ -341,24 +464,34 @@ func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte)
 			WithTimeoutSeconds(2).
 			WithFailureThreshold(failures)
 	}
+	env := []*corev1ac.EnvVarApplyConfiguration{
+		corev1ac.EnvVar().WithName("XDG_CACHE_HOME").WithValue(cacheDir),
+		corev1ac.EnvVar().WithName("MEERKAT_NO_UPDATE_CHECK").WithValue("1"),
+		corev1ac.EnvVar().WithName("MEERKAT_CONTENT_SOURCE").WithValue(contentSourcePath),
+	}
+	if v := goMemLimit(res); v != "" {
+		env = append(env, corev1ac.EnvVar().WithName("GOMEMLIMIT").WithValue(v))
+	}
+	env = append(env, s3CredentialEnv(mob.Spec.Credentials)...)
+	resources := corev1ac.ResourceRequirements()
+	if len(res.Requests) > 0 {
+		resources.WithRequests(res.Requests)
+	}
+	if len(res.Limits) > 0 {
+		resources.WithLimits(res.Limits)
+	}
 	container := corev1ac.Container().
 		WithName("meerkat").
 		WithImage(image).
 		WithArgs("mcp", "serve-http", "--host=0.0.0.0", "--port="+strconv.Itoa(serverPort), "--path="+serverPath).
 		WithPorts(corev1ac.ContainerPort().WithName("http").WithContainerPort(serverPort).WithProtocol(corev1.ProtocolTCP)).
-		WithEnv(
-			corev1ac.EnvVar().WithName("XDG_CACHE_HOME").WithValue(cacheDir),
-			corev1ac.EnvVar().WithName("MEERKAT_NO_UPDATE_CHECK").WithValue("1"),
-			corev1ac.EnvVar().WithName("MEERKAT_CONTENT_SOURCE").WithValue(contentSourcePath),
-		).
+		WithEnv(env...).
 		// The listener opens only once content is resolved and indexed,
 		// so startup may take up to 10 minutes, as in the chart.
 		WithStartupProbe(probe("/livez", 5, 120)).
 		WithLivenessProbe(probe("/livez", 10, 3)).
 		WithReadinessProbe(probe("/readyz", 5, 2)).
-		WithResources(corev1ac.ResourceRequirements().
-			WithRequests(corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("128Mi")}).
-			WithLimits(corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")})).
+		WithResources(resources).
 		WithSecurityContext(corev1ac.SecurityContext().
 			WithRunAsNonRoot(true).
 			WithRunAsUser(nonRootID).
@@ -372,6 +505,7 @@ func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte)
 			corev1ac.VolumeMount().WithName("content-source").WithMountPath(contentSourcePath).WithSubPath(contentSourceKey).WithReadOnly(true),
 		)
 	pod := corev1ac.PodSpec().
+		WithServiceAccountName(serviceAccountName(mob)).
 		// meerkat never talks to the Kubernetes API.
 		WithAutomountServiceAccountToken(false).
 		WithSecurityContext(corev1ac.PodSecurityContext().
