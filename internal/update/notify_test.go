@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/zegit-zoo/meerkat/internal/auth"
 )
 
 // TestMaybeNotify_DevBuildSilent: dev / unknown current versions
@@ -90,11 +95,82 @@ func TestMaybeNotify_StaleCacheStillEmits(t *testing.T) {
 		CheckedAt: time.Now().Add(-48 * time.Hour),
 		LatestTag: "v0.5.0",
 	})
+	withStubbedRefresh(t, http.StatusOK, `{"tag_name":"v0.6.0"}`)
 	var buf bytes.Buffer
 	MaybeNotify(context.Background(), "v0.4.0", &buf)
 	if !strings.Contains(buf.String(), "v0.5.0") {
 		t.Errorf("expected nag from stale cache, got %q", buf.String())
 	}
+}
+
+// TestMaybeNotify_StaleCacheRefreshesInBackground: the refresh a stale
+// cache starts writes the latest tag for the next run.
+func TestMaybeNotify_StaleCacheRefreshesInBackground(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", tmp)
+	mustWriteCache(t, tmp, notifyCache{
+		CheckedAt: time.Now().Add(-48 * time.Hour),
+		LatestTag: "v0.5.0",
+	})
+	withStubbedRefresh(t, http.StatusOK, `{"tag_name":"v0.6.0"}`)
+	MaybeNotify(context.Background(), "v0.4.0", io.Discard)
+	notifyRefreshes.Wait()
+
+	c, err := readNotifyCache()
+	if err != nil {
+		t.Fatalf("readNotifyCache: %v", err)
+	}
+	if c.LatestTag != "v0.6.0" {
+		t.Errorf("cache LatestTag = %q, want v0.6.0", c.LatestTag)
+	}
+	if time.Since(c.CheckedAt) > time.Minute {
+		t.Errorf("cache CheckedAt = %v, want a fresh timestamp", c.CheckedAt)
+	}
+}
+
+// TestMaybeNotify_FailedRefreshMarksCacheChecked: a refresh that fails
+// still stamps the cache, with no tag, so the next runs don't retry
+// (and don't nag) until the TTL expires.
+func TestMaybeNotify_FailedRefreshMarksCacheChecked(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", tmp)
+	withStubbedRefresh(t, http.StatusInternalServerError, `{}`)
+	MaybeNotify(context.Background(), "v0.4.0", io.Discard)
+	notifyRefreshes.Wait()
+
+	c, err := readNotifyCache()
+	if err != nil {
+		t.Fatalf("readNotifyCache: %v", err)
+	}
+	if c.LatestTag != "" {
+		t.Errorf("cache LatestTag = %q, want empty after a failed refresh", c.LatestTag)
+	}
+	if time.Since(c.CheckedAt) > time.Minute {
+		t.Errorf("cache CheckedAt = %v, want a fresh timestamp", c.CheckedAt)
+	}
+}
+
+// withStubbedRefresh points the background refresh MaybeNotify starts
+// at an httptest server answering status and body, with no token, and
+// makes the test wait for that refresh before its cleanup runs. Without
+// the wait the goroutine outlives the test: it reads resolveGitHubToken
+// while a later test's withStubbedToken writes it, and it writes the
+// cache under a t.TempDir that is being removed (#216).
+//
+// Call it after t.TempDir and t.Setenv: cleanups run last-in first-out,
+// so the wait registered here runs before the stubs, the env and the
+// temp dir are restored.
+func withStubbedRefresh(t *testing.T, status int, body string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	withStubbedToken(t, "", auth.ErrNoConfig)
+	withStubbedGitHubAPI(t, srv)
+	t.Cleanup(notifyRefreshes.Wait)
 }
 
 // TestNotifyCacheRoundTrip: write + read works.
