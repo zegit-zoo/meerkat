@@ -1,9 +1,10 @@
 # The meerkat operator: KnowledgeBase and MeerkatMob
 
-Status: fourth slice (meerkat-mob#10, phase 2). The CRD types, their
+Status: fifth slice (meerkat-mob#10, phase 2). The CRD types, their
 manifests, the validating webhook, `cmd/meerkat-operator`, a
 KnowledgeBase reconciler that reports each tree in status, and a
-MeerkatMob reconciler that serves a tree as meerkat Deployments exist,
+MeerkatMob reconciler that serves a tree as meerkat Deployments, with
+their credentials and sizing, exist,
 and each release ships the operator as an image that the Helm chart
 installs (`operator.enabled`, below). Cross-process hops, scale-to-zero
 and the librarian CronJob do not exist yet (see the end of this page).
@@ -46,9 +47,11 @@ and its `protocol`, `grpc` by default or `http/protobuf`, as the
 server's `observability.otlp`; a gRPC endpoint may be a bare
 `host:port`), `auth` (OIDC
 issuer and audience, with the authz policy in a referenced ConfigMap)
-and `librarian.schedule` (a five-field cron expression). No resource
-carries a credential. Credentials come from the pods' environment, as
-for the server.
+`librarian.schedule` (a five-field cron expression), `credentials` (an
+S3 Secret by name and the annotations of the mob's ServiceAccount) and
+`resources` (every instance's container resources). No resource carries
+a credential: the pods read the referenced Secret, or a cloud workload
+identity, as the server reads its environment.
 
 The defaults above (`mount`, `placement`, mob `placement`, `idle`,
 `telemetry.protocol`) are schema defaults, so the API server fills them
@@ -181,9 +184,41 @@ refuse at startup is never deployed.
 The Deployment runs `mcp serve-http` on port 4005 with the Helm
 chart's pod: non-root 65532, read-only root filesystem, no privilege
 escalation, every capability dropped, `RuntimeDefault` seccomp, no
-ServiceAccount token, an `emptyDir` cache, and the chart's probes and
-resources. A checksum of the `content-source.yaml` on the pod template
-rolls the pods when it changes.
+ServiceAccount token, an `emptyDir` cache, and the chart's probes. A
+checksum of the `content-source.yaml` on the pod template rolls the
+pods when it changes.
+
+### Credentials and sizing
+
+Every mob gets a ServiceAccount of its own, `<mob>-meerkat`, controlled
+by the mob, and its pods run as it, still without an API token.
+`spec.credentials.serviceAccount.annotations` go on it, so a cloud
+workload identity (`eks.amazonaws.com/role-arn`,
+`iam.gke.io/gcp-service-account`) binds to this ServiceAccount by name:
+the cloud side's trust policy decides which mob may assume which role.
+If a ServiceAccount of that name already exists and the mob does not
+control it, the mob is refused (`ConfigRefused`) rather than take it
+over, because other pods may run as it; deleting it lets the mob render.
+
+`spec.credentials.s3SecretRef` names a Secret in the mob's namespace.
+Each instance reads `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+from it, and `AWS_SESSION_TOKEN` when present, as the AWS default chain
+does for every `type: s3` source. Only those keys are mapped, never the
+whole Secret through `envFrom`, so the Secret cannot set `MEERKAT_*` or
+any other variable. The operator does not read the Secret (it has no
+RBAC on Secrets): a pod whose Secret is missing waits in
+`CreateContainerConfigError`, and `Available` stays `False`. Pods read
+it at start, so a rotated key needs a rollout restart.
+
+`spec.resources` replaces the operator's defaults (requests 50m CPU and
+128Mi memory, a 512Mi memory limit) for every instance. Each instance's
+memory request and limit are then raised by the sum of the
+`resources.maxResidentBytes` of the KnowledgeBases it serves; with
+neither set, that sum becomes the request. A unit with a memory limit
+runs with `GOMEMLIMIT` at 90% of it, so the Go collector works harder
+before the kernel kills the pod. The server does not enforce
+`maxResidentBytes` itself: it sizes the pod. A negative value or
+`spec.resources.claims` refuses the mob (`ConfigRefused`).
 
 The mob is not rendered, and what its last good spec rendered keeps
 running, when:
@@ -192,6 +227,9 @@ running, when:
 - a KnowledgeBase under the root breaks the depth or cycle rules, run
   again here because admission is time-of-check (`TreeRefused`);
 - `spec.image` is refused (`ImageRefused`, below);
+- `spec.credentials.serviceAccount.annotations` has a key the API
+  server refuses, or the ServiceAccount's name is taken (above), or
+  `spec.resources` cannot be applied (`ConfigRefused`);
 - `spec.auth` is unset, its ConfigMap or key is missing, or a rendered
   file does not load: for example a KnowledgeBase name with a dot (a
   valid object name, not a collection name), a `refresh` on a bundle, or
@@ -208,8 +246,9 @@ with an available replica, `False` (`Progressing`) before that, and
 
 The mob is reconciled again when it changes, when any KnowledgeBase in
 its namespace is created, deleted or changes spec (any of them can join
-or leave its tree), when its auth ConfigMap changes, and when an object
-it rendered changes.
+or leave its tree), when its auth ConfigMap changes, when a
+ServiceAccount of its ServiceAccount's name changes or goes away, and
+when an object it rendered changes.
 
 ### Which image a mob runs
 
@@ -263,11 +302,11 @@ meerkat-mob#10 tracks these:
 - **Access and dedicated isolation.** `access.paths` and
   `access.identities` are not yet mapped to authz rules, and a dedicated
   unit has its own Deployment but no NetworkPolicy yet.
-- **Credentials and sizing.** Instances get no S3 credentials, no
-  ServiceAccount for workload identity and no per-KnowledgeBase
-  `maxResidentBytes`; the pod's resources are the chart's defaults.
-  `contract` is not rendered, because the server's `update:` block is
-  structured and the CRD field is free text.
+- **Contract and per-unit identity.** `contract` is not rendered,
+  because the server's `update:` block is structured and the CRD field
+  is free text. Credentials and resources are per mob, so a dedicated
+  KnowledgeBase shares its mob's identity; the server does not enforce
+  `maxResidentBytes` itself.
 - **KnowledgeBase status from instances.** `mounted`, `pages`,
   `contentGeneration` and `lastTraversal` are not filled in.
 - Scale-to-zero, the librarian CronJob, a chart switch to install the

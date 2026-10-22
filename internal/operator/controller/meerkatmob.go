@@ -29,14 +29,16 @@ import (
 const fieldOwner = "meerkat-operator"
 
 // The reconciler reads MeerkatMobs, KnowledgeBases and the auth
-// ConfigMaps they name, and renders a ConfigMap, a Deployment and a
-// Service per placement unit.
+// ConfigMaps they name, and renders a ServiceAccount per mob and a
+// ConfigMap, a Deployment and a Service per placement unit. It never
+// reads Secrets: the pods reference the S3 one by name.
 //
 // +kubebuilder:rbac:groups=meerkat-mob.dev,resources=meerkatmobs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=meerkat-mob.dev,resources=meerkatmobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=meerkat-mob.dev,resources=meerkatmobs/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 
 // MeerkatMobReconciler renders each MeerkatMob's tree as meerkat
 // instances, one per placement unit, and reports the result in status.
@@ -60,7 +62,8 @@ type plan struct {
 
 type plannedUnit struct {
 	unit
-	config []byte
+	config    []byte
+	resources corev1.ResourceRequirements
 }
 
 // Reconcile renders one MeerkatMob.
@@ -95,13 +98,16 @@ func (r *MeerkatMobReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		return reconcile.Result{}, r.writeStatus(ctx, &mob, status)
 	}
 
+	if err := r.Apply(ctx, serviceAccountFor(&mob), client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
+		return reconcile.Result{}, fmt.Errorf("applying the ServiceAccount for MeerkatMob %s: %w", req.NamespacedName, err)
+	}
 	want := map[string]bool{}
 	for i := range p.units {
 		u := &p.units[i]
 		want[u.Name] = true
 		for _, obj := range []runtime.ApplyConfiguration{
 			configMapFor(&mob, &u.unit, u.config),
-			deploymentFor(&mob, &u.unit, p.image, u.config),
+			deploymentFor(&mob, &u.unit, p.image, u.config, u.resources),
 			serviceFor(&mob, &u.unit),
 		} {
 			if err := r.Apply(ctx, obj, client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
@@ -177,6 +183,12 @@ func (r *MeerkatMobReconciler) plan(ctx context.Context, mob *v1alpha1.MeerkatMo
 		return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
 	}
 	obs := renderTelemetry(mob.Spec.Telemetry)
+	if err := checkServiceAccount(mob.Spec.Credentials); err != nil {
+		return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
+	}
+	if ref, err := r.checkServiceAccountFree(ctx, mob); ref != nil || err != nil {
+		return nil, ref, err
+	}
 
 	p := &plan{image: image, kbs: len(kbs)}
 	for _, u := range planUnits(mob, kbs) {
@@ -184,9 +196,29 @@ func (r *MeerkatMobReconciler) plan(ctx context.Context, mob *v1alpha1.MeerkatMo
 		if err != nil {
 			return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
 		}
-		p.units = append(p.units, plannedUnit{unit: u, config: body})
+		res, err := resourcesFor(mob, &u)
+		if err != nil {
+			return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
+		}
+		p.units = append(p.units, plannedUnit{unit: u, config: body, resources: res})
 	}
 	return p, nil, nil
+}
+
+// checkServiceAccountFree refuses to take over a ServiceAccount of the
+// mob's name that something else made: applying to it would add the
+// mob's annotations to an identity other pods run as.
+func (r *MeerkatMobReconciler) checkServiceAccountFree(ctx context.Context, mob *v1alpha1.MeerkatMob) (*refusal, error) {
+	name := serviceAccountName(mob)
+	var sa corev1.ServiceAccount
+	err := r.Get(ctx, types.NamespacedName{Namespace: mob.Namespace, Name: name}, &sa)
+	switch {
+	case client.IgnoreNotFound(err) != nil:
+		return nil, fmt.Errorf("reading ServiceAccount %s/%s: %w", mob.Namespace, name, err)
+	case err != nil, metav1.IsControlledBy(&sa, mob):
+		return nil, nil
+	}
+	return &refusal{v1alpha1.ReasonConfigRefused, fmt.Sprintf("ServiceAccount %q exists and is not this mob's; the operator will not take it over", name)}, nil
 }
 
 // prune deletes what mob rendered for a unit it no longer has.
@@ -270,8 +302,9 @@ func (r *MeerkatMobReconciler) writeStatus(ctx context.Context, mob *v1alpha1.Me
 
 // SetupWithManager registers the reconciler. A mob depends on every
 // KnowledgeBase in its namespace (any of them can join or leave its
-// tree) and on its auth ConfigMap, so changes to those re-queue it, as
-// do changes to what it rendered: a Deployment's status decides
+// tree), on its auth ConfigMap and on the ServiceAccount of its name
+// (its own, or one in the way that it refused to take over), so changes
+// to those re-queue it, as do changes to what it rendered: a Deployment's status decides
 // Available, and an edit or delete by hand is put back.
 func (r *MeerkatMobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -283,6 +316,7 @@ func (r *MeerkatMobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.mobsInNamespace),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.mobsUsingAuthConfigMap)).
+		Watches(&corev1.ServiceAccount{}, handler.EnqueueRequestsFromMapFunc(r.mobsNamingServiceAccount)).
 		Named("meerkatmob").
 		Complete(r)
 }
@@ -297,6 +331,14 @@ func (r *MeerkatMobReconciler) mobsInNamespace(ctx context.Context, obj client.O
 func (r *MeerkatMobReconciler) mobsUsingAuthConfigMap(ctx context.Context, obj client.Object) []reconcile.Request {
 	return r.mobsWhere(ctx, obj.GetNamespace(), func(m *v1alpha1.MeerkatMob) bool {
 		return m.Spec.Auth != nil && m.Spec.Auth.ConfigMapRef == obj.GetName()
+	})
+}
+
+// mobsNamingServiceAccount lists the MeerkatMobs whose ServiceAccount
+// would be obj.
+func (r *MeerkatMobReconciler) mobsNamingServiceAccount(ctx context.Context, obj client.Object) []reconcile.Request {
+	return r.mobsWhere(ctx, obj.GetNamespace(), func(m *v1alpha1.MeerkatMob) bool {
+		return serviceAccountName(m) == obj.GetName()
 	})
 }
 
