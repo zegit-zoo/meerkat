@@ -78,6 +78,38 @@ spec:
                 - audience
                 - issuer
                 type: object
+              credentials:
+                description: |-
+                  Credentials are what the instances authenticate to their object
+                  stores with. They are referenced, never written here.
+                properties:
+                  s3SecretRef:
+                    description: |-
+                      S3SecretRef names a Secret, in the mob's namespace, holding
+                      AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (and optionally
+                      AWS_SESSION_TOKEN) for the s3 sources. Only those keys reach the
+                      pods. The operator never reads the Secret; a pod waits until it
+                      exists. Pods read it at start, so a rotation needs a restart.
+                    maxLength: 253
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                    type: string
+                  serviceAccount:
+                    description: |-
+                      ServiceAccount configures the ServiceAccount the operator creates
+                      for the mob's instances.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Annotations bind it to a cloud identity, such as
+                          eks.amazonaws.com/role-arn or iam.gke.io/gcp-service-account.
+                          The cloud side's trust policy names this ServiceAccount, so a mob
+                          can only assume a role that trusts it.
+                        maxProperties: 32
+                        type: object
+                    type: object
+                type: object
               image:
                 description: |-
                   Image overrides the meerkat server image. Empty means the image
@@ -105,6 +137,70 @@ spec:
                 - perKB
                 - single
                 type: string
+              resources:
+                description: |-
+                  Resources are every instance's container resources. Empty means
+                  the operator's defaults (requests 50m CPU and 128Mi memory, a
+                  512Mi memory limit). Each instance's memory request and limit are
+                  then raised by the maxResidentBytes of the KnowledgeBases it
+                  serves.
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims,
+                      that are used by this container.
+
+                      This field depends on the
+                      DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: |-
+                            Name must match the name of one entry in pod.spec.resourceClaims of
+                            the Pod where this field is used. It makes that resource available
+                            inside a container.
+                          type: string
+                        request:
+                          description: |-
+                            Request is the name chosen for a request in the referenced claim.
+                            If empty, everything from the claim is made available, otherwise
+                            only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
               root:
                 description: Root names the tree's root KnowledgeBase, in the same
                   namespace.

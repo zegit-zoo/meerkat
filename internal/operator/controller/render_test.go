@@ -5,8 +5,11 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
+	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/operator/api/v1alpha1"
@@ -227,8 +230,12 @@ func TestRenderAuth(t *testing.T) {
 func TestDeploymentFor(t *testing.T) {
 	mob := testMob(v1alpha1.PlacementSingle)
 	u := planUnits(mob, []v1alpha1.KnowledgeBase{*kb("root", "")})[0]
-	d := deploymentFor(mob, &u, "ghcr.io/zegit-zoo/meerkat:0.21.0", []byte("a"))
-	other := deploymentFor(mob, &u, "ghcr.io/zegit-zoo/meerkat:0.21.0", []byte("b"))
+	res, err := resourcesFor(mob, &u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := deploymentFor(mob, &u, "ghcr.io/zegit-zoo/meerkat:0.21.0", []byte("a"), res)
+	other := deploymentFor(mob, &u, "ghcr.io/zegit-zoo/meerkat:0.21.0", []byte("b"), res)
 	if d.Spec.Template.Annotations[annotationConfig] == other.Spec.Template.Annotations[annotationConfig] {
 		t.Error("a changed content-source.yaml does not roll the pods")
 	}
@@ -238,6 +245,9 @@ func TestDeploymentFor(t *testing.T) {
 	pod := d.Spec.Template.Spec
 	if *pod.AutomountServiceAccountToken {
 		t.Error("the server pod mounts a service account token")
+	}
+	if *pod.ServiceAccountName != "mob-meerkat" {
+		t.Errorf("service account = %s, want the mob's own", *pod.ServiceAccountName)
 	}
 	c := pod.Containers[0]
 	if *c.Image != "ghcr.io/zegit-zoo/meerkat:0.21.0" {
@@ -266,5 +276,161 @@ func TestDeploymentFor(t *testing.T) {
 		if sel[k] != v {
 			t.Errorf("the Service selects %s=%s, the Deployment does not", k, v)
 		}
+	}
+}
+
+// env is c's environment as name=value, a Secret reference written as
+// name=secret/key (optional marked with ?).
+func env(c corev1ac.ContainerApplyConfiguration) map[string]string {
+	out := map[string]string{}
+	for _, e := range c.Env {
+		switch {
+		case e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil:
+			r := e.ValueFrom.SecretKeyRef
+			v := "secret/" + *r.Name + "/" + *r.Key
+			if r.Optional != nil && *r.Optional {
+				v += "?"
+			}
+			out[*e.Name] = v
+		case e.Value != nil:
+			out[*e.Name] = *e.Value
+		}
+	}
+	return out
+}
+
+func TestDeploymentCredentials(t *testing.T) {
+	mob := testMob(v1alpha1.PlacementSingle)
+	u := planUnits(mob, []v1alpha1.KnowledgeBase{*kb("root", "")})[0]
+	res, err := resourcesFor(mob, &u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := env(deploymentFor(mob, &u, "img", []byte("a"), res).Spec.Template.Spec.Containers[0])
+	if _, ok := e[v1alpha1.S3AccessKeyIDKey]; ok {
+		t.Errorf("S3 credentials without spec.credentials: %v", e)
+	}
+
+	mob.Spec.Credentials = &v1alpha1.Credentials{S3SecretRef: "garage-kb"}
+	e = env(deploymentFor(mob, &u, "img", []byte("a"), res).Spec.Template.Spec.Containers[0])
+	for k, want := range map[string]string{
+		v1alpha1.S3AccessKeyIDKey:     "secret/garage-kb/AWS_ACCESS_KEY_ID",
+		v1alpha1.S3SecretAccessKeyKey: "secret/garage-kb/AWS_SECRET_ACCESS_KEY",
+		v1alpha1.S3SessionTokenKey:    "secret/garage-kb/AWS_SESSION_TOKEN?",
+		"MEERKAT_CONTENT_SOURCE":      contentSourcePath,
+	} {
+		if e[k] != want {
+			t.Errorf("%s = %q, want %q", k, e[k], want)
+		}
+	}
+	// Only the named keys: envFrom would let the Secret set
+	// MEERKAT_CONTENT_SOURCE or any other variable.
+	if c := deploymentFor(mob, &u, "img", []byte("a"), res).Spec.Template.Spec.Containers[0]; len(c.EnvFrom) != 0 {
+		t.Errorf("envFrom = %+v", c.EnvFrom)
+	}
+}
+
+func TestServiceAccountFor(t *testing.T) {
+	mob := testMob(v1alpha1.PlacementSingle)
+	sa := serviceAccountFor(mob)
+	if *sa.Name != "mob-meerkat" || *sa.AutomountServiceAccountToken || len(sa.Annotations) != 0 {
+		t.Errorf("service account = %+v", sa)
+	}
+	if len(sa.OwnerReferences) != 1 || !*sa.OwnerReferences[0].Controller {
+		t.Errorf("owner references = %+v", sa.OwnerReferences)
+	}
+	mob.Spec.Credentials = &v1alpha1.Credentials{ServiceAccount: &v1alpha1.ServiceAccount{
+		Annotations: map[string]string{"eks.amazonaws.com/role-arn": "arn:aws:iam::123456789012:role/kb-read"},
+	}}
+	if err := checkServiceAccount(mob.Spec.Credentials); err != nil {
+		t.Fatal(err)
+	}
+	if sa := serviceAccountFor(mob); sa.Annotations["eks.amazonaws.com/role-arn"] != "arn:aws:iam::123456789012:role/kb-read" {
+		t.Errorf("annotations = %v", sa.Annotations)
+	}
+	mob.Spec.Credentials.ServiceAccount.Annotations = map[string]string{"not a key!": "x"}
+	if err := checkServiceAccount(mob.Spec.Credentials); err == nil || !strings.Contains(err.Error(), "spec.credentials.serviceAccount.annotations") {
+		t.Errorf("a bad annotation key: err = %v", err)
+	}
+	// A long mob name still gives a valid name.
+	mob.Name = strings.Repeat("m", 63)
+	if errs := validation.IsDNS1035Label(serviceAccountName(mob)); len(errs) > 0 {
+		t.Errorf("service account name %q: %v", serviceAccountName(mob), errs)
+	}
+}
+
+func TestResourcesFor(t *testing.T) {
+	q := func(s string) *resource.Quantity { v := resource.MustParse(s); return &v }
+	sized := func(name, max string) v1alpha1.KnowledgeBase {
+		k := *kb(name, "")
+		if max != "" {
+			k.Spec.Resources = &v1alpha1.KnowledgeBaseResources{MaxResidentBytes: q(max)}
+		}
+		return k
+	}
+	mem := func(l corev1.ResourceList) string {
+		m, ok := l[corev1.ResourceMemory]
+		if !ok {
+			return "-"
+		}
+		return m.String()
+	}
+	for _, tc := range []struct {
+		name     string
+		spec     *corev1.ResourceRequirements
+		kbs      []v1alpha1.KnowledgeBase
+		req, lim string
+		gomem    string
+	}{
+		{"defaults", nil, []v1alpha1.KnowledgeBase{sized("a", "")}, "128Mi", "512Mi", "483183819"},
+		{"defaults plus resident", nil, []v1alpha1.KnowledgeBase{sized("a", "64Mi"), sized("b", ""), sized("c", "192Mi")}, "384Mi", "768Mi", "724775724"},
+		{"spec replaces the defaults", &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: *q("1Gi")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: *q("2Gi")},
+		}, []v1alpha1.KnowledgeBase{sized("a", "1Gi")}, "2Gi", "3Gi", "2899102923"},
+		{"limit only", &corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{corev1.ResourceMemory: *q("1Gi")},
+		}, []v1alpha1.KnowledgeBase{sized("a", "1Gi")}, "-", "2Gi", "1932735276"},
+		{"no memory at all", &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: *q("1")},
+		}, []v1alpha1.KnowledgeBase{sized("a", "100Mi")}, "100Mi", "-", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mob := testMob(v1alpha1.PlacementSingle)
+			mob.Spec.Resources = tc.spec
+			u := unit{Name: "mob-all", KBs: tc.kbs}
+			res, err := resourcesFor(mob, &u)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mem(res.Requests) != tc.req || mem(res.Limits) != tc.lim {
+				t.Errorf("memory request %s, limit %s; want %s, %s", mem(res.Requests), mem(res.Limits), tc.req, tc.lim)
+			}
+			if got := goMemLimit(res); got != tc.gomem {
+				t.Errorf("GOMEMLIMIT = %q, want %q", got, tc.gomem)
+			}
+			e := env(deploymentFor(mob, &u, "img", []byte("a"), res).Spec.Template.Spec.Containers[0])
+			if e["GOMEMLIMIT"] != tc.gomem {
+				t.Errorf("rendered GOMEMLIMIT = %q, want %q", e["GOMEMLIMIT"], tc.gomem)
+			}
+		})
+	}
+	// The mob's spec is not changed by raising a unit's memory.
+	mob := testMob(v1alpha1.PlacementSingle)
+	mob.Spec.Resources = &corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: *q("1Gi")}}
+	if _, err := resourcesFor(mob, &unit{KBs: []v1alpha1.KnowledgeBase{sized("a", "1Gi")}}); err != nil {
+		t.Fatal(err)
+	}
+	if m := mob.Spec.Resources.Limits[corev1.ResourceMemory]; m.String() != "1Gi" {
+		t.Errorf("spec.resources was changed to %s", m.String())
+	}
+
+	mob.Spec.Resources = nil
+	if _, err := resourcesFor(mob, &unit{KBs: []v1alpha1.KnowledgeBase{sized("a", "-1Mi")}}); err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Errorf("a negative maxResidentBytes: err = %v", err)
+	}
+	mob.Spec.Resources = &corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}}
+	if _, err := resourcesFor(mob, &unit{}); err == nil || !strings.Contains(err.Error(), "claims") {
+		t.Errorf("resource claims: err = %v", err)
 	}
 }

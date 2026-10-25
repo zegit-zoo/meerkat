@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -291,4 +292,123 @@ func (h *mobHarness) imageReconciler(t *testing.T) {
 	if deps, _, _ := h.rendered(t, got); len(deps) != 0 {
 		t.Errorf("a refused image rendered %v", deps)
 	}
+}
+
+func (h *mobHarness) credentialsAndSizing(t *testing.T) {
+	maxResident := resource.MustParse("64Mi")
+	kb := &v1alpha1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: mobNS},
+		Spec: v1alpha1.KnowledgeBaseSpec{
+			Source:    v1alpha1.KnowledgeBaseSource{S3: &v1alpha1.S3Source{Bucket: "kb", Prefix: "solo/", Endpoint: "https://s3.example.net"}},
+			Resources: &v1alpha1.KnowledgeBaseResources{MaxResidentBytes: &maxResident},
+		},
+	}
+	if err := h.c.Create(h.ctx, kb); err != nil {
+		t.Fatal(err)
+	}
+	mob := h.newMob("sized", v1alpha1.PlacementSingle)
+	mob.Spec.Root = "solo"
+	mob.Spec.Credentials = &v1alpha1.Credentials{
+		S3SecretRef: "garage-kb",
+		ServiceAccount: &v1alpha1.ServiceAccount{Annotations: map[string]string{
+			"eks.amazonaws.com/role-arn": "arn:aws:iam::123456789012:role/kb-read",
+		}},
+	}
+	mob.Spec.Resources = &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("256Mi")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+	}
+	if err := h.c.Create(h.ctx, mob); err != nil {
+		t.Fatal(err)
+	}
+	got := h.waitMob(t, "sized", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered)
+	h.waitRendered(t, got, "sized-all")
+
+	var sa corev1.ServiceAccount
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "sized-meerkat"}, &sa); err != nil {
+		t.Fatal(err)
+	}
+	if !metav1.IsControlledBy(&sa, got) || sa.Annotations["eks.amazonaws.com/role-arn"] != "arn:aws:iam::123456789012:role/kb-read" ||
+		sa.AutomountServiceAccountToken == nil || *sa.AutomountServiceAccountToken {
+		t.Errorf("service account = %+v", sa)
+	}
+
+	var d appsv1.Deployment
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "sized-all"}, &d); err != nil {
+		t.Fatal(err)
+	}
+	pod := d.Spec.Template.Spec
+	if pod.ServiceAccountName != "sized-meerkat" {
+		t.Errorf("service account name = %q", pod.ServiceAccountName)
+	}
+	c := pod.Containers[0]
+	req, lim := c.Resources.Requests[corev1.ResourceMemory], c.Resources.Limits[corev1.ResourceMemory]
+	if req.String() != "320Mi" || lim.String() != "1088Mi" {
+		t.Errorf("memory request %s, limit %s; want spec.resources plus 64Mi resident", req.String(), lim.String())
+	}
+	if cpu := c.Resources.Requests[corev1.ResourceCPU]; cpu.String() != "100m" {
+		t.Errorf("cpu request %s", cpu.String())
+	}
+	refs := map[string]string{}
+	for _, e := range c.Env {
+		if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+			refs[e.Name] = e.ValueFrom.SecretKeyRef.Name + "/" + e.ValueFrom.SecretKeyRef.Key
+		}
+		if e.Name == "GOMEMLIMIT" && e.Value != "1026765612" {
+			t.Errorf("GOMEMLIMIT = %s", e.Value)
+		}
+	}
+	if refs[v1alpha1.S3AccessKeyIDKey] != "garage-kb/AWS_ACCESS_KEY_ID" || refs[v1alpha1.S3SecretAccessKeyKey] != "garage-kb/AWS_SECRET_ACCESS_KEY" || len(c.EnvFrom) != 0 {
+		t.Errorf("credential env = %v, envFrom = %v", refs, c.EnvFrom)
+	}
+
+	// Raising maxResidentBytes resizes the instance.
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "solo"}, kb); err != nil {
+		t.Fatal(err)
+	}
+	more := resource.MustParse("128Mi")
+	kb.Spec.Resources.MaxResidentBytes = &more
+	if err := h.c.Update(h.ctx, kb); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "a larger maxResidentBytes raises the limit", func() (bool, string) {
+		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "sized-all"}, &d); err != nil {
+			return false, err.Error()
+		}
+		l := d.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+		return l.String() == "1152Mi", l.String()
+	})
+}
+
+func (h *mobHarness) serviceAccountInTheWay(t *testing.T) {
+	// A ServiceAccount of the mob's name that something else made.
+	foreign := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "taken-meerkat", Namespace: mobNS}}
+	if err := h.c.Create(h.ctx, foreign); err != nil {
+		t.Fatal(err)
+	}
+	mob := h.newMob("taken", v1alpha1.PlacementSingle)
+	mob.Spec.Credentials = &v1alpha1.Credentials{ServiceAccount: &v1alpha1.ServiceAccount{Annotations: map[string]string{
+		"iam.gke.io/gcp-service-account": "kb@project.iam.gserviceaccount.com",
+	}}}
+	if err := h.c.Create(h.ctx, mob); err != nil {
+		t.Fatal(err)
+	}
+	got := h.waitMob(t, "taken", v1alpha1.ConditionRendered, metav1.ConditionFalse, v1alpha1.ReasonConfigRefused)
+	if c := meta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionRendered); !strings.Contains(c.Message, `"taken-meerkat" exists`) {
+		t.Errorf("message = %s", c.Message)
+	}
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "taken-meerkat"}, foreign); err != nil {
+		t.Fatal(err)
+	}
+	if len(foreign.Annotations) != 0 || len(foreign.OwnerReferences) != 0 {
+		t.Errorf("the foreign ServiceAccount was taken over: %+v", foreign.ObjectMeta)
+	}
+	if deps, _, _ := h.rendered(t, got); len(deps) != 0 {
+		t.Errorf("a refused mob rendered %v", deps)
+	}
+	// Deleting it re-queues the mob, which then renders.
+	if err := h.c.Delete(h.ctx, foreign); err != nil {
+		t.Fatal(err)
+	}
+	h.waitRendered(t, h.waitMob(t, "taken", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered), "taken-all")
 }
