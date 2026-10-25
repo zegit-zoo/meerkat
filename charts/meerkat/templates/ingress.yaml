@@ -1,4 +1,4 @@
-{{- if .Values.ingress.enabled }}
+{{- if and .Values.server.enabled .Values.ingress.enabled }}
 {{- $svc := include "meerkat.fullname" . }}
 {{- $port := include "meerkat.servicePort" . | int }}
 apiVersion: networking.k8s.io/v1

@@ -1,0 +1,15 @@
+# The operator alone, without its webhook and with its NetworkPolicy on:
+# the policy admits no ingress at all, and egress reaches the API server
+# CIDR on every port (meerkat-mob#10).
+server:
+  enabled: false
+operator:
+  enabled: true
+  webhook:
+    enabled: false
+  networkPolicy:
+    enabled: true
+    apiServer:
+      cidrs:
+        - 172.18.0.0/16
+      ports: []

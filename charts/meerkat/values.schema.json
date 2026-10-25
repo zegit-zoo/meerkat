@@ -101,6 +101,9 @@
         "mode"
       ],
       "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
         "mode": {
           "enum": [
             "mcp",
@@ -707,6 +710,45 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "apiServer": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cidrs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F.:]+/[0-9]{1,3}$"
+                  }
+                },
+                "peers": {
+                  "$ref": "#/definitions/objectList"
+                },
+                "ports": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  }
+                }
+              }
+            },
+            "extraIngress": {
+              "$ref": "#/definitions/objectList"
+            },
+            "extraEgress": {
+              "$ref": "#/definitions/objectList"
+            }
           }
         },
         "podAnnotations": {

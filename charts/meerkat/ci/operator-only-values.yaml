@@ -1,0 +1,31 @@
+# The operator without a meerkat server (server.enabled=false), with its
+# NetworkPolicy on, the API server named both by CIDR and by a peer, and a
+# metrics port opened through extraIngress (meerkat-mob#10). make
+# chart-check renders it with kubeconform.
+server:
+  enabled: false
+operator:
+  enabled: true
+  extraArgs:
+    - --metrics-bind-address=:8080
+  networkPolicy:
+    enabled: true
+    apiServer:
+      cidrs:
+        - 10.0.0.10/32
+        - 10.0.0.11/32
+      peers:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              component: kube-apiserver
+    extraIngress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: monitoring
+        ports:
+          - port: 8080
+            protocol: TCP

@@ -1,4 +1,4 @@
-{{- if and (or .Values.contentSource.config .Values.contentSource.raw) (not .Values.contentSource.existingConfigMap) }}
+{{- if and .Values.server.enabled (or .Values.contentSource.config .Values.contentSource.raw) (not .Values.contentSource.existingConfigMap) }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

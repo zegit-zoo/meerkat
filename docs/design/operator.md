@@ -290,6 +290,14 @@ with the CA injected through `cert-manager.io/inject-ca-from`), or,
 without cert-manager, from a CA and certificate Helm generates once and
 reuses on upgrade. The chart README has the rotation steps.
 
+`server.enabled=false` installs the operator without the chart's own
+meerkat server, so the servers come only from `MeerkatMob` objects; the
+chart's `image.*` stays the default server image. An optional
+NetworkPolicy (`operator.networkPolicy`) limits the operator pod to the
+webhook port in, and DNS and the API server out. The API server's
+address is configured, not discovered, because NetworkPolicy has no
+portable way to name it; the chart README lists the limits.
+
 ## Not built yet
 
 meerkat-mob#10 tracks these:
@@ -309,6 +317,5 @@ meerkat-mob#10 tracks these:
   `maxResidentBytes` itself.
 - **KnowledgeBase status from instances.** `mounted`, `pages`,
   `contentGeneration` and `lastTraversal` are not filled in.
-- Scale-to-zero, the librarian CronJob, a chart switch to install the
-  operator without the meerkat server, a NetworkPolicy for the operator
-  pod, and acceptance on a real k3s cluster.
+- Scale-to-zero, the librarian CronJob, and acceptance on a real k3s
+  cluster.

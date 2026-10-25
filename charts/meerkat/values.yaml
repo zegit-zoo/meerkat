@@ -24,6 +24,12 @@ image:
 imagePullSecrets: []
 
 server:
+  # false: no meerkat server from this release, only the operator
+  # (operator.enabled must be true). Every server-only object is skipped:
+  # the Deployment, Service, ServiceAccount, ConfigMap and the optional
+  # Ingress, HTTPRoute, ServiceMonitor, PodDisruptionBudget, HPA and
+  # NetworkPolicy. image.* still sets the operator's default server image.
+  enabled: true
   # mcp  -> `mcp serve-http`: hosted MCP (Streamable HTTP) with OIDC auth,
   #         /livez, /readyz and /metrics. Port 4005 unless server.port.
   # http -> `http serve`: HTTP/OpenAPI server with a static bearer key
@@ -299,6 +305,30 @@ operator:
       memory: 256Mi
   # Appended after the generated arguments.
   extraArgs: []
+  # A NetworkPolicy for the operator pod. Off by default. Ingress: the
+  # webhook port from any source (the API server's source address differs
+  # per cluster). Egress: DNS and the API server only. README.md,
+  # "Operator NetworkPolicy", has the limits.
+  networkPolicy:
+    enabled: false
+    # Where the operator reaches the API server. Required when enabled:
+    # set cidrs, peers, or both. Most network plugins apply the policy
+    # after the kubernetes Service's DNAT, so list the API server's
+    # endpoint addresses (kubectl get endpointslices -n default -l
+    # kubernetes.io/service-name=kubernetes), not only the Service IP.
+    apiServer:
+      # CIDRs, e.g. ["10.0.0.10/32", "10.0.0.11/32"].
+      cidrs: []
+      # NetworkPolicyPeer objects, for an API server that runs as pods
+      # selected by labels.
+      peers: []
+      # TCP ports on those destinations. Empty: every port.
+      ports: [443, 6443]
+    # More NetworkPolicyIngressRule objects, e.g. a metrics port opened
+    # with extraArgs --metrics-bind-address.
+    extraIngress: []
+    # More NetworkPolicyEgressRule objects.
+    extraEgress: []
   podAnnotations: {}
   priorityClassName: ""
   nodeSelector: {}

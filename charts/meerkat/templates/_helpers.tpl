@@ -109,8 +109,19 @@ existing ConfigMap cannot be inspected, so it reports "unknown".
 {{- end }}
 {{- end }}
 
-{{/* Fail early on combinations the server would reject at startup. */}}
+{{/*
+Fail early on combinations that cannot work: a release with nothing in it,
+an operator NetworkPolicy that would cut it off from the API server, and
+server settings the server would reject at startup.
+*/}}
 {{- define "meerkat.validate" -}}
+{{- if not (or .Values.server.enabled .Values.operator.enabled) }}
+{{- fail "server.enabled=false needs operator.enabled=true: with both off the release installs nothing" }}
+{{- end }}
+{{- if and .Values.operator.enabled .Values.operator.networkPolicy.enabled (not (or .Values.operator.networkPolicy.apiServer.cidrs .Values.operator.networkPolicy.apiServer.peers)) }}
+{{- fail "operator.networkPolicy.enabled needs operator.networkPolicy.apiServer.cidrs or .peers: without a destination for the API server the operator cannot reach it" }}
+{{- end }}
+{{- if .Values.server.enabled }}
 {{- if and (eq .Values.server.mode "http") (not .Values.server.apiKey.existingSecret) }}
 {{- fail "server.mode=http needs server.apiKey.existingSecret: `http serve` refuses to start without an API key" }}
 {{- end }}
@@ -122,6 +133,7 @@ existing ConfigMap cannot be inspected, so it reports "unknown".
 {{- end }}
 {{- if and .Values.contentSource.existingConfigMap (or .Values.contentSource.config .Values.contentSource.raw) }}
 {{- fail "contentSource.existingConfigMap replaces contentSource.config/raw; set one, not both" }}
+{{- end }}
 {{- end }}
 {{- end }}
 
