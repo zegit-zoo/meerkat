@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,13 @@ type notifyCache struct {
 	CheckedAt time.Time `json:"checked_at"`
 	LatestTag string    `json:"latest_tag"`
 }
+
+// notifyRefreshes counts the background refreshes MaybeNotify has
+// started and not yet finished. Production never waits on it — the CLI
+// exits whenever it is done and the refresh is fire-and-forget. Tests
+// wait on it so a refresh can't outlive the test that started it and
+// race the next test's stubs or its t.TempDir cleanup.
+var notifyRefreshes sync.WaitGroup
 
 // MaybeNotify emits a one-line "newer version available" message
 // to w if the cached check says so. If the cache is stale (>24h),
@@ -64,14 +72,17 @@ func MaybeNotify(ctx context.Context, currentVersion string, w io.Writer) {
 		// Cache missing / stale — fire a refresh in the background
 		// so the *next* command run gets a current answer. Don't
 		// block this run.
-		//
+		notifyRefreshes.Add(1)
 		// #nosec G118 -- context.Background is intentional: this
 		// goroutine MUST outlive the parent CLI command. Binding to
 		// the request-scoped ctx would cancel the refresh the
 		// moment the user's command exits, which is precisely when
 		// the refresh becomes useful (it populates the cache for
 		// the *next* invocation).
-		go refreshNotifyCache(context.Background())
+		go func() {
+			defer notifyRefreshes.Done()
+			refreshNotifyCache(context.Background())
+		}()
 		// If we have an old (stale) cache, still emit a stale-data
 		// nag — better to remind the user than to be silent for the
 		// 200ms it takes to refresh.
