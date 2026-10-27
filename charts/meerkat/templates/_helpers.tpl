@@ -101,6 +101,24 @@ existing ConfigMap cannot be inspected, so it reports "unknown".
 {{- end }}
 {{- end }}
 
+{{/*
+server.enabled, defaulting to true when the key is missing.
+`helm upgrade --reuse-values` keeps the values stored with a release made
+before the key existed, so server.enabled is nil there; plain truthiness
+would drop that release's server. Only an explicit false turns it off.
+*/}}
+{{- define "meerkat.serverEnabled" -}}
+{{- ne (toString .Values.server.enabled) "false" -}}
+{{- end }}
+
+{{/*
+operator.networkPolicy.enabled, false when operator.networkPolicy is
+missing (a --reuse-values upgrade from a release made before it existed).
+*/}}
+{{- define "meerkat.operator.networkPolicyEnabled" -}}
+{{- dig "networkPolicy" "enabled" false (.Values.operator | default dict) | toString -}}
+{{- end }}
+
 {{- define "meerkat.pdbEnabled" -}}
 {{- if kindIs "bool" .Values.podDisruptionBudget.enabled }}
 {{- .Values.podDisruptionBudget.enabled }}
@@ -115,13 +133,14 @@ an operator NetworkPolicy that would cut it off from the API server, and
 server settings the server would reject at startup.
 */}}
 {{- define "meerkat.validate" -}}
-{{- if not (or .Values.server.enabled .Values.operator.enabled) }}
+{{- $server := eq (include "meerkat.serverEnabled" .) "true" }}
+{{- if not (or $server .Values.operator.enabled) }}
 {{- fail "server.enabled=false needs operator.enabled=true: with both off the release installs nothing" }}
 {{- end }}
-{{- if and .Values.operator.enabled .Values.operator.networkPolicy.enabled (not (or .Values.operator.networkPolicy.apiServer.cidrs .Values.operator.networkPolicy.apiServer.peers)) }}
+{{- if and .Values.operator.enabled (eq (include "meerkat.operator.networkPolicyEnabled" .) "true") (not (or (dig "apiServer" "cidrs" nil .Values.operator.networkPolicy) (dig "apiServer" "peers" nil .Values.operator.networkPolicy))) }}
 {{- fail "operator.networkPolicy.enabled needs operator.networkPolicy.apiServer.cidrs or .peers: without a destination for the API server the operator cannot reach it" }}
 {{- end }}
-{{- if .Values.server.enabled }}
+{{- if $server }}
 {{- if and (eq .Values.server.mode "http") (not .Values.server.apiKey.existingSecret) }}
 {{- fail "server.mode=http needs server.apiKey.existingSecret: `http serve` refuses to start without an API key" }}
 {{- end }}

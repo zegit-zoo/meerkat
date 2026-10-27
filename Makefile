@@ -230,14 +230,28 @@ chart-check: ## helm lint + template | kubeconform over charts/meerkat and its c
 		echo "FAIL: values.schema.json accepted server.mode=grpc"; exit 1; \
 	fi; \
 	echo "OK: schema rejects server.mode=grpc"; \
-	if $(HELM) template chart-check $(CHART) --set server.enabled=false >/dev/null 2>&1; then \
+	if $(HELM) template chart-check $(CHART) --set server.enabled=false >/dev/null 2>"$$out"; then \
 		echo "FAIL: rendered a release with server.enabled=false and no operator"; exit 1; \
 	fi; \
+	grep -q 'server.enabled=false needs operator.enabled' "$$out" || { echo "FAIL: server.enabled=false refused for another reason:"; cat "$$out"; exit 1; }; \
 	echo "OK: refuses server.enabled=false without operator.enabled"; \
-	if $(HELM) template chart-check $(CHART) --set operator.enabled=true --set operator.networkPolicy.enabled=true >/dev/null 2>&1; then \
+	if $(HELM) template chart-check $(CHART) --set operator.enabled=true --set operator.networkPolicy.enabled=true >/dev/null 2>"$$out"; then \
 		echo "FAIL: rendered an operator NetworkPolicy with no API server destination"; exit 1; \
 	fi; \
-	echo "OK: refuses operator.networkPolicy without an API server destination"
+	grep -q 'operator.networkPolicy.enabled needs' "$$out" || { echo "FAIL: operator NetworkPolicy refused for another reason:"; cat "$$out"; exit 1; }; \
+	echo "OK: refuses operator.networkPolicy without an API server destination"; \
+	if $(HELM) template chart-check $(CHART) --set operator.enabled=true --set operator.networkPolicy.enabled=true \
+		--set 'operator.networkPolicy.apiServer.cidrs={10.0.0.1/99}' >/dev/null 2>"$$out"; then \
+		echo "FAIL: values.schema.json accepted the CIDR 10.0.0.1/99"; exit 1; \
+	fi; \
+	grep -q "cidrs/0': '10.0.0.1/99' does not match pattern" "$$out" || { echo "FAIL: bad CIDR refused for another reason:"; cat "$$out"; exit 1; }; \
+	echo "OK: schema rejects the CIDR 10.0.0.1/99"; \
+	for t in deployment service; do \
+		$(HELM) template chart-check $(CHART) --set server.enabled=null --set operator.enabled=true --set operator.networkPolicy=null \
+			--show-only templates/$$t.yaml > "$$out" 2>&1 && grep -q '^  name: chart-check-meerkat$$' "$$out" \
+			|| { echo "FAIL: no server $$t with server.enabled missing (a --reuse-values upgrade from a release without it):"; cat "$$out"; exit 1; }; \
+	done; \
+	echo "OK: server.enabled missing still renders the server"
 
 .PHONY: pre-push
 pre-push: lint test docs-check ## CI parity (lint + test + docs-check) — fast gate before git push

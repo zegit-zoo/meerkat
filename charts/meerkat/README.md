@@ -278,6 +278,11 @@ key renders). Some values are still used by the operator:
 Rendering fails when both `server.enabled` and `operator.enabled` are
 false, because the release would install nothing.
 
+Only an explicit `false` turns the server off. `helm upgrade
+--reuse-values` from a release made before `server.enabled` existed
+keeps that release's stored values, which have no `server.enabled`; the
+chart treats the missing key as `true`, so the server stays.
+
 ```bash
 helm install meerkat-operator oci://ghcr.io/zegit-zoo/charts/meerkat --version 0.20.0 \
   -n meerkat-system --create-namespace \
@@ -297,14 +302,22 @@ operator pod that isolates it for ingress and egress:
   so any pod that can reach the port can send it an AdmissionReview; it
   answers allowed or refused and changes nothing. Without the webhook
   the policy admits no ingress at all. The kubelet's probes on the health
-  port need no rule, because traffic from the pod's own node is always
-  allowed. A metrics port opened with
+  port need no rule, because the NetworkPolicy spec allows traffic from
+  the pod's own node. Like the rest of the policy, that is enforced by
+  the network plugin, so check that yours does before relying on it. A metrics port opened with
   `--metrics-bind-address` needs an `extraIngress` rule.
 - **Egress:** DNS (port 53, UDP and TCP, to any destination), and the
   API server at `operator.networkPolicy.apiServer`, on
   `apiServer.ports`. Rendering fails when neither `apiServer.cidrs` nor
   `apiServer.peers` is set, because the operator would lose the API
   server and stop reconciling. `extraEgress` adds more rules.
+
+The chart checks `apiServer.cidrs` only for shape: an IPv4 address with
+a prefix up to `/32`, or an address containing `:` with a prefix up to
+`/128`. It does not check that the address itself is valid. `peers`,
+`extraIngress` and `extraEgress` are passed through as given; the API
+server validates them when the release is applied, so a malformed entry
+fails `helm install` rather than `helm template`.
 
 Limits, which come from the NetworkPolicy API rather than this chart:
 
@@ -335,8 +348,9 @@ Limits, which come from the NetworkPolicy API rather than this chart:
   while it cannot reach the API server, because its readiness probe does
   not check that connection.
 - A pod on the same node as the API server reaches it regardless of the
-  egress rules, because node traffic is always allowed; a single-node
-  cluster therefore cannot show that the egress rule is right.
+  egress rules where the plugin allows node traffic as the spec says; a
+  single-node cluster therefore cannot show that the egress rule is
+  right.
 
 ### Webhook certificate
 

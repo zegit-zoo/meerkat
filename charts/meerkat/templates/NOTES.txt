@@ -1,10 +1,10 @@
-{{- if not .Values.server.enabled -}}
+{{- if eq (include "meerkat.serverEnabled" .) "false" -}}
 meerkat-operator {{ include "meerkat.operator.imageTag" . }} is deployed as {{ include "meerkat.operator.fullname" . }} in {{ .Release.Namespace }},
 without a meerkat server of its own (server.enabled=false).
 
 A MeerkatMob runs {{ .Values.operator.serverImage | default (include "meerkat.image" .) }}
 unless its spec.image names a repository in operator.allowedImages.
-{{- if .Values.operator.networkPolicy.enabled }}
+{{- if eq (include "meerkat.operator.networkPolicyEnabled" .) "true" }}
 
 operator.networkPolicy is on: the operator pod may reach only DNS and the API
 server destinations in operator.networkPolicy.apiServer. If it logs timeouts

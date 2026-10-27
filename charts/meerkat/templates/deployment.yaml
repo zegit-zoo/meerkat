@@ -1,5 +1,5 @@
 {{- include "meerkat.validate" . }}
-{{- if .Values.server.enabled }}
+{{- if eq (include "meerkat.serverEnabled" .) "true" }}
 {{- $port := include "meerkat.port" . | int }}
 {{- $cm := include "meerkat.contentSourceConfigMap" . }}
 {{- $mcp := eq .Values.server.mode "mcp" }}
