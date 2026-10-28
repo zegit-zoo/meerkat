@@ -1,13 +1,16 @@
 package controller
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 
@@ -434,3 +437,102 @@ func TestResourcesFor(t *testing.T) {
 		t.Errorf("resource claims: err = %v", err)
 	}
 }
+
+func TestUnitDedicated(t *testing.T) {
+	kbs, _ := subtree("root", tree())
+	kbs[1].Spec.Placement = v1alpha1.PlacementDedicated // platform
+	got := map[string]bool{}
+	for _, u := range planUnits(testMob(v1alpha1.PlacementPerKB), kbs) {
+		got[u.Name] = u.dedicated()
+	}
+	// Under perKB every unit is a kb-<name>; only platform's is dedicated.
+	want := map[string]bool{"mob-kb-root": false, "mob-kb-platform": true, "mob-kb-flux": false, "mob-kb-vendors": false}
+	for name, d := range want {
+		if got[name] != d {
+			t.Errorf("%s dedicated = %v, want %v", name, got[name], d)
+		}
+	}
+}
+
+func TestNetworkPolicyFor(t *testing.T) {
+	mob := testMob(v1alpha1.PlacementSingle)
+	dedicated := *kb("root", "")
+	dedicated.Spec.Placement = v1alpha1.PlacementDedicated
+	u := planUnits(mob, []v1alpha1.KnowledgeBase{dedicated})[0]
+
+	np, err := networkPolicyFor(mob, &u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *np.Name != u.Name || *np.Namespace != ns || len(np.OwnerReferences) != 1 || !*np.OwnerReferences[0].Controller {
+		t.Errorf("metadata = %+v", np.ObjectMetaApplyConfiguration)
+	}
+	sel := unitSelector(mob, &u)
+	if len(np.Spec.PodSelector.MatchLabels) != len(sel) {
+		t.Errorf("pod selector = %v, want the unit's %v", np.Spec.PodSelector.MatchLabels, sel)
+	}
+	for k, v := range sel {
+		if np.Spec.PodSelector.MatchLabels[k] != v {
+			t.Errorf("pod selector = %v, want the unit's %v", np.Spec.PodSelector.MatchLabels, sel)
+		}
+	}
+	if len(np.Spec.PolicyTypes) != 1 || np.Spec.PolicyTypes[0] != networkingv1.PolicyTypeIngress || len(np.Spec.Egress) != 0 {
+		t.Errorf("without spec.networkPolicy.egress: policy types %v, egress %d rules; want Ingress only", np.Spec.PolicyTypes, len(np.Spec.Egress))
+	}
+	if len(np.Spec.Ingress) != 1 {
+		t.Fatalf("ingress = %d rules, want 1", len(np.Spec.Ingress))
+	}
+	in := np.Spec.Ingress[0]
+	if len(in.Ports) != 1 || *in.Ports[0].Protocol != corev1.ProtocolTCP || in.Ports[0].Port.IntValue() != serverPort {
+		t.Errorf("ingress ports = %+v, want TCP %d only", in.Ports, serverPort)
+	}
+	// The default is the mob's own namespace: an empty pod selector
+	// and no namespace selector or ipBlock.
+	if len(in.From) != 1 || in.From[0].PodSelector == nil || len(in.From[0].PodSelector.MatchLabels) != 0 ||
+		in.From[0].NamespaceSelector != nil || in.From[0].IPBlock != nil {
+		t.Errorf("ingress from = %+v, want the mob's namespace only", in.From)
+	}
+
+	mob.Spec.NetworkPolicy = &v1alpha1.NetworkPolicy{
+		IngressFrom: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{"kubernetes.io/metadata.name": "ingress"},
+		}}},
+		Egress: &v1alpha1.NetworkPolicyEgress{Rules: []networkingv1.NetworkPolicyEgressRule{{
+			To:    []networkingv1.NetworkPolicyPeer{{IPBlock: &networkingv1.IPBlock{CIDR: "10.0.0.0/8"}}},
+			Ports: []networkingv1.NetworkPolicyPort{{Port: ptr(intstr.FromInt32(3900))}},
+		}}},
+	}
+	np, err = networkPolicyFor(mob, &u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := np.Spec.Ingress[0].From
+	if len(from) != 2 || from[1].NamespaceSelector == nil || from[1].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "ingress" {
+		t.Errorf("ingress from = %+v, want the namespace plus ingressFrom", from)
+	}
+	if got := fmt.Sprint(np.Spec.PolicyTypes); got != "[Ingress Egress]" {
+		t.Errorf("policy types = %s", got)
+	}
+	eg := np.Spec.Egress
+	if len(eg) != 2 {
+		t.Fatalf("egress = %d rules, want DNS plus the one given", len(eg))
+	}
+	if len(eg[0].To) != 0 || len(eg[0].Ports) != 2 || eg[0].Ports[0].Port.IntValue() != 53 || eg[0].Ports[1].Port.IntValue() != 53 {
+		t.Errorf("egress[0] = %+v, want DNS on 53", eg[0])
+	}
+	if len(eg[1].To) != 1 || *eg[1].To[0].IPBlock.CIDR != "10.0.0.0/8" || eg[1].Ports[0].Port.IntValue() != 3900 {
+		t.Errorf("egress[1] = %+v, want the spec's rule", eg[1])
+	}
+
+	// An egress block without rules allows DNS only.
+	mob.Spec.NetworkPolicy.Egress.Rules = nil
+	np, err = networkPolicyFor(mob, &u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(np.Spec.Egress) != 1 {
+		t.Errorf("egress = %d rules, want DNS only", len(np.Spec.Egress))
+	}
+}
+
+func ptr[T any](v T) *T { return &v }

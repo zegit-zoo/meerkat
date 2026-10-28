@@ -226,8 +226,8 @@ release per cluster. The CRDs, the ClusterRole's rules and the webhook
 configuration are rendered from `files/operator/`, copies of what
 `make crds` generates from the code, so they cannot drift from the binary.
 The ClusterRole lets the operator create, change and delete Deployments,
-Services and ConfigMaps in every namespace, because a `MeerkatMob` may
-live in any of them. It grants no access to Secrets.
+Services, ConfigMaps, ServiceAccounts and NetworkPolicies in every
+namespace, because a `MeerkatMob` may live in any of them. It grants no access to Secrets.
 
 | key | default | description |
 | --- | --- | --- |

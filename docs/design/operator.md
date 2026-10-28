@@ -1,10 +1,11 @@
 # The meerkat operator: KnowledgeBase and MeerkatMob
 
-Status: fifth slice (meerkat-mob#10, phase 2). The CRD types, their
+Status: seventh slice (meerkat-mob#10, phase 2). The CRD types, their
 manifests, the validating webhook, `cmd/meerkat-operator`, a
 KnowledgeBase reconciler that reports each tree in status, and a
 MeerkatMob reconciler that serves a tree as meerkat Deployments, with
-their credentials and sizing, exist,
+their credentials and sizing and a NetworkPolicy for each dedicated
+unit, exist,
 and each release ships the operator as an image that the Helm chart
 installs (`operator.enabled`, below). Cross-process hops, scale-to-zero
 and the librarian CronJob do not exist yet (see the end of this page).
@@ -49,7 +50,8 @@ server's `observability.otlp`; a gRPC endpoint may be a bare
 issuer and audience, with the authz policy in a referenced ConfigMap)
 `librarian.schedule` (a five-field cron expression), `credentials` (an
 S3 Secret by name and the annotations of the mob's ServiceAccount) and
-`resources` (every instance's container resources). No resource carries
+`resources` (every instance's container resources) and `networkPolicy`
+(more ingress peers and an egress allow-list for dedicated units). No resource carries
 a credential: the pods read the referenced Secret, or a cloud workload
 identity, as the server reads its environment.
 
@@ -159,7 +161,8 @@ unit of its own under every placement. A name that is not a DNS-1035
 label (a Service name) is shortened and given a hash suffix.
 
 Each unit is a ConfigMap holding a `content-source.yaml`, a Deployment
-of one replica and a ClusterIP Service on port 4005, all named after
+of one replica and a ClusterIP Service on port 4005 (and, for a
+dedicated unit, a NetworkPolicy, [below](#dedicated-units-and-their-networkpolicy)), all named after
 the unit, labelled `meerkat-mob.dev/mob` and `meerkat-mob.dev/unit`, and
 controlled by the mob through an owner reference, so deleting the mob
 deletes them. They are written with server-side apply (field manager
@@ -250,6 +253,45 @@ or leave its tree), when its auth ConfigMap changes, when a
 ServiceAccount of its ServiceAccount's name changes or goes away, and
 when an object it rendered changes.
 
+### Dedicated units and their NetworkPolicy
+
+A unit that serves a `placement: dedicated` KnowledgeBase also gets a
+NetworkPolicy, named, labelled and owned like the unit's other objects
+and applied before them, so a unit that turns dedicated is isolated
+before its pods roll. A unit that stops being dedicated loses its
+policy and keeps the rest; under `perKB` its name does not change, so
+the prune goes by kind as well as by name. Shared units get none, and
+a hand delete or edit of a policy is put back, as for the Deployment.
+
+The policy selects the unit's pods only (the mob and instance labels
+the Deployment selects on), so it isolates nothing else:
+
+- **Ingress:** the serving port, 4005/TCP, which carries the API, the
+  probes and `/metrics`. By default only pods in the mob's own namespace
+  may connect, because nothing on a KnowledgeBase names a network
+  source: `access.paths` and `access.identities` are tree paths and authz
+  subjects, not peers. `spec.networkPolicy.ingressFrom` adds
+  `NetworkPolicyPeer` objects on top of that, for an ingress controller's
+  or Prometheus's namespace. That is narrower than the chart's own
+  `networkPolicy.ingressFrom`, where an empty list means any source.
+- **Egress:** not restricted unless `spec.networkPolicy.egress` is set,
+  and then only to DNS (port 53, UDP and TCP, to any destination) and
+  `egress.rules`. An instance dials its object stores, the OIDC issuers'
+  discovery and JWKS endpoints, the OTLP collector and, with a cloud
+  workload identity, a metadata or token endpoint. NetworkPolicy names
+  addresses, not hosts, and none of those has a portable address, so the
+  operator does not guess: whoever writes the mob lists them, as CIDRs
+  or peers.
+
+Every rule a mob adds applies to its own dedicated pods and nothing
+else, so `networkPolicy` lets a mob's author open their own pods
+further, never reach someone else's. The kubelet's probes need no rule:
+the NetworkPolicy spec allows traffic from the pod's own node. The
+policy is enforced by the network plugin, and a plugin without
+NetworkPolicy support ignores it; the chart README's
+[Operator NetworkPolicy](../../charts/meerkat/README.md#operator-networkpolicy)
+limits apply here too.
+
 ### Which image a mob runs
 
 `spec.image` is a privilege boundary: without a check, whoever can write
@@ -307,9 +349,11 @@ meerkat-mob#10 tracks these:
   another unit is not yet rewritten to the sibling Service, so a hop
   does not cross processes, and `mount: lazy` is not yet rendered
   (`collections:` has no lazy mount).
-- **Access and dedicated isolation.** `access.paths` and
-  `access.identities` are not yet mapped to authz rules, and a dedicated
-  unit has its own Deployment but no NetworkPolicy yet.
+- **Access.** `access.paths` and `access.identities` are not yet mapped
+  to authz rules. Rules only add grants (there is no deny rule), so
+  keeping a KnowledgeBase to its listed identities means narrowing every
+  other rule that names it or `*`, which is a change to the auth block
+  as a whole rather than one more rule.
 - **Contract and per-unit identity.** `contract` is not rendered,
   because the server's `update:` block is structured and the CRD field
   is free text. Credentials and resources are per mob, so a dedicated
