@@ -1,3 +1,17 @@
+{{- if eq (include "meerkat.serverEnabled" .) "false" -}}
+meerkat-operator {{ include "meerkat.operator.imageTag" . }} is deployed as {{ include "meerkat.operator.fullname" . }} in {{ .Release.Namespace }},
+without a meerkat server of its own (server.enabled=false).
+
+A MeerkatMob runs {{ .Values.operator.serverImage | default (include "meerkat.image" .) }}
+unless its spec.image names a repository in operator.allowedImages.
+{{- if eq (include "meerkat.operator.networkPolicyEnabled" .) "true" }}
+
+operator.networkPolicy is on: the operator pod may reach only DNS and the API
+server destinations in operator.networkPolicy.apiServer. If it logs timeouts
+talking to the API server, those destinations do not match what your network
+plugin sees; see the chart README, section "Operator NetworkPolicy".
+{{- end }}
+{{- else -}}
 meerkat {{ include "meerkat.imageTag" . }} ({{ .Values.server.mode }} mode) is deployed as {{ include "meerkat.fullname" . }} in {{ .Release.Namespace }}.
 
 Reach it from inside the cluster:
@@ -42,4 +56,5 @@ routing (session affinity on the MCP session) in front of the pods.
 
 content-source.yaml is read once at startup and comes from an existing
 ConfigMap, so an edit to it needs `kubectl rollout restart`.
+{{- end }}
 {{- end }}

@@ -1,4 +1,4 @@
-{{- if .Values.httpRoute.enabled }}
+{{- if and (eq (include "meerkat.serverEnabled" .) "true") .Values.httpRoute.enabled }}
 {{- $svc := include "meerkat.fullname" . }}
 {{- $port := include "meerkat.servicePort" . | int }}
 apiVersion: gateway.networking.k8s.io/v1

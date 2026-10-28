@@ -1,0 +1,65 @@
+{{- /*
+The operator pod's NetworkPolicy (operator.networkPolicy.enabled, off by
+default). Ingress: the webhook port from any source, since the API server
+calls it from addresses that differ per cluster and per network plugin.
+The kubelet's probes need no rule: the NetworkPolicy spec allows traffic
+from the pod's own node (plugin-enforced, see README.md). Egress: DNS, and the API server at the destinations in
+operator.networkPolicy.apiServer, which meerkat.validate requires. README.md,
+"Operator NetworkPolicy", has the limits.
+*/ -}}
+{{- if and .Values.operator.enabled (eq (include "meerkat.operator.networkPolicyEnabled" .) "true") }}
+{{- $np := .Values.operator.networkPolicy }}
+{{- $webhook := eq (include "meerkat.operator.webhookEnabled" .) "true" }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "meerkat.operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "meerkat.operator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "meerkat.operator.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  {{- if or $webhook $np.extraIngress }}
+  ingress:
+    {{- if $webhook }}
+    - ports:
+        - port: webhook
+          protocol: TCP
+    {{- end }}
+    {{- with $np.extraIngress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- else }}
+  # No webhook and no extraIngress: nothing may connect in.
+  ingress: []
+  {{- end }}
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        {{- range $np.apiServer.cidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+        {{- with $np.apiServer.peers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $np.apiServer.ports }}
+      ports:
+        {{- range . }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+      {{- end }}
+    {{- with $np.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

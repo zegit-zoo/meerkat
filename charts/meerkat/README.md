@@ -155,6 +155,7 @@ public keys. For GCS or IRSA, annotate the ServiceAccount through
 | `image.digest` | `""` | `sha256:…`; renders `repository:tag@digest` |
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | |
+| `server.enabled` | `true` | `false` installs only the operator; see [Operator only](#operator-only) |
 | `server.mode` | `mcp` | `mcp` (`mcp serve-http`) or `http` (`http serve`) |
 | `server.port` | `null` | container and Service port; `null` is 4005 (mcp) or 4004 (http) |
 | `server.path` | `/mcp` | mcp: `--path` |
@@ -247,10 +248,109 @@ live in any of them. It grants no access to Secrets.
 | `operator.webhook.selfSigned.validityDays` | `365` | Helm-generated certificate, when cert-manager is off |
 | `operator.resources` | requests `10m`/`64Mi`, limit `256Mi` memory | |
 | `operator.extraArgs` | `[]` | e.g. `--metrics-bind-address=:8080` |
+| `operator.networkPolicy.enabled` | `false` | see [Operator NetworkPolicy](#operator-networkpolicy) |
+| `operator.networkPolicy.apiServer.cidrs` | `[]` | API server destinations as `ipBlock` CIDRs; this or `.peers` is required when enabled |
+| `operator.networkPolicy.apiServer.peers` | `[]` | API server destinations as `NetworkPolicyPeer` objects |
+| `operator.networkPolicy.apiServer.ports` | `[443, 6443]` | TCP ports on those destinations; empty allows every port |
+| `operator.networkPolicy.extraIngress`, `.extraEgress` | `[]` | more `NetworkPolicyIngressRule` / `NetworkPolicyEgressRule` objects |
 | `operator.podAnnotations`, `.priorityClassName`, `.nodeSelector`, `.tolerations`, `.affinity` | empty | |
 
 The pod uses the chart's `podSecurityContext` and `securityContext`, and
 mounts its ServiceAccount token, because it talks to the API server.
+
+### Operator only
+
+`server.enabled=false` (with `operator.enabled=true`) installs the
+operator without a meerkat server of its own: the CRDs, RBAC, the
+operator Deployment and the webhook, and none of the server's
+Deployment, Service, ServiceAccount, content-source ConfigMap, Ingress,
+HTTPRoute, ServiceMonitor, PodDisruptionBudget, HPA or NetworkPolicy.
+The servers then come only from `MeerkatMob` objects. Every `server.*`,
+`contentSource.*`, `secrets.*` and other server value is ignored, and so
+are the server's render-time checks (`server.mode=http` without an API
+key renders). Some values are still used by the operator:
+
+- `image.*` is the default `operator.serverImage`, the image a
+  `MeerkatMob` runs without `spec.image`;
+- `imagePullSecrets`, `podSecurityContext` and `securityContext` apply
+  to the operator pod.
+
+Rendering fails when both `server.enabled` and `operator.enabled` are
+false, because the release would install nothing.
+
+Only an explicit `false` turns the server off. `helm upgrade
+--reuse-values` from a release made before `server.enabled` existed
+keeps that release's stored values, which have no `server.enabled`; the
+chart treats the missing key as `true`, so the server stays.
+
+```bash
+helm install meerkat-operator oci://ghcr.io/zegit-zoo/charts/meerkat --version 0.20.0 \
+  -n meerkat-system --create-namespace \
+  --set server.enabled=false --set operator.enabled=true
+```
+
+### Operator NetworkPolicy
+
+`operator.networkPolicy.enabled=true` puts a NetworkPolicy on the
+operator pod that isolates it for ingress and egress:
+
+- **Ingress:** the webhook port, from any source. The API server is the
+  only caller, but the address its calls come from differs per cluster
+  and per network plugin (a node IP, a control-plane address outside the
+  pod network, a tunnel address), so the policy does not try to name it.
+  The webhook does not authenticate its caller (no client certificates),
+  so any pod that can reach the port can send it an AdmissionReview; it
+  answers allowed or refused and changes nothing. Without the webhook
+  the policy admits no ingress at all. The kubelet's probes on the health
+  port need no rule, because the NetworkPolicy spec allows traffic from
+  the pod's own node. Like the rest of the policy, that is enforced by
+  the network plugin, so check that yours does before relying on it. A metrics port opened with
+  `--metrics-bind-address` needs an `extraIngress` rule.
+- **Egress:** DNS (port 53, UDP and TCP, to any destination), and the
+  API server at `operator.networkPolicy.apiServer`, on
+  `apiServer.ports`. Rendering fails when neither `apiServer.cidrs` nor
+  `apiServer.peers` is set, because the operator would lose the API
+  server and stop reconciling. `extraEgress` adds more rules.
+
+The chart checks `apiServer.cidrs` only for shape: an IPv4 address with
+a prefix up to `/32`, or an address containing `:` with a prefix up to
+`/128`. It does not check that the address itself is valid. `peers`,
+`extraIngress` and `extraEgress` are passed through as given; the API
+server validates them when the release is applied, so a malformed entry
+fails `helm install` rather than `helm template`.
+
+Limits, which come from the NetworkPolicy API rather than this chart:
+
+- **There is no portable way to name the API server.** Most network
+  plugins apply the policy after the `kubernetes` Service's DNAT, so the
+  Service IP alone (`10.96.0.1`) is not enough: list the endpoint
+  addresses as well
+  (`kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes`),
+  on the endpoint port (often 6443) as well as 443. Whether DNAT comes
+  before or after policy is left to each plugin. When the endpoints
+  change (a control-plane node replaced, a managed cluster's endpoint
+  rotated), update the CIDRs or the operator loses the API server.
+- **Some plugins do not match the API server with `ipBlock`.** Cilium,
+  for one, treats the API server as the `kube-apiserver` entity and may
+  need its own `CiliumNetworkPolicy` (`toEntities: [kube-apiserver]`)
+  next to or instead of this one. Check your plugin's documentation, and
+  watch the operator log for timeouts after you enable the policy.
+- **A plugin without NetworkPolicy support ignores the object.** The
+  policy is then only documentation.
+- **A wrong destination can go unnoticed until the operator
+  reconnects.** Some plugins let a new pod's connections through until
+  they have seen the pod; kind's kindnet does. The operator opens its
+  API server connection within milliseconds of starting and keeps it, so
+  a fresh pod can work with wrong `apiServer` destinations and fail only
+  after a reconnect, hours later. To test the destinations, restart the
+  operator container in its running pod (so the plugin already knows
+  it) and check that it acquires its leader lease. The pod stays Ready
+  while it cannot reach the API server, because its readiness probe does
+  not check that connection.
+- A pod on the same node as the API server reaches it regardless of the
+  egress rules where the plugin allows node traffic as the spec says; a
+  single-node cluster therefore cannot show that the egress rule is
+  right.
 
 ### Webhook certificate
 

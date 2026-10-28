@@ -1,4 +1,4 @@
-{{- if eq (include "meerkat.pdbEnabled" .) "true" }}
+{{- if and (eq (include "meerkat.serverEnabled" .) "true") (eq (include "meerkat.pdbEnabled" .) "true") }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
