@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -19,6 +21,7 @@ import (
 	appsv1ac "k8s.io/client-go/applyconfigurations/apps/v1"
 	corev1ac "k8s.io/client-go/applyconfigurations/core/v1"
 	metav1ac "k8s.io/client-go/applyconfigurations/meta/v1"
+	networkingv1ac "k8s.io/client-go/applyconfigurations/networking/v1"
 
 	"github.com/zegit-zoo/meerkat/internal/authz"
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
@@ -67,6 +70,18 @@ type unit struct {
 	Key string
 	// KBs are the KnowledgeBases it serves, in tree order.
 	KBs []v1alpha1.KnowledgeBase
+}
+
+// dedicated reports whether u serves a dedicated KnowledgeBase, which
+// gets a NetworkPolicy of its own. Under perKB every unit is a
+// kb-<name>, so the name alone does not say.
+func (u *unit) dedicated() bool {
+	for i := range u.KBs {
+		if u.KBs[i].Spec.Placement == v1alpha1.PlacementDedicated {
+			return true
+		}
+	}
+	return false
 }
 
 // subtree is root and every KnowledgeBase below it, depth first with
@@ -330,6 +345,82 @@ func serviceFor(mob *v1alpha1.MeerkatMob, u *unit) *corev1ac.ServiceApplyConfigu
 				WithPort(serverPort).
 				WithTargetPort(intstr.FromString("http")).
 				WithProtocol(corev1.ProtocolTCP)))
+}
+
+// networkPolicyFor is a dedicated unit's NetworkPolicy. It selects the
+// unit's pods only. Ingress is the serving port, from any pod in the
+// mob's namespace and from spec.networkPolicy.ingressFrom. Egress is
+// left open unless spec.networkPolicy.egress is set: the instance dials
+// object stores, OIDC issuers, the OTLP collector and perhaps a cloud
+// metadata endpoint, and NetworkPolicy cannot name a host, so only the
+// mob's author can list their addresses.
+func networkPolicyFor(mob *v1alpha1.MeerkatMob, u *unit) (*networkingv1ac.NetworkPolicyApplyConfiguration, error) {
+	np := mob.Spec.NetworkPolicy
+	if np == nil {
+		np = &v1alpha1.NetworkPolicy{}
+	}
+	tcp, udp := corev1.ProtocolTCP, corev1.ProtocolUDP
+	from := []*networkingv1ac.NetworkPolicyPeerApplyConfiguration{
+		// An empty pod selector without a namespace selector is every
+		// pod in the policy's own namespace.
+		networkingv1ac.NetworkPolicyPeer().WithPodSelector(metav1ac.LabelSelector()),
+	}
+	for i := range np.IngressFrom {
+		p, err := peerApply(&np.IngressFrom[i])
+		if err != nil {
+			return nil, fmt.Errorf("spec.networkPolicy.ingressFrom[%d]: %w", i, err)
+		}
+		from = append(from, p)
+	}
+	spec := networkingv1ac.NetworkPolicySpec().
+		WithPodSelector(metav1ac.LabelSelector().WithMatchLabels(unitSelector(mob, u))).
+		WithPolicyTypes(networkingv1.PolicyTypeIngress).
+		WithIngress(networkingv1ac.NetworkPolicyIngressRule().
+			// The one server port carries the API, the probes and /metrics.
+			WithPorts(networkingv1ac.NetworkPolicyPort().WithProtocol(tcp).WithPort(intstr.FromInt32(serverPort))).
+			WithFrom(from...))
+	if e := np.Egress; e != nil {
+		port := func(p corev1.Protocol) *networkingv1ac.NetworkPolicyPortApplyConfiguration {
+			return networkingv1ac.NetworkPolicyPort().WithProtocol(p).WithPort(intstr.FromInt32(53))
+		}
+		rules := []*networkingv1ac.NetworkPolicyEgressRuleApplyConfiguration{
+			// DNS, so the object stores, issuers and collector resolve.
+			networkingv1ac.NetworkPolicyEgressRule().WithPorts(port(udp), port(tcp)),
+		}
+		for i := range e.Rules {
+			r, err := egressRuleApply(&e.Rules[i])
+			if err != nil {
+				return nil, fmt.Errorf("spec.networkPolicy.egress.rules[%d]: %w", i, err)
+			}
+			rules = append(rules, r)
+		}
+		spec.WithPolicyTypes(networkingv1.PolicyTypeEgress).WithEgress(rules...)
+	}
+	return networkingv1ac.NetworkPolicy(u.Name, mob.Namespace).
+		WithLabels(unitLabels(mob, u)).
+		WithOwnerReferences(ownerRef(mob)).
+		WithSpec(spec), nil
+}
+
+// peerApply and egressRuleApply turn a typed peer or rule from the mob's
+// spec into its apply configuration through JSON, which the two share,
+// so every field the API knows is carried without a hand-written copy.
+func peerApply(p *networkingv1.NetworkPolicyPeer) (*networkingv1ac.NetworkPolicyPeerApplyConfiguration, error) {
+	out := &networkingv1ac.NetworkPolicyPeerApplyConfiguration{}
+	return out, viaJSON(p, out)
+}
+
+func egressRuleApply(r *networkingv1.NetworkPolicyEgressRule) (*networkingv1ac.NetworkPolicyEgressRuleApplyConfiguration, error) {
+	out := &networkingv1ac.NetworkPolicyEgressRuleApplyConfiguration{}
+	return out, viaJSON(r, out)
+}
+
+func viaJSON(in, out any) error {
+	b, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
 }
 
 // serviceAccountName names the ServiceAccount every instance of mob

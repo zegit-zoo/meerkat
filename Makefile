@@ -189,7 +189,7 @@ hygiene: ## Run the commit-stage hygiene hooks over the whole tree (CI backstop)
 # chart-check validates charts/meerkat offline-ish: `helm lint --strict`
 # and `helm template | kubeconform -strict` for the defaults and every
 # values file under charts/meerkat/ci/, then negative cases that must FAIL
-# to render: one for values.schema.json and two for meerkat.validate (no
+# to render: two for values.schema.json and two for meerkat.validate (no
 # server and no operator; an operator NetworkPolicy with no API server
 # destination). kubeconform fetches schemas:
 # core kinds from its default location, ServiceMonitor and HTTPRoute
@@ -246,6 +246,15 @@ chart-check: ## helm lint + template | kubeconform over charts/meerkat and its c
 	fi; \
 	grep -q "cidrs/0': '10.0.0.1/99' does not match pattern" "$$out" || { echo "FAIL: bad CIDR refused for another reason:"; cat "$$out"; exit 1; }; \
 	echo "OK: schema rejects the CIDR 10.0.0.1/99"; \
+	if $(HELM) template chart-check $(CHART) --set operator.enabled=true --set 'operator.watchNamespaces={*,team-a}' >/dev/null 2>&1; then \
+		echo "FAIL: values.schema.json accepted operator.watchNamespaces={*,team-a}"; exit 1; \
+	fi; \
+	echo "OK: schema rejects \"*\" with namespace names"; \
+	$(HELM) template chart-check $(CHART) --set operator.enabled=true --show-only templates/operator-rbac.yaml > "$$out"; \
+	if grep -q '^kind: ClusterRoleBinding$$' "$$out"; then \
+		echo "FAIL: the default operator.watchNamespaces rendered a ClusterRoleBinding"; exit 1; \
+	fi; \
+	echo "OK: the default binds the operator in its release namespace only"; \
 	for t in deployment service; do \
 		$(HELM) template chart-check $(CHART) --set server.enabled=null --set operator.enabled=true --set operator.networkPolicy=null \
 			--show-only templates/$$t.yaml > "$$out" 2>&1 && grep -q '^  name: chart-check-meerkat$$' "$$out" \
