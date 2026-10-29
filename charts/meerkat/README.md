@@ -220,14 +220,25 @@ the servers it renders together. `spec.image` may override it only with
 a repository in `operator.allowedImages`: whoever can write a
 `MeerkatMob` would otherwise pick the image its pods run.
 
-It installs cluster-scoped objects: the two CRDs, a ClusterRole and its
-binding, and a `ValidatingWebhookConfiguration`. Install it from one
-release per cluster. The CRDs, the ClusterRole's rules and the webhook
+It installs cluster-scoped objects: the two CRDs, a ClusterRole and a
+`ValidatingWebhookConfiguration`. Install it from one release per
+cluster. The CRDs, the ClusterRole's rules and the webhook
 configuration are rendered from `files/operator/`, copies of what
 `make crds` generates from the code, so they cannot drift from the binary.
 The ClusterRole lets the operator create, change and delete Deployments,
-Services, ConfigMaps, ServiceAccounts and NetworkPolicies in every
-namespace, because a `MeerkatMob` may live in any of them. It grants no access to Secrets.
+Services, ConfigMaps, ServiceAccounts and NetworkPolicies. It grants no
+access to Secrets.
+
+The operator works only in `operator.watchNamespaces`, the release
+namespace by default. The chart binds the ClusterRole there alone, with
+one RoleBinding per namespace, and the operator's cache and the webhook's
+`namespaceSelector` cover the same namespaces. A `KnowledgeBase` or
+`MeerkatMob` anywhere else is neither admitted by the webhook nor
+reconciled. When the release namespace is not in the list, a Role there
+still covers the operator's leader-election Lease and its Events.
+`watchNamespaces: ["*"]` is every namespace: then the binding is a
+ClusterRoleBinding, so the operator can write those kinds cluster-wide.
+A namespace added to the list later takes a `helm upgrade`.
 
 | key | default | description |
 | --- | --- | --- |
@@ -237,6 +248,7 @@ namespace, because a `MeerkatMob` may live in any of them. It grants no access t
 | `operator.image.tag`, `.digest`, `.pullPolicy` | as `image.*` | the tag defaults to `appVersion` |
 | `operator.serverImage` | `""` | `--server-image`: what a `MeerkatMob` runs without `spec.image`; empty is this chart's `image.*` |
 | `operator.allowedImages` | `[ghcr.io/zegit-zoo/meerkat]` | `--allowed-images`: repositories `spec.image` may name, exact or, ending in `/`, as a prefix; empty allows no override |
+| `operator.watchNamespaces` | `[]` | `--watch-namespaces`: where the operator reconciles, admits and holds its permissions; empty is the release namespace, `["*"]` every namespace |
 | `operator.crds.install` | `true` | `false` when another release or GitOps owns the CRDs |
 | `operator.crds.keep` | `true` | `helm.sh/resource-policy: keep`, so an uninstall keeps the CRDs and every KnowledgeBase; they keep the release's ownership annotations, so a later install under another release name needs `crds.install=false` |
 | `operator.serviceAccount.{name,annotations}` | `""`, `{}` | name defaults to `<fullname>-operator` |

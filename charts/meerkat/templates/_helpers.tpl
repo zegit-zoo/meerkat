@@ -211,3 +211,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "meerkat.operator.webhookEnabled" -}}
 {{- and .Values.operator.enabled .Values.operator.webhook.enabled }}
 {{- end }}
+
+{{/*
+The namespaces the operator watches, comma-separated: operator.watchNamespaces,
+or the release namespace when that is empty or missing (a --reuse-values
+upgrade from a release without it). "*" is every namespace.
+*/}}
+{{- define "meerkat.operator.watchNamespaces" -}}
+{{- join "," (uniq (.Values.operator.watchNamespaces | default (list .Release.Namespace))) }}
+{{- end }}

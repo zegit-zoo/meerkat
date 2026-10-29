@@ -307,13 +307,23 @@ a repository that only starts with an allowed one
 any other image at admission, and the reconciler refuses it again
 (`ImageRefused`) in case it got in while the webhook was down.
 
+### Which namespaces it watches
+
+`--watch-namespaces` names the namespaces the operator reconciles in:
+a comma-separated list, or `*` for every namespace. Empty means its own
+namespace (`$POD_NAMESPACE`). The manager's cache covers only those
+namespaces, and the chart grants the operator's rules there alone
+(`operator.watchNamespaces`, the release namespace by default) and
+scopes the webhook to them, so writing Deployments or NetworkPolicies
+cluster-wide is an explicit `["*"]`, not the default.
+
 ## Packaging
 
 `release.yml` builds `ghcr.io/zegit-zoo/meerkat-operator` from the
 Dockerfile's `operator` target (distroless, non-root, its own
 `THIRD-PARTY-LICENSES.txt`) and signs it like the meerkat image.
 `charts/meerkat` installs it behind `operator.enabled` (off by default):
-the CRDs, a ServiceAccount, the ClusterRole and its binding, a
+the CRDs, a ServiceAccount, the ClusterRole and its bindings, a
 Deployment with leader election, the webhook Service and the
 `ValidatingWebhookConfiguration`. `make crds` copies the generated CRDs,
 ClusterRole and webhook configuration into `charts/meerkat/files/operator/`

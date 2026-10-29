@@ -16,12 +16,15 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -50,6 +53,7 @@ type options struct {
 	webhookCertDir string
 	serverImage    string
 	allowedImages  string
+	namespaces     string
 }
 
 // defaultServerImage is the meerkat image released with this operator.
@@ -74,6 +78,7 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 	fs.StringVar(&o.webhookCertDir, "webhook-cert-dir", "", "directory holding tls.crt and tls.key for the webhook (default: controller-runtime's)")
 	fs.StringVar(&o.serverImage, "server-image", defaultServerImage(), "meerkat server image a MeerkatMob runs when spec.image is empty")
 	fs.StringVar(&o.allowedImages, "allowed-images", imagepolicy.DefaultRepository, `comma-separated repositories a MeerkatMob's spec.image may name: exact ("ghcr.io/zegit-zoo/meerkat"), or every repository below a prefix ending in "/"; empty allows no override`)
+	fs.StringVar(&o.namespaces, "watch-namespaces", "", `comma-separated namespaces the operator reconciles and admits objects in, or "*" for every namespace; empty is its own namespace ($POD_NAMESPACE)`)
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	if err := fs.Parse(args); err != nil {
 		return o, err
@@ -85,6 +90,34 @@ func parseFlags(args []string, stderr io.Writer) (options, error) {
 		return o, errVersion
 	}
 	return o, nil
+}
+
+// watchedNamespaces turns --watch-namespaces into the manager's cache
+// scope: nil for every namespace ("*"), else one entry per namespace. An
+// empty flag means podNamespace, the operator's own namespace.
+func watchedNamespaces(flagValue, podNamespace string) (map[string]cache.Config, error) {
+	flagValue = strings.TrimSpace(flagValue)
+	if flagValue == "" {
+		if podNamespace == "" {
+			return nil, errors.New("--watch-namespaces is empty and POD_NAMESPACE is not set: name the namespaces to watch, or \"*\" for every namespace")
+		}
+		flagValue = podNamespace
+	}
+	if flagValue == "*" {
+		return nil, nil
+	}
+	out := map[string]cache.Config{}
+	for _, ns := range strings.Split(flagValue, ",") {
+		ns = strings.TrimSpace(ns)
+		if ns == "*" {
+			return nil, errors.New(`--watch-namespaces: "*" cannot be combined with namespace names`)
+		}
+		if errs := validation.IsDNS1123Label(ns); len(errs) > 0 {
+			return nil, fmt.Errorf("--watch-namespaces: %q is not a namespace name: %s", ns, strings.Join(errs, "; "))
+		}
+		out[ns] = cache.Config{}
+	}
+	return out, nil
 }
 
 // errVersion asks main to print the version and exit 0.
@@ -114,6 +147,10 @@ func run(o options) error {
 	if err != nil {
 		return err
 	}
+	namespaces, err := watchedNamespaces(o.namespaces, os.Getenv("POD_NAMESPACE"))
+	if err != nil {
+		return err
+	}
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return fmt.Errorf("loading the kubeconfig: %w", err)
@@ -124,6 +161,7 @@ func run(o options) error {
 		HealthProbeBindAddress: o.probeAddr,
 		LeaderElection:         o.leaderElect,
 		LeaderElectionID:       "meerkat-operator.meerkat-mob.dev",
+		Cache:                  cache.Options{DefaultNamespaces: namespaces},
 	}
 	if o.webhooks {
 		mopts.WebhookServer = webhook.NewServer(webhook.Options{Port: o.webhookPort, CertDir: o.webhookCertDir})
@@ -149,8 +187,21 @@ func run(o options) error {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return fmt.Errorf("readyz check: %w", err)
 	}
-	log.Info("starting meerkat-operator", "version", version, "webhooks", o.webhooks, "server_image", images.Default)
+	log.Info("starting meerkat-operator", "version", version, "webhooks", o.webhooks, "namespaces", namespaceNames(namespaces), "server_image", images.Default)
 	return mgr.Start(ctrl.SetupSignalHandler())
+}
+
+// namespaceNames lists a cache scope for the start-up log line.
+func namespaceNames(namespaces map[string]cache.Config) []string {
+	if namespaces == nil {
+		return []string{"*"}
+	}
+	names := make([]string, 0, len(namespaces))
+	for ns := range namespaces {
+		names = append(names, ns)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func main() {
