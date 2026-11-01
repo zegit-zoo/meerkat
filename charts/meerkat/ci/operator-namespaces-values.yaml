@@ -1,0 +1,8 @@
+# The operator watching two other namespaces: a RoleBinding in each, a
+# leader-election Role in the release namespace, and the webhook scoped
+# to the two (meerkat-mob#10). make chart-check renders it with kubeconform.
+operator:
+  enabled: true
+  watchNamespaces:
+    - team-a
+    - team-b

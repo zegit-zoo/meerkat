@@ -105,7 +105,12 @@ data:
 {{- if $certManager }}
 {{- $_ := set $vwc.metadata "annotations" (dict "cert-manager.io/inject-ca-from" (printf "%s/%s" .Release.Namespace $secretName)) }}
 {{- end }}
+{{- $namespaces := splitList "," (include "meerkat.operator.watchNamespaces" .) }}
 {{- range $vwc.webhooks }}
+{{- /* Outside the watched namespaces the operator may not read, so it would refuse every object there. */ -}}
+{{- if not (has "*" $namespaces) }}
+{{- $_ := set . "namespaceSelector" (dict "matchExpressions" (list (dict "key" "kubernetes.io/metadata.name" "operator" "In" "values" $namespaces))) }}
+{{- end }}
 {{- $_ := set .clientConfig.service "name" $svc }}
 {{- $_ := set .clientConfig.service "namespace" $.Release.Namespace }}
 {{- $_ := set .clientConfig.service "port" 443 }}

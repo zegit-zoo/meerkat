@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -102,6 +103,40 @@ type MeerkatMobSpec struct {
 	// serves.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// NetworkPolicy widens the NetworkPolicy every dedicated unit gets.
+	// Without it, a dedicated unit admits its serving port from the
+	// mob's namespace only, and its egress is not restricted.
+	// +optional
+	NetworkPolicy *NetworkPolicy `json:"networkPolicy,omitempty"`
+}
+
+// NetworkPolicy shapes the NetworkPolicy of a dedicated unit, as the
+// chart's networkPolicy values shape the chart server's.
+type NetworkPolicy struct {
+	// IngressFrom lists more peers that may reach the serving port (the
+	// API, the probes and /metrics), on top of the pods in the mob's
+	// namespace: an ingress controller's or Prometheus's namespace, for
+	// example.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	IngressFrom []networkingv1.NetworkPolicyPeer `json:"ingressFrom,omitempty"`
+
+	// Egress, when set, restricts a dedicated unit's egress to DNS and
+	// these rules. The object stores, the OIDC issuers, the OTLP
+	// collector and a cloud metadata endpoint are the operator's to
+	// list here: NetworkPolicy cannot name a host, so the operator does
+	// not guess their addresses.
+	// +optional
+	Egress *NetworkPolicyEgress `json:"egress,omitempty"`
+}
+
+// NetworkPolicyEgress is a dedicated unit's egress allow-list.
+type NetworkPolicyEgress struct {
+	// Rules are allowed besides DNS. Empty allows DNS only.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	Rules []networkingv1.NetworkPolicyEgressRule `json:"rules,omitempty"`
 }
 
 // The S3 credential keys an instance reads from Credentials.S3SecretRef:

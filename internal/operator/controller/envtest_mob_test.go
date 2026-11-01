@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -9,9 +10,11 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -411,4 +414,123 @@ func (h *mobHarness) serviceAccountInTheWay(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.waitRendered(t, h.waitMob(t, "taken", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered), "taken-all")
+}
+
+// policies lists the names of the NetworkPolicies mob controls, sorted.
+func (h *mobHarness) policies(t *testing.T, mob *v1alpha1.MeerkatMob) string {
+	t.Helper()
+	var l networkingv1.NetworkPolicyList
+	if err := h.c.List(h.ctx, &l, client.InNamespace(mobNS)); err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for i := range l.Items {
+		if metav1.IsControlledBy(&l.Items[i], mob) && l.Items[i].DeletionTimestamp.IsZero() {
+			out = append(out, l.Items[i].Name)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
+func (h *mobHarness) waitPolicies(t *testing.T, mob *v1alpha1.MeerkatMob, want string) {
+	t.Helper()
+	eventually(t, mob.Name+" has NetworkPolicies "+want, func() (bool, string) {
+		got := h.policies(t, mob)
+		return got == want, "policies " + got
+	})
+}
+
+func (h *mobHarness) dedicatedNetworkPolicy(t *testing.T) {
+	src := func(p string) v1alpha1.KnowledgeBaseSource {
+		return v1alpha1.KnowledgeBaseSource{S3: &v1alpha1.S3Source{Bucket: "kb", Prefix: p + "/", Endpoint: "https://s3.example.net"}}
+	}
+	secret := &v1alpha1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: "iso-secret", Namespace: mobNS},
+		Spec:       v1alpha1.KnowledgeBaseSpec{Parent: "iso-root", Placement: v1alpha1.PlacementDedicated, Source: src("iso-secret")},
+	}
+	for _, kb := range []*v1alpha1.KnowledgeBase{
+		{ObjectMeta: metav1.ObjectMeta{Name: "iso-root", Namespace: mobNS}, Spec: v1alpha1.KnowledgeBaseSpec{Source: src("iso-root")}},
+		secret,
+	} {
+		if err := h.c.Create(h.ctx, kb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mob := h.newMob("iso", v1alpha1.PlacementSingle)
+	mob.Spec.Root = "iso-root"
+	mob.Spec.NetworkPolicy = &v1alpha1.NetworkPolicy{
+		IngressFrom: []networkingv1.NetworkPolicyPeer{{NamespaceSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{"kubernetes.io/metadata.name": "ingress"},
+		}}},
+		Egress: &v1alpha1.NetworkPolicyEgress{},
+	}
+	if err := h.c.Create(h.ctx, mob); err != nil {
+		t.Fatal(err)
+	}
+	got := h.waitMob(t, "iso", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered)
+	h.waitRendered(t, got, "iso-all,iso-kb-iso-secret")
+	// The dedicated unit has a policy; the shared one does not.
+	h.waitPolicies(t, got, "iso-kb-iso-secret")
+
+	var np networkingv1.NetworkPolicy
+	key := types.NamespacedName{Namespace: mobNS, Name: "iso-kb-iso-secret"}
+	if err := h.c.Get(h.ctx, key, &np); err != nil {
+		t.Fatal(err)
+	}
+	var d appsv1.Deployment
+	if err := h.c.Get(h.ctx, key, &d); err != nil {
+		t.Fatal(err)
+	}
+	sel, err := metav1.LabelSelectorAsSelector(&np.Spec.PodSelector)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sel.Matches(labels.Set(d.Spec.Template.Labels)) {
+		t.Errorf("the policy selects %v, which misses the unit's pods %v", np.Spec.PodSelector, d.Spec.Template.Labels)
+	}
+	var all appsv1.Deployment
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "iso-all"}, &all); err != nil {
+		t.Fatal(err)
+	}
+	if sel.Matches(labels.Set(all.Spec.Template.Labels)) {
+		t.Errorf("the dedicated unit's policy also selects the shared unit's pods %v", all.Spec.Template.Labels)
+	}
+	if len(np.Spec.Ingress) != 1 || len(np.Spec.Ingress[0].From) != 2 || fmt.Sprint(np.Spec.PolicyTypes) != "[Ingress Egress]" || len(np.Spec.Egress) != 1 {
+		t.Errorf("policy spec = %+v", np.Spec)
+	}
+
+	// A hand delete is put back.
+	if err := h.c.Delete(h.ctx, &np); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the deleted NetworkPolicy is put back", func() (bool, string) {
+		var again networkingv1.NetworkPolicy
+		err := h.c.Get(h.ctx, key, &again)
+		if err != nil {
+			return false, err.Error()
+		}
+		return again.UID != np.UID && again.DeletionTimestamp.IsZero(), "still the old one"
+	})
+
+	// Under perKB the unit keeps its name when the KnowledgeBase stops
+	// being dedicated: the policy goes, the Deployment stays.
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "iso"}, mob); err != nil {
+		t.Fatal(err)
+	}
+	mob.Spec.Placement = v1alpha1.PlacementPerKB
+	if err := h.c.Update(h.ctx, mob); err != nil {
+		t.Fatal(err)
+	}
+	h.waitRendered(t, got, "iso-kb-iso-root,iso-kb-iso-secret")
+	h.waitPolicies(t, got, "iso-kb-iso-secret")
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "iso-secret"}, secret); err != nil {
+		t.Fatal(err)
+	}
+	secret.Spec.Placement = v1alpha1.PlacementShared
+	if err := h.c.Update(h.ctx, secret); err != nil {
+		t.Fatal(err)
+	}
+	h.waitPolicies(t, got, "")
+	h.waitRendered(t, got, "iso-kb-iso-root,iso-kb-iso-secret")
 }

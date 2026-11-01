@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,9 +30,10 @@ import (
 const fieldOwner = "meerkat-operator"
 
 // The reconciler reads MeerkatMobs, KnowledgeBases and the auth
-// ConfigMaps they name, and renders a ServiceAccount per mob and a
-// ConfigMap, a Deployment and a Service per placement unit. It never
-// reads Secrets: the pods reference the S3 one by name.
+// ConfigMaps they name, and renders a ServiceAccount per mob, a
+// ConfigMap, a Deployment and a Service per placement unit, and a
+// NetworkPolicy per dedicated unit. It never reads Secrets: the pods
+// reference the S3 one by name.
 //
 // +kubebuilder:rbac:groups=meerkat-mob.dev,resources=meerkatmobs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=meerkat-mob.dev,resources=meerkatmobs/status,verbs=get;update;patch
@@ -39,6 +41,7 @@ const fieldOwner = "meerkat-operator"
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // MeerkatMobReconciler renders each MeerkatMob's tree as meerkat
 // instances, one per placement unit, and reports the result in status.
@@ -64,6 +67,8 @@ type plannedUnit struct {
 	unit
 	config    []byte
 	resources corev1.ResourceRequirements
+	// policy is the unit's NetworkPolicy; nil unless it is dedicated.
+	policy runtime.ApplyConfiguration
 }
 
 // Reconcile renders one MeerkatMob.
@@ -101,21 +106,28 @@ func (r *MeerkatMobReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	if err := r.Apply(ctx, serviceAccountFor(&mob), client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
 		return reconcile.Result{}, fmt.Errorf("applying the ServiceAccount for MeerkatMob %s: %w", req.NamespacedName, err)
 	}
-	want := map[string]bool{}
+	want, wantPolicy := map[string]bool{}, map[string]bool{}
 	for i := range p.units {
 		u := &p.units[i]
 		want[u.Name] = true
-		for _, obj := range []runtime.ApplyConfiguration{
+		objs := []runtime.ApplyConfiguration{
 			configMapFor(&mob, &u.unit, u.config),
 			deploymentFor(&mob, &u.unit, p.image, u.config, u.resources),
 			serviceFor(&mob, &u.unit),
-		} {
+		}
+		if u.policy != nil {
+			// Applied before the pods can roll onto a new config: a unit
+			// that turns dedicated is isolated as soon as it can be.
+			objs = append([]runtime.ApplyConfiguration{u.policy}, objs...)
+			wantPolicy[u.Name] = true
+		}
+		for _, obj := range objs {
 			if err := r.Apply(ctx, obj, client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
 				return reconcile.Result{}, fmt.Errorf("applying %s for MeerkatMob %s: %w", u.Name, req.NamespacedName, err)
 			}
 		}
 	}
-	if err := r.prune(ctx, &mob, want); err != nil {
+	if err := r.prune(ctx, &mob, want, wantPolicy); err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -200,7 +212,15 @@ func (r *MeerkatMobReconciler) plan(ctx context.Context, mob *v1alpha1.MeerkatMo
 		if err != nil {
 			return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
 		}
-		p.units = append(p.units, plannedUnit{unit: u, config: body, resources: res})
+		pu := plannedUnit{unit: u, config: body, resources: res}
+		if u.dedicated() {
+			np, err := networkPolicyFor(mob, &u)
+			if err != nil {
+				return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
+			}
+			pu.policy = np
+		}
+		p.units = append(p.units, pu)
 	}
 	return p, nil, nil
 }
@@ -221,13 +241,15 @@ func (r *MeerkatMobReconciler) checkServiceAccountFree(ctx context.Context, mob 
 	return &refusal{v1alpha1.ReasonConfigRefused, fmt.Sprintf("ServiceAccount %q exists and is not this mob's; the operator will not take it over", name)}, nil
 }
 
-// prune deletes what mob rendered for a unit it no longer has.
-func (r *MeerkatMobReconciler) prune(ctx context.Context, mob *v1alpha1.MeerkatMob, want map[string]bool) error {
+// prune deletes what mob rendered for a unit it no longer has, and the
+// NetworkPolicy of a unit that is no longer dedicated (wantPolicy).
+func (r *MeerkatMobReconciler) prune(ctx context.Context, mob *v1alpha1.MeerkatMob, want, wantPolicy map[string]bool) error {
 	sel := client.MatchingLabels(mobLabels(mob))
 	var deps appsv1.DeploymentList
 	var svcs corev1.ServiceList
 	var cms corev1.ConfigMapList
-	for _, l := range []client.ObjectList{&deps, &svcs, &cms} {
+	var nps networkingv1.NetworkPolicyList
+	for _, l := range []client.ObjectList{&deps, &svcs, &cms, &nps} {
 		if err := r.List(ctx, l, client.InNamespace(mob.Namespace), sel); err != nil {
 			return fmt.Errorf("listing what MeerkatMob %s/%s rendered: %w", mob.Namespace, mob.Name, err)
 		}
@@ -242,8 +264,14 @@ func (r *MeerkatMobReconciler) prune(ctx context.Context, mob *v1alpha1.MeerkatM
 	for i := range cms.Items {
 		stale = append(stale, &cms.Items[i])
 	}
+	for i := range nps.Items {
+		if !wantPolicy[nps.Items[i].Name] {
+			stale = append(stale, &nps.Items[i])
+		}
+	}
 	for _, obj := range stale {
-		if want[obj.GetName()] || !metav1.IsControlledBy(obj, mob) {
+		_, isPolicy := obj.(*networkingv1.NetworkPolicy)
+		if (want[obj.GetName()] && !isPolicy) || !metav1.IsControlledBy(obj, mob) {
 			continue
 		}
 		if err := r.Delete(ctx, obj, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
@@ -305,13 +333,15 @@ func (r *MeerkatMobReconciler) writeStatus(ctx context.Context, mob *v1alpha1.Me
 // tree), on its auth ConfigMap and on the ServiceAccount of its name
 // (its own, or one in the way that it refused to take over), so changes
 // to those re-queue it, as do changes to what it rendered: a Deployment's status decides
-// Available, and an edit or delete by hand is put back.
+// Available, and an edit or delete by hand (a NetworkPolicy's too) is
+// put back.
 func (r *MeerkatMobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MeerkatMob{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Watches(&v1alpha1.KnowledgeBase{},
 			handler.EnqueueRequestsFromMapFunc(r.mobsInNamespace),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
