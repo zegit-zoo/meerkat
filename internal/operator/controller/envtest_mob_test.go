@@ -381,6 +381,24 @@ func (h *mobHarness) credentialsAndSizing(t *testing.T) {
 		l := d.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
 		return l.String() == "1152Mi", l.String()
 	})
+
+	// Its own resources.instance replaces the mob's for a one-KB unit.
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "solo"}, kb); err != nil {
+		t.Fatal(err)
+	}
+	kb.Spec.Resources.Instance = &corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+	}
+	if err := h.c.Update(h.ctx, kb); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "resources.instance replaces spec.resources", func() (bool, string) {
+		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "sized-all"}, &d); err != nil {
+			return false, err.Error()
+		}
+		l := d.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+		return l.String() == "2176Mi", l.String()
+	})
 }
 
 func (h *mobHarness) serviceAccountInTheWay(t *testing.T) {

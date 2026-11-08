@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -192,6 +193,14 @@ type KnowledgeBaseResources struct {
 	// request and its limit; the server does not enforce it itself.
 	// +optional
 	MaxResidentBytes *resource.Quantity `json:"maxResidentBytes,omitempty"`
+
+	// Instance replaces the MeerkatMob's spec.resources for an instance
+	// that serves only this KnowledgeBase, as a dedicated one always
+	// does and any does under placement: perKB. It is ignored while the
+	// instance also serves others. MaxResidentBytes is still added to
+	// its memory. It may name cpu, memory and ephemeral-storage only.
+	// +optional
+	Instance *corev1.ResourceRequirements `json:"instance,omitempty"`
 }
 
 // Refresh is a source's hot-reload poll.

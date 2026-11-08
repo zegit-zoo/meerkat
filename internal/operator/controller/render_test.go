@@ -438,6 +438,76 @@ func TestResourcesFor(t *testing.T) {
 	}
 }
 
+func TestResourcesForInstanceOverride(t *testing.T) {
+	q := resource.MustParse
+	own := func(name string, r corev1.ResourceRequirements, max string) v1alpha1.KnowledgeBase {
+		k := *kb(name, "")
+		k.Spec.Resources = &v1alpha1.KnowledgeBaseResources{Instance: &r}
+		if max != "" {
+			m := q(max)
+			k.Spec.Resources.MaxResidentBytes = &m
+		}
+		return k
+	}
+	big := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: q("2"), corev1.ResourceMemory: q("1Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceMemory: q("2Gi")},
+	}
+	mob := testMob(v1alpha1.PlacementPerKB)
+	mob.Spec.Resources = &corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: q("256Mi")}}
+
+	// Alone in its unit, it replaces spec.resources; resident bytes still add.
+	res, err := resourcesFor(mob, &unit{KBs: []v1alpha1.KnowledgeBase{own("a", big, "64Mi")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, lim, cpu := res.Requests[corev1.ResourceMemory], res.Limits[corev1.ResourceMemory], res.Requests[corev1.ResourceCPU]
+	if req.String() != "1088Mi" || lim.String() != "2112Mi" || cpu.String() != "2" {
+		t.Errorf("request %s, limit %s, cpu %s", req.String(), lim.String(), cpu.String())
+	}
+	// The KnowledgeBase's own spec is not changed by raising memory.
+	if m := big.Limits[corev1.ResourceMemory]; m.String() != "2Gi" {
+		t.Errorf("resources.instance was changed to %s", m.String())
+	}
+
+	// Sharing an instance, it is ignored and even a bad value refuses nothing.
+	bad := corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}}
+	res, err = resourcesFor(mob, &unit{KBs: []v1alpha1.KnowledgeBase{own("a", bad, ""), *kb("b", "")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lim := res.Limits[corev1.ResourceMemory]; lim.String() != "256Mi" {
+		t.Errorf("shared unit limit %s, want the mob's", lim.String())
+	}
+
+	for _, tc := range []struct {
+		name string
+		r    corev1.ResourceRequirements
+		want string
+	}{
+		{"claims", bad, "claims"},
+		{"negative", corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: q("-1")}}, "negative"},
+		{"request above limit", corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: q("2Gi")},
+			Limits:   corev1.ResourceList{corev1.ResourceMemory: q("1Gi")},
+		}, "above its limit"},
+		{"extended resource", corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": q("1")}}, "not supported"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resourcesFor(mob, &unit{KBs: []v1alpha1.KnowledgeBase{own("a", tc.r, "")}})
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), `"a"`) {
+				t.Errorf("err = %v, want it to name the KnowledgeBase and say %q", err, tc.want)
+			}
+		})
+	}
+
+	// The same checks hold the mob's own spec.resources.
+	mob.Spec.Resources = &corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: q("-1")}}
+	if _, err := resourcesFor(mob, &unit{}); err == nil || !strings.Contains(err.Error(), "spec.resources") {
+		t.Errorf("a negative spec.resources: err = %v", err)
+	}
+}
+
 func TestUnitDedicated(t *testing.T) {
 	kbs, _ := subtree("root", tree())
 	kbs[1].Spec.Placement = v1alpha1.PlacementDedicated // platform

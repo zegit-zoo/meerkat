@@ -98,9 +98,10 @@ type MeerkatMobSpec struct {
 
 	// Resources are every instance's container resources. Empty means
 	// the operator's defaults (requests 50m CPU and 128Mi memory, a
-	// 512Mi memory limit). Each instance's memory request and limit are
-	// then raised by the maxResidentBytes of the KnowledgeBases it
-	// serves.
+	// 512Mi memory limit). An instance serving a single KnowledgeBase
+	// uses that KnowledgeBase's resources.instance instead, when set.
+	// Each instance's memory request and limit are then raised by the
+	// maxResidentBytes of the KnowledgeBases it serves.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
