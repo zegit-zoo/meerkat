@@ -283,8 +283,8 @@ meerkat collections status [flags]
 #### Flags
 
 ```text
-      --check   Exit 1 when any collection is behind-remote, or its remote check could not run because of its configuration
-      --json    Output as JSON
+      --check[=true|false]   Exit 1 when any collection is behind-remote, or its remote check could not run because of its configuration
+      --json[=true|false]    Output as JSON
 ```
 
 #### Inherited flags
@@ -371,11 +371,11 @@ meerkat http serve [flags]
 #### Flags
 
 ```text
-      --api-key string        Static bearer token (min 16 characters). Visible to other local users in the process list: prefer --api-key-file or MEERKAT_API_KEY.
-      --api-key-file string   Read the static bearer token from this file (min 16 characters; surrounding whitespace is trimmed). Keep it mode 0600. MEERKAT_API_KEY, if set, takes precedence.
-      --host string           Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
-      --port int              Bind port (default 4004)
-      --security-txt          Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
+      --api-key string              Static bearer token (min 16 characters). Visible to other local users in the process list: prefer --api-key-file or MEERKAT_API_KEY.
+      --api-key-file string         Read the static bearer token from this file (min 16 characters; surrounding whitespace is trimmed). Keep it mode 0600. MEERKAT_API_KEY, if set, takes precedence.
+      --host string                 Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
+      --port int                    Bind port (default 4004)
+      --security-txt[=true|false]   Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
 ```
 
 #### Inherited flags
@@ -419,14 +419,14 @@ meerkat ingest [flags]
 #### Flags
 
 ```text
-      --apply                          With --role librarian: file confirmed candidates through their collection's contract (direct contracts also need --file-confirmed), file a forge issue for each parked item (contract token_env), and un-park items whose issue was closed as resolved. Without it the librarian changes nothing.
+      --apply[=true|false]             With --role librarian: file confirmed candidates through their collection's contract (direct contracts also need --file-confirmed), file a forge issue for each parked item (contract token_env), and un-park items whose issue was closed as resolved. Without it the librarian changes nothing.
       --batch-file string              Plan-only: write the JSONL batch to this file instead of stdout.
       --branch string                  Push target branch. Overrides the branch derived from content-source.yaml.
       --days int                       With --role librarian: days of traversal log to read for missing-link findings. (default 7)
-      --dry-run                        With --execute, print the planned commands without running them.
-      --execute                        Actually run the tasks (otherwise plan-only).
+      --dry-run[=true|false]           With --execute, print the planned commands without running them.
+      --execute[=true|false]           Actually run the tasks (otherwise plan-only).
       --executor string                Agent CLI to run each page: opencode | claude. (default "opencode")
-      --file-confirmed                 With --role librarian --apply: also write confirmed candidates into collections whose contract is direct. Without it they are reported as held for review.
+      --file-confirmed[=true|false]    With --role librarian --apply: also write confirmed candidates into collections whose contract is direct. Without it they are reported as held for review.
       --from string                    With --role researcher|validator: where items come from (intake, the content-source.yaml intake: store). (default "intake")
       --max-consecutive-failures int   Stop the executor after this many consecutive failures (0 = never auto-stop).
       --max-parallel int               Max concurrent opencode sessions when --execute (default 1). (default 1)
@@ -434,13 +434,13 @@ meerkat ingest [flags]
       --namespace string               With --role researcher: only this identity namespace's deposits (default: every namespace).
       --only string                    With --role: only this intake id.
       --page string                    Plan exactly one page (e.g. 'concepts/Rate-Limiting' or 'wiki/policies/foo.md'). Overrides --source/--statuses.
-      --reverse                        Process tasks in reverse ID order. Useful when running a second batch alongside a forward one — collisions skip cheaply because the executor checks page status before spawning opencode.
+      --reverse[=true|false]           Process tasks in reverse ID order. Useful when running a second batch alongside a forward one — collisions skip cheaply because the executor checks page status before spawning opencode.
       --role string                    Act as an intake role: researcher (raw intake -> candidate page), validator (re-derive a candidate's claims), librarian (report on the tree; --apply files confirmed candidates).
       --source string                  Restrict to one source id from sources.yaml (e.g. policies, adr, runbooks).
       --status strings                 Restrict to pages with these frontmatter statuses (default: placeholder,ingest-failed).
       --subagent string                OpenCode subagent type (default: general).
-      --trust-intake                   With --role and --trust-sources: accept that text MCP callers sent (intake deposits, session queries) reaches an agent running without permission prompts.
-      --trust-sources                  Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged. With --role it also needs --trust-intake.
+      --trust-intake[=true|false]      With --role and --trust-sources: accept that text MCP callers sent (intake deposits, session queries) reaches an agent running without permission prompts.
+      --trust-sources[=true|false]     Run the agent CLI with permission prompts disabled; any instruction reachable from ingested content then executes unchallenged. With --role it also needs --trust-intake.
       --wall-clock-cap int             Per-page wall-clock cap in seconds. (default 300)
       --workdir-kb string              Content working copy to write to. Overrides the source resolved from content-source.yaml.
 ```
@@ -472,7 +472,7 @@ meerkat ingest sources [flags]
 #### Flags
 
 ```text
-      --json   Output as JSON
+      --json[=true|false]   Output as JSON
 ```
 
 #### Inherited flags
@@ -514,7 +514,7 @@ meerkat lint [flags]
 #### Flags
 
 ```text
-      --json   Output the full report as JSON
+      --json[=true|false]   Output the full report as JSON
 ```
 
 #### Inherited flags
@@ -558,14 +558,14 @@ meerkat list [flags]
 #### Flags
 
 ```text
-      --category string     Only pages with this frontmatter category
-      --collection string   Only list this named collection (see 'mk list --collections'). Default: every mounted collection. Single-collection deployments can ignore this.
-      --collections         List the mounted collections (name, type, provenance, page count) instead of pages
-      --json                Output as JSON (includes frontmatter)
-      --owner string        Only pages with this frontmatter owner
-      --prefix string       Only pages whose ID starts with this prefix
-      --status string       Only pages with this frontmatter status
-      --type string         Only pages with this frontmatter type (OKF's concept-kind field, e.g. "BigQuery Table")
+      --category string            Only pages with this frontmatter category
+      --collection string          Only list this named collection (see 'mk list --collections'). Default: every mounted collection. Single-collection deployments can ignore this.
+      --collections[=true|false]   List the mounted collections (name, type, provenance, page count) instead of pages
+      --json[=true|false]          Output as JSON (includes frontmatter)
+      --owner string               Only pages with this frontmatter owner
+      --prefix string              Only pages whose ID starts with this prefix
+      --status string              Only pages with this frontmatter status
+      --type string                Only pages with this frontmatter type (OKF's concept-kind field, e.g. "BigQuery Table")
 ```
 
 #### Inherited flags
@@ -810,15 +810,15 @@ meerkat mcp serve-http [flags]
 #### Flags
 
 ```text
-      --auth-config string    Path to a standalone YAML policy file with a top-level auth: block. Overrides the auth: block in content-source.yaml.
-      --host string           Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
-      --insecure-no-auth      Allow binding a non-loopback address with no authentication configured. Without it the server refuses to start in that state; use it only when a gateway in front authenticates every request.
-      --metrics-addr string   Serve the unauthenticated /metrics on its own listener at this host:port instead of on the API port. Empty keeps /metrics on the API port
-      --path string           Path the MCP Streamable HTTP endpoint is mounted at (default "/mcp")
-      --port int              Bind port (default 4005)
-      --security-txt          Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
-      --stateful              Keep per-session state in this process instead of accepting any well-formed session ID. Requires sticky routing when more than one replica sits behind a load balancer.
-      --trust-proxy-host      Disable DNS-rebinding protection (which rejects loopback requests whose Host header is not a localhost value). Only for a same-host reverse proxy that preserves the original Host header; prefer rewriting Host at the proxy instead.
+      --auth-config string              Path to a standalone YAML policy file with a top-level auth: block. Overrides the auth: block in content-source.yaml.
+      --host string                     Bind host (use 0.0.0.0 to listen on all interfaces) (default "127.0.0.1")
+      --insecure-no-auth[=true|false]   Allow binding a non-loopback address with no authentication configured. Without it the server refuses to start in that state; use it only when a gateway in front authenticates every request.
+      --metrics-addr string             Serve the unauthenticated /metrics on its own listener at this host:port instead of on the API port. Empty keeps /metrics on the API port
+      --path string                     Path the MCP Streamable HTTP endpoint is mounted at (default "/mcp")
+      --port int                        Bind port (default 4005)
+      --security-txt[=true|false]       Serve /.well-known/security.txt (RFC 9116) with meerkat's security contact, unauthenticated. Turn it off when the host serves a security.txt of its own (default true)
+      --stateful[=true|false]           Keep per-session state in this process instead of accepting any well-formed session ID. Requires sticky routing when more than one replica sits behind a load balancer.
+      --trust-proxy-host[=true|false]   Disable DNS-rebinding protection (which rejects loopback requests whose Host header is not a localhost value). Only for a same-host reverse proxy that preserves the original Host header; prefer rewriting Host at the proxy instead.
 ```
 
 #### Inherited flags
@@ -863,9 +863,9 @@ meerkat search <query> [flags]
 #### Flags
 
 ```text
-      --body                Print the full body of every hit
+      --body[=true|false]   Print the full body of every hit
       --collection string   Only search this named collection (see 'mk list --collections'). Default: every mounted collection. Single-collection deployments can ignore this.
-      --json                Output results as JSON
+      --json[=true|false]   Output results as JSON
       --limit int           Maximum number of results (default 10)
 ```
 
@@ -920,7 +920,7 @@ meerkat show <page-id> [flags]
 
 ```text
       --collection string   Only look in this named collection (see 'mk list --collections'). Default: every mounted collection. Single-collection deployments can ignore this.
-      --json                Output as JSON (page metadata + body)
+      --json[=true|false]   Output as JSON (page metadata + body)
 ```
 
 #### Inherited flags
@@ -971,11 +971,11 @@ meerkat update [flags]
 #### Flags
 
 ```text
-      --check            Just report the latest version; don't download or install.
-      --force            Re-install even if already on the target version (downgrade-friendly).
-      --skip-cosign      Skip cosign signature verification (NOT recommended). Also requires MEERKAT_UPDATE_ALLOW_UNVERIFIED=1, and a typed confirmation on a terminal.
-      --version string   Install a specific tag (e.g. v0.4.0) instead of latest.
-  -y, --yes              Skip the confirmation prompt.
+      --check[=true|false]         Just report the latest version; don't download or install.
+      --force[=true|false]         Re-install even if already on the target version (downgrade-friendly).
+      --skip-cosign[=true|false]   Skip cosign signature verification (NOT recommended). Also requires MEERKAT_UPDATE_ALLOW_UNVERIFIED=1, and a typed confirmation on a terminal.
+      --version string             Install a specific tag (e.g. v0.4.0) instead of latest.
+  -y, --yes[=true|false]           Skip the confirmation prompt.
 ```
 
 #### Inherited flags
@@ -1000,7 +1000,7 @@ meerkat version [flags]
 #### Flags
 
 ```text
-      --json   Output as JSON
+      --json[=true|false]   Output as JSON
 ```
 
 #### Inherited flags
