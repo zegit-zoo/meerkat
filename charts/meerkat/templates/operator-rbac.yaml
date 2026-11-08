@@ -1,7 +1,13 @@
 {{- /*
-The operator's ServiceAccount and its cluster-wide permissions. The rules
-come from files/operator/role.yaml, which controller-gen generates from the
+The operator's ServiceAccount and its permissions. The rules come from
+files/operator/role.yaml, which controller-gen generates from the
 +kubebuilder:rbac markers (`make crds`), so they cannot drift from the code.
+
+They are granted only where the operator works: a RoleBinding to the
+ClusterRole in each namespace of operator.watchNamespaces (the release
+namespace by default), plus a Role for its leader-election Lease and Events
+in the release namespace when that is not one of them. A ClusterRoleBinding
+grants them in every namespace only when watchNamespaces is ["*"].
 */ -}}
 {{- if .Values.operator.enabled }}
 {{- $role := .Files.Get "files/operator/role.yaml" | fromYaml }}
@@ -27,6 +33,8 @@ metadata:
     {{- include "meerkat.operator.labels" . | nindent 4 }}
 rules:
   {{- toYaml $role.rules | nindent 2 }}
+{{- $namespaces := splitList "," (include "meerkat.operator.watchNamespaces" .) }}
+{{- if has "*" $namespaces }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -42,4 +50,58 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "meerkat.operator.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- else }}
+{{- range $namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "meerkat.operator.fullname" $ }}
+  namespace: {{ . }}
+  labels:
+    {{- include "meerkat.operator.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "meerkat.operator.fullname" $ }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "meerkat.operator.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- if not (has .Release.Namespace $namespaces) }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "meerkat.operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "meerkat.operator.labels" . | nindent 4 }}
+{{- $rules := list }}
+{{- range $role.rules }}
+{{- if or (has "leases" .resources) (has "events" .resources) }}
+{{- $rules = append $rules . }}
+{{- end }}
+{{- end }}
+rules:
+  {{- toYaml $rules | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "meerkat.operator.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "meerkat.operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "meerkat.operator.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "meerkat.operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}
 {{- end }}

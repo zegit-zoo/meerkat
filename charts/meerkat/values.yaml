@@ -266,6 +266,11 @@ operator:
   # Empty: no MeerkatMob may override the image.
   allowedImages:
     - ghcr.io/zegit-zoo/meerkat
+  # Namespaces whose KnowledgeBases and MeerkatMobs the operator reconciles
+  # and admits. The chart grants its permissions there alone (a RoleBinding
+  # each) and scopes the webhook to them. Empty: the release namespace.
+  # ["*"]: every namespace, with a ClusterRoleBinding.
+  watchNamespaces: []
   crds:
     # Install or upgrade the CRDs with the chart. Set false when another
     # release or a GitOps tool owns them.

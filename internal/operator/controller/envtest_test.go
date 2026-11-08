@@ -159,6 +159,7 @@ func TestEnvtest(t *testing.T) {
 	t.Run("webhook refuses a mob image off the allow-list", mobs.imageAdmission)
 	t.Run("mob credentials and sizing reach the instances", mobs.credentialsAndSizing)
 	t.Run("mob refuses to take over a ServiceAccount", mobs.serviceAccountInTheWay)
+	t.Run("dedicated units get a NetworkPolicy, pruned when they go", mobs.dedicatedNetworkPolicy)
 
 	t.Run("loop past admission is reported, and clears when fixed", func(t *testing.T) {
 		// Stand in for two concurrent creates that each passed the
