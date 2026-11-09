@@ -119,11 +119,14 @@ spec:
                 type: string
               librarian:
                 description: |-
-                  Librarian runs the librarian role on a schedule against a
-                  temporary full-tree instance.
+                  Librarian runs the librarian role on a schedule: a CronJob whose
+                  pod loads the whole tree and reports. It changes nothing.
                 properties:
                   schedule:
-                    description: Schedule is a five-field cron expression, as a CronJob's.
+                    description: |-
+                      Schedule is a five-field cron expression, as a CronJob's, in the
+                      time zone of the cluster's controller manager. The API server
+                      parses it; a schedule it refuses refuses the mob.
                     minLength: 9
                     type: string
                 required:

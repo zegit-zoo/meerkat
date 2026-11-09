@@ -6,9 +6,11 @@ import (
 	"math"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,6 +25,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/operator/api/v1alpha1"
 	"github.com/zegit-zoo/meerkat/internal/operator/imagepolicy"
 	"github.com/zegit-zoo/meerkat/internal/operator/webhook"
+	"github.com/zegit-zoo/meerkat/internal/telemetry"
 )
 
 // fieldOwner is the server-side apply manager for everything the
@@ -31,9 +34,10 @@ const fieldOwner = "meerkat-operator"
 
 // The reconciler reads MeerkatMobs, KnowledgeBases and the auth
 // ConfigMaps they name, and renders a ServiceAccount per mob, a
-// ConfigMap, a Deployment and a Service per placement unit, and a
-// NetworkPolicy per dedicated unit. It never reads Secrets: the pods
-// reference the S3 one by name.
+// ConfigMap, a Deployment and a Service per placement unit, a
+// NetworkPolicy per dedicated unit, and, with spec.librarian, a
+// ConfigMap and a CronJob for the scheduled librarian run. It never
+// reads Secrets: the pods reference the S3 one by name.
 //
 // +kubebuilder:rbac:groups=meerkat-mob.dev,resources=meerkatmobs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=meerkat-mob.dev,resources=meerkatmobs/status,verbs=get;update;patch
@@ -42,6 +46,7 @@ const fieldOwner = "meerkat-operator"
 // +kubebuilder:rbac:groups="",resources=services;configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 
 // MeerkatMobReconciler renders each MeerkatMob's tree as meerkat
 // instances, one per placement unit, and reports the result in status.
@@ -61,6 +66,9 @@ type plan struct {
 	image string
 	kbs   int
 	units []plannedUnit
+	// librarian is the scheduled librarian run's ConfigMap and CronJob;
+	// nil without spec.librarian.
+	librarian []runtime.ApplyConfiguration
 }
 
 type plannedUnit struct {
@@ -124,6 +132,14 @@ func (r *MeerkatMobReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		for _, obj := range objs {
 			if err := r.Apply(ctx, obj, client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
 				return reconcile.Result{}, fmt.Errorf("applying %s for MeerkatMob %s: %w", u.Name, req.NamespacedName, err)
+			}
+		}
+	}
+	if p.librarian != nil {
+		want[librarianName(&mob)] = true
+		for _, obj := range p.librarian {
+			if err := r.Apply(ctx, obj, client.FieldOwner(fieldOwner), client.ForceOwnership); err != nil {
+				return reconcile.Result{}, fmt.Errorf("applying the librarian for MeerkatMob %s: %w", req.NamespacedName, err)
 			}
 		}
 	}
@@ -222,7 +238,40 @@ func (r *MeerkatMobReconciler) plan(ctx context.Context, mob *v1alpha1.MeerkatMo
 		}
 		p.units = append(p.units, pu)
 	}
+	if mob.Spec.Librarian != nil {
+		objs, ref, err := r.planLibrarian(ctx, mob, image, kbs, obs)
+		if ref != nil || err != nil {
+			return nil, ref, err
+		}
+		p.librarian = objs
+	}
 	return p, nil, nil
+}
+
+// planLibrarian renders the librarian's ConfigMap and CronJob and has
+// the API server check the CronJob with a dry run, so a schedule the
+// webhook let through (it counts five fields, it does not parse them)
+// is a refusal in status rather than a failed apply on every retry.
+func (r *MeerkatMobReconciler) planLibrarian(ctx context.Context, mob *v1alpha1.MeerkatMob, image string, kbs []v1alpha1.KnowledgeBase, obs *telemetry.Config) ([]runtime.ApplyConfiguration, *refusal, error) {
+	lu := librarianUnit(mob, kbs)
+	body, err := renderConfig(&lu, nil, obs)
+	if err != nil {
+		return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
+	}
+	res, err := resourcesFor(mob, &lu)
+	if err != nil {
+		return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
+	}
+	// The dry run gets its own copy: Apply writes the server's answer,
+	// with the uid it made up, back into the object it is given.
+	err = r.Apply(ctx, cronJobFor(mob, image, body, res), client.FieldOwner(fieldOwner), client.ForceOwnership, client.DryRunAll)
+	switch {
+	case apierrors.IsInvalid(err):
+		return nil, &refusal{v1alpha1.ReasonConfigRefused, "spec.librarian: " + err.Error()}, nil
+	case err != nil:
+		return nil, nil, fmt.Errorf("checking the librarian CronJob for MeerkatMob %s/%s: %w", mob.Namespace, mob.Name, err)
+	}
+	return []runtime.ApplyConfiguration{librarianConfigMapFor(mob, body), cronJobFor(mob, image, body, res)}, nil, nil
 }
 
 // checkServiceAccountFree refuses to take over a ServiceAccount of the
@@ -241,7 +290,8 @@ func (r *MeerkatMobReconciler) checkServiceAccountFree(ctx context.Context, mob 
 	return &refusal{v1alpha1.ReasonConfigRefused, fmt.Sprintf("ServiceAccount %q exists and is not this mob's; the operator will not take it over", name)}, nil
 }
 
-// prune deletes what mob rendered for a unit it no longer has, and the
+// prune deletes what mob rendered for a unit it no longer has (want
+// also names the librarian while spec.librarian is set), and the
 // NetworkPolicy of a unit that is no longer dedicated (wantPolicy).
 func (r *MeerkatMobReconciler) prune(ctx context.Context, mob *v1alpha1.MeerkatMob, want, wantPolicy map[string]bool) error {
 	sel := client.MatchingLabels(mobLabels(mob))
@@ -249,7 +299,8 @@ func (r *MeerkatMobReconciler) prune(ctx context.Context, mob *v1alpha1.MeerkatM
 	var svcs corev1.ServiceList
 	var cms corev1.ConfigMapList
 	var nps networkingv1.NetworkPolicyList
-	for _, l := range []client.ObjectList{&deps, &svcs, &cms, &nps} {
+	var cjs batchv1.CronJobList
+	for _, l := range []client.ObjectList{&deps, &svcs, &cms, &nps, &cjs} {
 		if err := r.List(ctx, l, client.InNamespace(mob.Namespace), sel); err != nil {
 			return fmt.Errorf("listing what MeerkatMob %s/%s rendered: %w", mob.Namespace, mob.Name, err)
 		}
@@ -263,6 +314,9 @@ func (r *MeerkatMobReconciler) prune(ctx context.Context, mob *v1alpha1.MeerkatM
 	}
 	for i := range cms.Items {
 		stale = append(stale, &cms.Items[i])
+	}
+	for i := range cjs.Items {
+		stale = append(stale, &cjs.Items[i])
 	}
 	for i := range nps.Items {
 		if !wantPolicy[nps.Items[i].Name] {
@@ -333,8 +387,8 @@ func (r *MeerkatMobReconciler) writeStatus(ctx context.Context, mob *v1alpha1.Me
 // tree), on its auth ConfigMap and on the ServiceAccount of its name
 // (its own, or one in the way that it refused to take over), so changes
 // to those re-queue it, as do changes to what it rendered: a Deployment's status decides
-// Available, and an edit or delete by hand (a NetworkPolicy's too) is
-// put back.
+// Available, and an edit or delete by hand (a NetworkPolicy's or the
+// librarian CronJob's too) is put back.
 func (r *MeerkatMobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MeerkatMob{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
@@ -342,6 +396,7 @@ func (r *MeerkatMobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&networkingv1.NetworkPolicy{}).
+		Owns(&batchv1.CronJob{}).
 		Watches(&v1alpha1.KnowledgeBase{},
 			handler.EnqueueRequestsFromMapFunc(r.mobsInNamespace),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{})).

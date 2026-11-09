@@ -86,8 +86,8 @@ type MeerkatMobSpec struct {
 	// +optional
 	Auth *Auth `json:"auth,omitempty"`
 
-	// Librarian runs the librarian role on a schedule against a
-	// temporary full-tree instance.
+	// Librarian runs the librarian role on a schedule: a CronJob whose
+	// pod loads the whole tree and reports. It changes nothing.
 	// +optional
 	Librarian *Librarian `json:"librarian,omitempty"`
 
@@ -237,7 +237,9 @@ type Auth struct {
 
 // Librarian is the scheduled librarian run.
 type Librarian struct {
-	// Schedule is a five-field cron expression, as a CronJob's.
+	// Schedule is a five-field cron expression, as a CronJob's, in the
+	// time zone of the cluster's controller manager. The API server
+	// parses it; a schedule it refuses refuses the mob.
 	// +kubebuilder:validation:MinLength=9
 	Schedule string `json:"schedule"`
 }
