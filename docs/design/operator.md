@@ -214,14 +214,19 @@ RBAC on Secrets): a pod whose Secret is missing waits in
 it at start, so a rotated key needs a rollout restart.
 
 `spec.resources` replaces the operator's defaults (requests 50m CPU and
-128Mi memory, a 512Mi memory limit) for every instance. Each instance's
+128Mi memory, a 512Mi memory limit) for every instance. A KnowledgeBase's
+`resources.instance` replaces those again for an instance that serves
+only that KnowledgeBase: always a dedicated one, and any under
+`placement: perKB`. It is ignored while the instance serves others, and
+it names `cpu`, `memory` and `ephemeral-storage` only. Each instance's
 memory request and limit are then raised by the sum of the
 `resources.maxResidentBytes` of the KnowledgeBases it serves; with
 neither set, that sum becomes the request. A unit with a memory limit
 runs with `GOMEMLIMIT` at 90% of it, so the Go collector works harder
 before the kernel kills the pod. The server does not enforce
-`maxResidentBytes` itself: it sizes the pod. A negative value or
-`spec.resources.claims` refuses the mob (`ConfigRefused`).
+`maxResidentBytes` itself: it sizes the pod. A negative value, a
+request above its limit, resource claims, or another resource name in
+`resources.instance` refuses the mob (`ConfigRefused`).
 
 The mob is not rendered, and what its last good spec rendered keeps
 running, when:
@@ -366,9 +371,11 @@ meerkat-mob#10 tracks these:
   as a whole rather than one more rule.
 - **Contract and per-unit identity.** `contract` is not rendered,
   because the server's `update:` block is structured and the CRD field
-  is free text. Credentials and resources are per mob, so a dedicated
-  KnowledgeBase shares its mob's identity; the server does not enforce
-  `maxResidentBytes` itself.
+  is free text. Credentials are per mob, so a dedicated KnowledgeBase
+  shares its mob's identity. The server does not enforce
+  `maxResidentBytes` itself: its `cache.max_bytes` bounds only the lazy
+  children of a `tree:` deployment, and the operator renders eager
+  `collections:`, so it waits on lazy mounts.
 - **KnowledgeBase status from instances.** `mounted`, `pages`,
   `contentGeneration` and `lastTraversal` are not filled in.
 - Scale-to-zero, the librarian CronJob, and acceptance on a real k3s

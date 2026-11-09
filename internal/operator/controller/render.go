@@ -464,9 +464,54 @@ var (
 	defaultMemoryLimit   = resource.MustParse("512Mi")
 )
 
-// resourcesFor is u's container resources: spec.resources (or the
-// defaults), with the memory request and limit each raised by the sum
-// of u's KnowledgeBases' maxResidentBytes. A memory request or limit
+// checkResources refuses what would only fail later, at the API server,
+// and so hold up the rest of the mob's units: dynamic claims, a negative
+// quantity, a request above its limit.
+func checkResources(r *corev1.ResourceRequirements, field string) error {
+	if len(r.Claims) > 0 {
+		return fmt.Errorf("%s.claims is not supported: an instance needs no dynamic resources", field)
+	}
+	for _, l := range []corev1.ResourceList{r.Requests, r.Limits} {
+		for name, q := range l {
+			if q.Sign() < 0 {
+				return fmt.Errorf("%s: %s %s is negative", field, name, q.String())
+			}
+		}
+	}
+	for name, req := range r.Requests {
+		if lim, ok := r.Limits[name]; ok && req.Cmp(lim) > 0 {
+			return fmt.Errorf("%s: %s request %s is above its limit %s", field, name, req.String(), lim.String())
+		}
+	}
+	return nil
+}
+
+// instanceResources is the resources.instance of u's only KnowledgeBase,
+// checked, or nil when u has no such override. A KnowledgeBase's author
+// need not be its mob's, so only the ordinary resources may be named.
+func instanceResources(u *unit) (*corev1.ResourceRequirements, error) {
+	if len(u.KBs) != 1 || u.KBs[0].Spec.Resources == nil || u.KBs[0].Spec.Resources.Instance == nil {
+		return nil, nil
+	}
+	r := u.KBs[0].Spec.Resources.Instance
+	field := fmt.Sprintf("KnowledgeBase %q: resources.instance", u.KBs[0].Name)
+	for _, l := range []corev1.ResourceList{r.Requests, r.Limits} {
+		for name := range l {
+			if name != corev1.ResourceCPU && name != corev1.ResourceMemory && name != corev1.ResourceEphemeralStorage {
+				return nil, fmt.Errorf("%s: %s is not supported: only cpu, memory and ephemeral-storage are", field, name)
+			}
+		}
+	}
+	if err := checkResources(r, field); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// resourcesFor is u's container resources: the resources.instance of
+// its only KnowledgeBase, or spec.resources, or the defaults, with the
+// memory request and limit each raised by the sum of u's
+// KnowledgeBases' maxResidentBytes. A memory request or limit
 // that spec.resources leaves out stays out (the API server defaults a
 // missing request to the limit); with neither, the resident bytes
 // become the request.
@@ -476,10 +521,17 @@ func resourcesFor(mob *v1alpha1.MeerkatMob, u *unit) (corev1.ResourceRequirement
 		Limits:   corev1.ResourceList{corev1.ResourceMemory: defaultMemoryLimit.DeepCopy()},
 	}
 	if r := mob.Spec.Resources; r != nil {
-		if len(r.Claims) > 0 {
-			return res, fmt.Errorf("spec.resources.claims is not supported: an instance needs no dynamic resources")
+		if err := checkResources(r, "spec.resources"); err != nil {
+			return res, err
 		}
 		res = corev1.ResourceRequirements{Requests: r.Requests.DeepCopy(), Limits: r.Limits.DeepCopy()}
+	}
+	own, err := instanceResources(u)
+	if err != nil {
+		return res, err
+	}
+	if own != nil {
+		res = corev1.ResourceRequirements{Requests: own.Requests.DeepCopy(), Limits: own.Limits.DeepCopy()}
 	}
 	var resident resource.Quantity
 	for i := range u.KBs {

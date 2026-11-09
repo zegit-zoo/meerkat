@@ -111,7 +111,7 @@ func newJWKSKeySet(url string, client *http.Client, minRefresh time.Duration, no
 
 // VerifySignature implements oidc.KeySet.
 func (k *jwksKeySet) VerifySignature(ctx context.Context, jwt string) ([]byte, error) {
-	jws, err := jose.ParseSigned(jwt, jwtAlgs)
+	jws, err := jose.ParseSignedCompact(jwt, jwtAlgs)
 	if err != nil {
 		return nil, fmt.Errorf("malformed jwt: %w", err)
 	}
