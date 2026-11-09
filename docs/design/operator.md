@@ -291,7 +291,8 @@ the Deployment selects on), so it isolates nothing else:
 Every rule a mob adds applies to its own dedicated pods and nothing
 else, so `networkPolicy` lets a mob's author open their own pods
 further, never reach someone else's. The kubelet's probes need no rule:
-the NetworkPolicy spec allows traffic from the pod's own node. The
+network plugins allow traffic from the pod's own node (kindnet, Calico
+and Cilium do). The
 policy is enforced by the network plugin, and a plugin without
 NetworkPolicy support ignores it; the chart README's
 [Operator NetworkPolicy](../../charts/meerkat/README.md#operator-networkpolicy)

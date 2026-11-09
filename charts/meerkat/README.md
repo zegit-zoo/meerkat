@@ -240,6 +240,12 @@ still covers the operator's leader-election Lease and its Events.
 ClusterRoleBinding, so the operator can write those kinds cluster-wide.
 A namespace added to the list later takes a `helm upgrade`.
 
+Upgrading from a release before `operator.watchNamespaces` existed: the
+operator used to work in every namespace, and now defaults to the release
+namespace. If you have `MeerkatMob`s elsewhere, set
+`operator.watchNamespaces: ["*"]` to keep the old behaviour, or list their
+namespaces. Until then those mobs are not reconciled.
+
 | key | default | description |
 | --- | --- | --- |
 | `operator.enabled` | `false` | |
