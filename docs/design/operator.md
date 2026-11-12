@@ -1,14 +1,14 @@
 # The meerkat operator: KnowledgeBase and MeerkatMob
 
-Status: seventh slice (meerkat-mob#10, phase 2). The CRD types, their
+Status: ninth slice (meerkat-mob#10, phase 2). The CRD types, their
 manifests, the validating webhook, `cmd/meerkat-operator`, a
 KnowledgeBase reconciler that reports each tree in status, and a
-MeerkatMob reconciler that serves a tree as meerkat Deployments, with
-their credentials and sizing and a NetworkPolicy for each dedicated
-unit, exist,
-and each release ships the operator as an image that the Helm chart
-installs (`operator.enabled`, below). Cross-process hops, scale-to-zero
-and the librarian CronJob do not exist yet (see the end of this page).
+MeerkatMob reconciler exist. The reconciler serves a tree as meerkat
+Deployments, with their credentials and sizing, a NetworkPolicy for
+each dedicated unit, and a CronJob for the scheduled librarian run.
+Each release ships the operator as an image that the Helm chart
+installs (`operator.enabled`, below). Cross-process hops and
+scale-to-zero do not exist yet (see the end of this page).
 
 ## Resources
 
@@ -258,6 +258,45 @@ or leave its tree), when its auth ConfigMap changes, when a
 ServiceAccount of its ServiceAccount's name changes or goes away, and
 when an object it rendered changes.
 
+### The scheduled librarian run
+
+`spec.librarian.schedule` gives the mob a CronJob, `<mob>-librarian`,
+and a ConfigMap of the same name, both controlled by the mob and
+labelled `app.kubernetes.io/component: librarian`. Each run is a Job
+whose pod runs `mk ingest --role=librarian` over the whole tree. The
+ConfigMap's `content-source.yaml` lists every KnowledgeBase under
+`spec.root`, dedicated ones included, in tree order. It carries the
+mob's `observability:` block but no `auth:` block, because the run
+serves nothing. That pod is the temporary full-tree instance: it
+mounts every collection, writes the report to its log, and exits.
+
+A run reports and changes nothing. It is started without `--apply`
+and without `--execute`, so it files no candidates, pointers or forge
+issues and runs no rewrites. Its pod is an instance's pod: the same
+image, ServiceAccount (no API token), S3 credentials, security
+context and `emptyDir` cache. Its resources are sized as one unit
+holding the whole tree, so every KnowledgeBase's `maxResidentBytes`
+adds to its memory. No port or probe is exposed.
+
+Runs do not overlap (`concurrencyPolicy: Forbid`). Each is a single
+attempt (`backoffLimit: 0`) and is stopped after two hours, so a run
+that hangs on an object store does not hold off the next one. The
+three most recent finished Jobs of each outcome are kept for their
+logs. The schedule is read in the time zone of the cluster's
+controller manager, since `timeZone` is not set.
+
+The webhook only counts the schedule's five fields. The reconciler
+therefore has the API server check the CronJob with a dry run before
+anything is applied, and a schedule the API server rejects (`61 3 * *
+*`) is a `ConfigRefused` that leaves the last good render running.
+Without `spec.librarian`, the CronJob and its ConfigMap are deleted. A
+hand delete or edit of either is put back.
+
+A unit's NetworkPolicy selects only that unit's pods, so it does not
+apply to the librarian's pods. The librarian reads dedicated
+KnowledgeBases with the mob's identity, which is the identity every
+instance of the mob already uses.
+
 ### Dedicated units and their NetworkPolicy
 
 A unit that serves a `placement: dedicated` KnowledgeBase also gets a
@@ -379,5 +418,9 @@ meerkat-mob#10 tracks these:
   `collections:`, so it waits on lazy mounts.
 - **KnowledgeBase status from instances.** `mounted`, `pages`,
   `contentGeneration` and `lastTraversal` are not filled in.
-- Scale-to-zero, the librarian CronJob, and acceptance on a real k3s
-  cluster.
+- **Librarian.** A scheduled run is report-only. Filing (`--apply`)
+  and rewrites (`--execute`) need a forge token, an intake store and
+  an agent executor in the pod, so they are not offered. Missing-link
+  and promotion findings need the traversal log, which the operator
+  does not render yet (`observability.traversal_log`).
+- Scale-to-zero, and acceptance on a real k3s cluster.

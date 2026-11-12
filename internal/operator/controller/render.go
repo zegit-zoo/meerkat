@@ -595,18 +595,10 @@ func s3CredentialEnv(c *v1alpha1.Credentials) []*corev1ac.EnvVarApplyConfigurati
 	}
 }
 
-// deploymentFor is u's Deployment, with the chart's security context
-// and probes. body is the content-source.yaml it mounts; res are the
-// container's resources (resourcesFor).
-func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte, res corev1.ResourceRequirements) *appsv1ac.DeploymentApplyConfiguration {
-	sum := sha256.Sum256(body)
-	probe := func(path string, period, failures int32) *corev1ac.ProbeApplyConfiguration {
-		return corev1ac.Probe().
-			WithHTTPGet(corev1ac.HTTPGetAction().WithPath(path).WithPort(intstr.FromString("http"))).
-			WithPeriodSeconds(period).
-			WithTimeoutSeconds(2).
-			WithFailureThreshold(failures)
-	}
+// instanceEnv is the environment every meerkat container of mob gets:
+// the cache and config locations, no update check, GOMEMLIMIT from res
+// and the S3 credentials by reference.
+func instanceEnv(mob *v1alpha1.MeerkatMob, res corev1.ResourceRequirements) []*corev1ac.EnvVarApplyConfiguration {
 	env := []*corev1ac.EnvVarApplyConfiguration{
 		corev1ac.EnvVar().WithName("XDG_CACHE_HOME").WithValue(cacheDir),
 		corev1ac.EnvVar().WithName("MEERKAT_NO_UPDATE_CHECK").WithValue("1"),
@@ -615,7 +607,12 @@ func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte,
 	if v := goMemLimit(res); v != "" {
 		env = append(env, corev1ac.EnvVar().WithName("GOMEMLIMIT").WithValue(v))
 	}
-	env = append(env, s3CredentialEnv(mob.Spec.Credentials)...)
+	return append(env, s3CredentialEnv(mob.Spec.Credentials)...)
+}
+
+// resourcesApply is res as an apply configuration, leaving out an empty
+// list.
+func resourcesApply(res corev1.ResourceRequirements) *corev1ac.ResourceRequirementsApplyConfiguration {
 	resources := corev1ac.ResourceRequirements()
 	if len(res.Requests) > 0 {
 		resources.WithRequests(res.Requests)
@@ -623,18 +620,19 @@ func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte,
 	if len(res.Limits) > 0 {
 		resources.WithLimits(res.Limits)
 	}
-	container := corev1ac.Container().
+	return resources
+}
+
+// meerkatContainer is a meerkat container running image with args, as
+// the chart runs it: non-root, read-only root filesystem, no
+// capabilities, the cache and content-source.yaml mounted.
+func meerkatContainer(mob *v1alpha1.MeerkatMob, image string, res corev1.ResourceRequirements, args ...string) *corev1ac.ContainerApplyConfiguration {
+	return corev1ac.Container().
 		WithName("meerkat").
 		WithImage(image).
-		WithArgs("mcp", "serve-http", "--host=0.0.0.0", "--port="+strconv.Itoa(serverPort), "--path="+serverPath).
-		WithPorts(corev1ac.ContainerPort().WithName("http").WithContainerPort(serverPort).WithProtocol(corev1.ProtocolTCP)).
-		WithEnv(env...).
-		// The listener opens only once content is resolved and indexed,
-		// so startup may take up to 10 minutes, as in the chart.
-		WithStartupProbe(probe("/livez", 5, 120)).
-		WithLivenessProbe(probe("/livez", 10, 3)).
-		WithReadinessProbe(probe("/readyz", 5, 2)).
-		WithResources(resources).
+		WithArgs(args...).
+		WithEnv(instanceEnv(mob, res)...).
+		WithResources(resourcesApply(res)).
 		WithSecurityContext(corev1ac.SecurityContext().
 			WithRunAsNonRoot(true).
 			WithRunAsUser(nonRootID).
@@ -647,7 +645,13 @@ func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte,
 			corev1ac.VolumeMount().WithName("cache").WithMountPath(cacheDir),
 			corev1ac.VolumeMount().WithName("content-source").WithMountPath(contentSourcePath).WithSubPath(contentSourceKey).WithReadOnly(true),
 		)
-	pod := corev1ac.PodSpec().
+}
+
+// meerkatPod is the pod spec around container: mob's ServiceAccount
+// without an API token, the restricted pod security context, an
+// emptyDir cache and the ConfigMap configMap's content-source.yaml.
+func meerkatPod(mob *v1alpha1.MeerkatMob, configMap string, container *corev1ac.ContainerApplyConfiguration) *corev1ac.PodSpecApplyConfiguration {
+	return corev1ac.PodSpec().
 		WithServiceAccountName(serviceAccountName(mob)).
 		// meerkat never talks to the Kubernetes API.
 		WithAutomountServiceAccountToken(false).
@@ -661,9 +665,30 @@ func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte,
 		WithVolumes(
 			corev1ac.Volume().WithName("cache").WithEmptyDir(corev1ac.EmptyDirVolumeSource().WithSizeLimit(resource.MustParse("1Gi"))),
 			corev1ac.Volume().WithName("content-source").WithConfigMap(corev1ac.ConfigMapVolumeSource().
-				WithName(u.Name).
+				WithName(configMap).
 				WithItems(corev1ac.KeyToPath().WithKey(contentSourceKey).WithPath(contentSourceKey))),
 		)
+}
+
+// deploymentFor is u's Deployment, with the chart's security context
+// and probes. body is the content-source.yaml it mounts; res are the
+// container's resources (resourcesFor).
+func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte, res corev1.ResourceRequirements) *appsv1ac.DeploymentApplyConfiguration {
+	sum := sha256.Sum256(body)
+	probe := func(path string, period, failures int32) *corev1ac.ProbeApplyConfiguration {
+		return corev1ac.Probe().
+			WithHTTPGet(corev1ac.HTTPGetAction().WithPath(path).WithPort(intstr.FromString("http"))).
+			WithPeriodSeconds(period).
+			WithTimeoutSeconds(2).
+			WithFailureThreshold(failures)
+	}
+	container := meerkatContainer(mob, image, res, "mcp", "serve-http", "--host=0.0.0.0", "--port="+strconv.Itoa(serverPort), "--path="+serverPath).
+		WithPorts(corev1ac.ContainerPort().WithName("http").WithContainerPort(serverPort).WithProtocol(corev1.ProtocolTCP)).
+		// The listener opens only once content is resolved and indexed,
+		// so startup may take up to 10 minutes, as in the chart.
+		WithStartupProbe(probe("/livez", 5, 120)).
+		WithLivenessProbe(probe("/livez", 10, 3)).
+		WithReadinessProbe(probe("/readyz", 5, 2))
 	return appsv1ac.Deployment(u.Name, mob.Namespace).
 		WithLabels(unitLabels(mob, u)).
 		WithOwnerReferences(ownerRef(mob)).
@@ -673,5 +698,5 @@ func deploymentFor(mob *v1alpha1.MeerkatMob, u *unit, image string, body []byte,
 			WithTemplate(corev1ac.PodTemplateSpec().
 				WithLabels(unitLabels(mob, u)).
 				WithAnnotations(map[string]string{annotationConfig: hex.EncodeToString(sum[:])}).
-				WithSpec(pod)))
+				WithSpec(meerkatPod(mob, u.Name, container))))
 }

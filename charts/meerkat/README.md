@@ -226,8 +226,8 @@ cluster. The CRDs, the ClusterRole's rules and the webhook
 configuration are rendered from `files/operator/`, copies of what
 `make crds` generates from the code, so they cannot drift from the binary.
 The ClusterRole lets the operator create, change and delete Deployments,
-Services, ConfigMaps, ServiceAccounts and NetworkPolicies. It grants no
-access to Secrets.
+Services, ConfigMaps, ServiceAccounts, NetworkPolicies and CronJobs (for
+a mob's scheduled librarian run). It grants no access to Secrets.
 
 The operator works only in `operator.watchNamespaces`, the release
 namespace by default. The chart binds the ClusterRole there alone, with

@@ -9,8 +9,10 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -113,8 +115,9 @@ func spew(s v1alpha1.MeerkatMobStatus) string {
 	return b.String()
 }
 
-// rendered lists the names of the Deployments, Services and ConfigMaps
-// mob controls, each sorted.
+// rendered lists the names of the Deployments, Services and unit
+// ConfigMaps mob controls, each sorted. The librarian's ConfigMap is
+// not a unit's; the librarian subtest checks it on its own.
 func (h *mobHarness) rendered(t *testing.T, mob *v1alpha1.MeerkatMob) (deps, svcs, cms []string) {
 	t.Helper()
 	var dl appsv1.DeploymentList
@@ -136,7 +139,8 @@ func (h *mobHarness) rendered(t *testing.T, mob *v1alpha1.MeerkatMob) (deps, svc
 		}
 	}
 	for i := range cl.Items {
-		if metav1.IsControlledBy(&cl.Items[i], mob) && cl.Items[i].DeletionTimestamp.IsZero() {
+		if metav1.IsControlledBy(&cl.Items[i], mob) && cl.Items[i].DeletionTimestamp.IsZero() &&
+			cl.Items[i].Labels[labelComponent] != librarianComponent {
 			cms = append(cms, cl.Items[i].Name)
 		}
 	}
@@ -551,4 +555,89 @@ func (h *mobHarness) dedicatedNetworkPolicy(t *testing.T) {
 	}
 	h.waitPolicies(t, got, "")
 	h.waitRendered(t, got, "iso-kb-iso-root,iso-kb-iso-secret")
+}
+
+// librarian checks spec.librarian against a real API server: the
+// CronJob and its ConfigMap appear with the schedule, a hand delete is
+// put back, a schedule the API server refuses is a ConfigRefused that
+// keeps the instances, and dropping spec.librarian prunes both.
+func (h *mobHarness) librarian(t *testing.T) {
+	mob := h.newMob("lib", v1alpha1.PlacementSingle)
+	mob.Spec.Librarian = &v1alpha1.Librarian{Schedule: "0 3 * * *"}
+	if err := h.c.Create(h.ctx, mob); err != nil {
+		t.Fatal(err)
+	}
+	got := h.waitMob(t, "lib", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered)
+	key := types.NamespacedName{Namespace: mobNS, Name: "lib-librarian"}
+	var cj batchv1.CronJob
+	eventually(t, "the librarian CronJob", func() (bool, string) {
+		if err := h.c.Get(h.ctx, key, &cj); err != nil {
+			return false, err.Error()
+		}
+		return cj.Spec.Schedule == "0 3 * * *", "schedule " + cj.Spec.Schedule
+	})
+	if !metav1.IsControlledBy(&cj, got) {
+		t.Errorf("the CronJob is not controlled by the mob: %+v", cj.OwnerReferences)
+	}
+	if args := strings.Join(cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0].Args, " "); args != "ingest --role=librarian" {
+		t.Errorf("args = %s", args)
+	}
+	var cm corev1.ConfigMap
+	if err := h.c.Get(h.ctx, key, &cm); err != nil {
+		t.Fatal(err)
+	}
+	for _, kb := range []string{"root", "platform", "vendors"} {
+		if !strings.Contains(cm.Data[contentSourceKey], "name: "+kb+"\n") {
+			t.Errorf("the librarian's config misses %s:\n%s", kb, cm.Data[contentSourceKey])
+		}
+	}
+	// The librarian is no instance: the units are what they were.
+	h.waitRendered(t, got, "lib-all")
+
+	if err := h.c.Delete(h.ctx, &cj); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the deleted CronJob is put back", func() (bool, string) {
+		var again batchv1.CronJob
+		if err := h.c.Get(h.ctx, key, &again); err != nil {
+			return false, err.Error()
+		}
+		return again.UID != cj.UID && again.DeletionTimestamp.IsZero(), "still the old one"
+	})
+
+	// Five fields get past the webhook; the API server's cron parser
+	// does not take them.
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "lib"}, mob); err != nil {
+		t.Fatal(err)
+	}
+	mob.Spec.Librarian.Schedule = "61 3 * * *"
+	if err := h.c.Update(h.ctx, mob); err != nil {
+		t.Fatal(err)
+	}
+	refused := h.waitMob(t, "lib", v1alpha1.ConditionRendered, metav1.ConditionFalse, v1alpha1.ReasonConfigRefused)
+	if msg := meta.FindStatusCondition(refused.Status.Conditions, v1alpha1.ConditionRendered).Message; !strings.Contains(msg, "spec.librarian") {
+		t.Errorf("refusal message = %q", msg)
+	}
+	if err := h.c.Get(h.ctx, key, &cj); err != nil || cj.Spec.Schedule != "0 3 * * *" {
+		t.Errorf("the last good CronJob did not stay: %v, schedule %q", err, cj.Spec.Schedule)
+	}
+	h.waitRendered(t, got, "lib-all")
+
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "lib"}, mob); err != nil {
+		t.Fatal(err)
+	}
+	mob.Spec.Librarian = nil
+	if err := h.c.Update(h.ctx, mob); err != nil {
+		t.Fatal(err)
+	}
+	h.waitMob(t, "lib", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered)
+	eventually(t, "the librarian is pruned", func() (bool, string) {
+		errCJ := h.c.Get(h.ctx, key, &batchv1.CronJob{})
+		errCM := h.c.Get(h.ctx, key, &corev1.ConfigMap{})
+		if !apierrors.IsNotFound(errCJ) || !apierrors.IsNotFound(errCM) {
+			return false, fmt.Sprintf("CronJob: %v, ConfigMap: %v", errCJ, errCM)
+		}
+		return true, ""
+	})
+	h.waitRendered(t, got, "lib-all")
 }
