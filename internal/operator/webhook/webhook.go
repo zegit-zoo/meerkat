@@ -168,6 +168,9 @@ func (v *MeerkatMobValidator) validate(ctx context.Context, mob *v1alpha1.Meerka
 	if s.Telemetry != nil && strings.HasPrefix(s.Telemetry.Endpoint, "http://") && !s.Telemetry.Insecure {
 		return nil, fmt.Errorf("spec.telemetry.endpoint %q is plaintext http; use https, or set insecure: true", s.Telemetry.Endpoint)
 	}
+	if tl := s.TraversalLog; tl != nil && strings.HasPrefix(tl.S3.Endpoint, "http://") && !tl.S3.Insecure {
+		return nil, fmt.Errorf("spec.traversalLog.s3.endpoint %q is plaintext http; use https, or set s3.insecure: true", tl.S3.Endpoint)
+	}
 	if s.Librarian != nil {
 		if f := strings.Fields(s.Librarian.Schedule); len(f) != 5 {
 			return nil, fmt.Errorf("spec.librarian.schedule must be a five-field cron expression, got %q", s.Librarian.Schedule)

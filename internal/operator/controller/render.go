@@ -28,6 +28,7 @@ import (
 	"github.com/zegit-zoo/meerkat/internal/operator/api/v1alpha1"
 	"github.com/zegit-zoo/meerkat/internal/refresh"
 	"github.com/zegit-zoo/meerkat/internal/telemetry"
+	"github.com/zegit-zoo/meerkat/internal/traversal"
 )
 
 // Labels on everything the MeerkatMob reconciler renders. The mob and
@@ -285,6 +286,49 @@ func renderTelemetry(t *v1alpha1.Telemetry) *telemetry.Config {
 		Traces: telemetry.TraceConfig{Enabled: true},
 		OTLP:   telemetry.OTLPConfig{Endpoint: t.Endpoint, Protocol: t.Protocol, Insecure: t.Insecure},
 	}
+}
+
+// traversalKeyEnv is the variable an instance reads the traversal log's
+// hashing key from. It is set from the Secret spec.traversalLog names,
+// never written into content-source.yaml.
+const traversalKeyEnv = "TRAVERSAL_LOG_HMAC_KEY" //nolint:gosec // G101: false positive — a variable name, not a credential.
+
+// renderObservability is the observability: block every instance of a
+// mob with spec s shares, and the librarian too: spec.telemetry's OTLP
+// export and spec.traversalLog's log. Nil when neither is set.
+func renderObservability(s *v1alpha1.MeerkatMobSpec) *telemetry.Config {
+	obs := renderTelemetry(s.Telemetry)
+	if tl := s.TraversalLog; tl != nil {
+		if obs == nil {
+			obs = &telemetry.Config{}
+		}
+		obs.TraversalLog = renderTraversalLog(tl)
+	}
+	return obs
+}
+
+// renderTraversalLog is spec.traversalLog as the server's
+// observability.traversal_log, on backend s3, reading its key from
+// traversalKeyEnv. The server's own daily write caps stay at their
+// defaults; they count per process, so a mob of N instances may write
+// up to N times them in a day.
+func renderTraversalLog(tl *v1alpha1.TraversalLog) *traversal.Config {
+	c := &traversal.Config{
+		Backend:    traversal.BackendS3,
+		Bucket:     tl.S3.Bucket,
+		Prefix:     tl.S3.Prefix,
+		Endpoint:   tl.S3.Endpoint,
+		Region:     tl.S3.Region,
+		PathStyle:  tl.S3.PathStyle,
+		Insecure:   tl.S3.Insecure,
+		HMACKeyEnv: traversalKeyEnv,
+		Query:      tl.Query,
+	}
+	if tl.RetentionDays != nil {
+		d := int(*tl.RetentionDays)
+		c.RetentionDays = &d
+	}
+	return c
 }
 
 // renderConfig is u's content-source.yaml, checked the way the server
@@ -595,9 +639,23 @@ func s3CredentialEnv(c *v1alpha1.Credentials) []*corev1ac.EnvVarApplyConfigurati
 	}
 }
 
+// traversalKeyEnvVar maps the hmac-key of the Secret spec.traversalLog
+// names to traversalKeyEnv. It is not optional: without the key an
+// instance would refuse to start anyway, and a pod waiting in
+// CreateContainerConfigError says why.
+func traversalKeyEnvVar(tl *v1alpha1.TraversalLog) []*corev1ac.EnvVarApplyConfiguration {
+	if tl == nil {
+		return nil
+	}
+	return []*corev1ac.EnvVarApplyConfiguration{
+		corev1ac.EnvVar().WithName(traversalKeyEnv).WithValueFrom(corev1ac.EnvVarSource().
+			WithSecretKeyRef(corev1ac.SecretKeySelector().WithName(tl.HMACKeySecretRef).WithKey(v1alpha1.TraversalLogHMACKeyKey).WithOptional(false))),
+	}
+}
+
 // instanceEnv is the environment every meerkat container of mob gets:
-// the cache and config locations, no update check, GOMEMLIMIT from res
-// and the S3 credentials by reference.
+// the cache and config locations, no update check, GOMEMLIMIT from res,
+// the S3 credentials and the traversal log's key by reference.
 func instanceEnv(mob *v1alpha1.MeerkatMob, res corev1.ResourceRequirements) []*corev1ac.EnvVarApplyConfiguration {
 	env := []*corev1ac.EnvVarApplyConfiguration{
 		corev1ac.EnvVar().WithName("XDG_CACHE_HOME").WithValue(cacheDir),
@@ -607,7 +665,8 @@ func instanceEnv(mob *v1alpha1.MeerkatMob, res corev1.ResourceRequirements) []*c
 	if v := goMemLimit(res); v != "" {
 		env = append(env, corev1ac.EnvVar().WithName("GOMEMLIMIT").WithValue(v))
 	}
-	return append(env, s3CredentialEnv(mob.Spec.Credentials)...)
+	env = append(env, s3CredentialEnv(mob.Spec.Credentials)...)
+	return append(env, traversalKeyEnvVar(mob.Spec.TraversalLog)...)
 }
 
 // resourcesApply is res as an apply configuration, leaving out an empty

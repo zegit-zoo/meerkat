@@ -745,3 +745,100 @@ func (h *mobHarness) accessIdentities(t *testing.T) {
 	}
 	h.waitRendered(t, got, "acl-all,acl-kb-acl-secret")
 }
+
+// traversalLog checks spec.traversalLog against a real API server: the
+// instance's and the librarian's content-source.yaml both carry the
+// log, both pods read the key from the Secret, a plaintext endpoint
+// without insecure is refused at admission, and dropping the block
+// renders the log away again (meerkat-mob#10).
+func (h *mobHarness) traversalLog(t *testing.T) {
+	mob := h.newMob("tlog", v1alpha1.PlacementSingle)
+	mob.Spec.Librarian = &v1alpha1.Librarian{Schedule: "0 3 * * *"}
+	mob.Spec.TraversalLog = &v1alpha1.TraversalLog{
+		S3:               v1alpha1.S3Source{Bucket: "telemetry", Prefix: "tlog/", Endpoint: "http://garage:3900", Region: "garage", PathStyle: true},
+		HMACKeySecretRef: "tlog-key",
+	}
+	// Plaintext without insecure: refused before anything is stored.
+	if err := h.c.Create(h.ctx, mob.DeepCopy()); err == nil || !strings.Contains(err.Error(), "insecure") {
+		t.Fatalf("a plaintext traversal log endpoint was admitted: %v", err)
+	}
+	mob.Spec.TraversalLog.S3.Insecure = true
+	if err := h.c.Create(h.ctx, mob); err != nil {
+		t.Fatal(err)
+	}
+	got := h.waitMob(t, "tlog", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered)
+	if got.Spec.TraversalLog.Query != v1alpha1.TraversalQueryOmit {
+		t.Errorf("query defaulted to %q, want omit", got.Spec.TraversalLog.Query)
+	}
+
+	config := func(name string) (*contentsource.Config, error) {
+		var cm corev1.ConfigMap
+		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: name}, &cm); err != nil {
+			return nil, err
+		}
+		cfg, err := contentsource.Parse([]byte(cm.Data[contentSourceKey]), name)
+		return &cfg, err
+	}
+	for _, name := range []string{"tlog-all", "tlog-librarian"} {
+		eventually(t, name+" carries the traversal log", func() (bool, string) {
+			cfg, err := config(name)
+			if err != nil {
+				return false, err.Error()
+			}
+			if cfg.Observability == nil || cfg.Observability.TraversalLog == nil {
+				return false, "no traversal_log"
+			}
+			tl := cfg.Observability.TraversalLog
+			return tl.Bucket == "telemetry" && tl.Prefix == "tlog/" && tl.HMACKeyEnv == traversalKeyEnv && tl.Query == "omit",
+				fmt.Sprintf("%+v", tl)
+		})
+	}
+	keyRef := func(c corev1.Container) string {
+		for _, e := range c.Env {
+			if e.Name == traversalKeyEnv && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+				return e.ValueFrom.SecretKeyRef.Name + "/" + e.ValueFrom.SecretKeyRef.Key
+			}
+		}
+		return ""
+	}
+	want := "tlog-key/" + v1alpha1.TraversalLogHMACKeyKey
+	var dep appsv1.Deployment
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "tlog-all"}, &dep); err != nil {
+		t.Fatal(err)
+	}
+	if got := keyRef(dep.Spec.Template.Spec.Containers[0]); got != want {
+		t.Errorf("instance key = %q, want %q", got, want)
+	}
+	var cj batchv1.CronJob
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "tlog-librarian"}, &cj); err != nil {
+		t.Fatal(err)
+	}
+	if got := keyRef(cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0]); got != want {
+		t.Errorf("librarian key = %q, want %q", got, want)
+	}
+
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "tlog"}, mob); err != nil {
+			return err
+		}
+		mob.Spec.TraversalLog = nil
+		return h.c.Update(h.ctx, mob)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"tlog-all", "tlog-librarian"} {
+		eventually(t, name+" drops the traversal log", func() (bool, string) {
+			cfg, err := config(name)
+			if err != nil {
+				return false, err.Error()
+			}
+			return cfg.Observability == nil || cfg.Observability.TraversalLog == nil, "traversal_log still rendered"
+		})
+	}
+	eventually(t, "the instance stops reading the key", func() (bool, string) {
+		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "tlog-all"}, &dep); err != nil {
+			return false, err.Error()
+		}
+		return keyRef(dep.Spec.Template.Spec.Containers[0]) == "", "key still mapped"
+	})
+}
