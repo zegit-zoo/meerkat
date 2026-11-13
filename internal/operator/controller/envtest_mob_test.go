@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/zegit-zoo/meerkat/internal/contentsource"
 	"github.com/zegit-zoo/meerkat/internal/operator/api/v1alpha1"
 )
 
@@ -640,4 +641,100 @@ func (h *mobHarness) librarian(t *testing.T) {
 		return true, ""
 	})
 	h.waitRendered(t, got, "lib-all")
+}
+
+// accessIdentities checks access.identities against a real API server:
+// the dedicated unit's rules are narrowed to the identities while the
+// shared unit keeps the mob's block, a changed identity list re-renders,
+// and an anonymous rule naming the KnowledgeBase is a ConfigRefused that
+// keeps the last good render (D-11, meerkat-mob#10).
+func (h *mobHarness) accessIdentities(t *testing.T) {
+	src := func(p string) v1alpha1.KnowledgeBaseSource {
+		return v1alpha1.KnowledgeBaseSource{S3: &v1alpha1.S3Source{Bucket: "kb", Prefix: p + "/", Endpoint: "https://s3.example.net"}}
+	}
+	const auth = "resource: https://meerkat.example/mcp\nrules:\n  - name: team\n    groups: [team]\n    collections: ['*']\n  - name: named\n    subjects: [alice, mallory]\n    collections: [acl-secret]\n"
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "acl-auth", Namespace: mobNS},
+		Data:       map[string]string{v1alpha1.AuthConfigMapKey: auth},
+	}
+	secret := &v1alpha1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: "acl-secret", Namespace: mobNS},
+		Spec: v1alpha1.KnowledgeBaseSpec{Parent: "acl-root", Placement: v1alpha1.PlacementDedicated, Source: src("acl-secret"),
+			Access: &v1alpha1.Access{Identities: []string{"alice", "bob"}}},
+	}
+	for _, o := range []client.Object{
+		cm,
+		&v1alpha1.KnowledgeBase{ObjectMeta: metav1.ObjectMeta{Name: "acl-root", Namespace: mobNS}, Spec: v1alpha1.KnowledgeBaseSpec{Source: src("acl-root")}},
+		secret,
+	} {
+		if err := h.c.Create(h.ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mob := h.newMob("acl", v1alpha1.PlacementSingle)
+	mob.Spec.Root = "acl-root"
+	mob.Spec.Auth.ConfigMapRef = "acl-auth"
+	if err := h.c.Create(h.ctx, mob); err != nil {
+		t.Fatal(err)
+	}
+	got := h.waitMob(t, "acl", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered)
+	h.waitRendered(t, got, "acl-all,acl-kb-acl-secret")
+
+	// subjects reads each rule's subjects from a unit's rendered file.
+	subjects := func(unitName string) (string, error) {
+		var c corev1.ConfigMap
+		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: unitName}, &c); err != nil {
+			return "", err
+		}
+		cfg, err := contentsource.Parse([]byte(c.Data[contentSourceKey]), unitName)
+		if err != nil {
+			return "", err
+		}
+		var out []string
+		for _, r := range cfg.Auth.Rules {
+			out = append(out, r.Name+"="+strings.Join(r.Subjects, "|"))
+		}
+		return strings.Join(out, " "), nil
+	}
+	waitSubjects := func(unitName, want string) {
+		t.Helper()
+		eventually(t, unitName+" rules "+want, func() (bool, string) {
+			s, err := subjects(unitName)
+			if err != nil {
+				return false, err.Error()
+			}
+			return s == want, s
+		})
+	}
+	waitSubjects("acl-kb-acl-secret", "team=alice|bob named=alice")
+	waitSubjects("acl-all", "team= named=alice|mallory")
+
+	// A changed list re-renders the unit; with no identity left in a
+	// rule's subjects, the rule goes.
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "acl-secret"}, secret); err != nil {
+		t.Fatal(err)
+	}
+	secret.Spec.Access.Identities = []string{"bob"}
+	if err := h.c.Update(h.ctx, secret); err != nil {
+		t.Fatal(err)
+	}
+	waitSubjects("acl-kb-acl-secret", "team=bob")
+
+	// An anonymous rule publishing the KnowledgeBase cannot be narrowed:
+	// the mob is refused and the last good render stays.
+	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "acl-auth"}, cm); err != nil {
+		t.Fatal(err)
+	}
+	cm.Data[v1alpha1.AuthConfigMapKey] = auth + "  - name: public\n    anonymous: true\n    collections: [acl-secret]\n"
+	if err := h.c.Update(h.ctx, cm); err != nil {
+		t.Fatal(err)
+	}
+	refused := h.waitMob(t, "acl", v1alpha1.ConditionRendered, metav1.ConditionFalse, v1alpha1.ReasonConfigRefused)
+	if msg := meta.FindStatusCondition(refused.Status.Conditions, v1alpha1.ConditionRendered).Message; !strings.Contains(msg, "anonymous") || !strings.Contains(msg, "acl-secret") {
+		t.Errorf("refusal message = %q", msg)
+	}
+	if s, err := subjects("acl-kb-acl-secret"); err != nil || s != "team=bob" {
+		t.Errorf("the last good render did not stay: %q, %v", s, err)
+	}
+	h.waitRendered(t, got, "acl-all,acl-kb-acl-secret")
 }

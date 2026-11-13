@@ -161,6 +161,7 @@ func TestEnvtest(t *testing.T) {
 	t.Run("mob refuses to take over a ServiceAccount", mobs.serviceAccountInTheWay)
 	t.Run("dedicated units get a NetworkPolicy, pruned when they go", mobs.dedicatedNetworkPolicy)
 	t.Run("mob librarian runs as a CronJob, pruned when it goes", mobs.librarian)
+	t.Run("access.identities narrows a dedicated unit's rules", mobs.accessIdentities)
 
 	t.Run("loop past admission is reported, and clears when fixed", func(t *testing.T) {
 		// Stand in for two concurrent creates that each passed the

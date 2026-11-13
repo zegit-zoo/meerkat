@@ -337,6 +337,36 @@ NetworkPolicy support ignores it; the chart README's
 [Operator NetworkPolicy](../../charts/meerkat/README.md#operator-networkpolicy)
 limits apply here too.
 
+### Dedicated units and their identities
+
+A dedicated KnowledgeBase with `access.identities` is kept to those
+identities by its unit's `auth:` block (decision D-11 in meerkat-mob).
+Rules only add grants and there is no deny rule, so the operator
+narrows the rules that grant the KnowledgeBase rather than adding one:
+
+- every rule that grants it, by name or by `*`, keeps only the subjects
+  that are also identities;
+- a rule with no `subjects:` gets the identities as its subjects;
+- a rule left with no subject is dropped from that unit, which serves
+  the KnowledgeBase alone, so nothing else is taken away;
+- groups, emails, tenant, issuer and capabilities stay as written, and
+  since the selectors of one rule are a conjunction, a narrowed rule
+  still needs them all.
+
+The mob is refused (`ConfigRefused`) when an anonymous rule grants the
+KnowledgeBase, by name or by `*`, or when `allow_unauthenticated` is
+set, because neither leaves a subject to narrow. An empty identity is
+refused too. Other units, and the librarian, get the mob's block as it
+is; repeated identities count once.
+
+Identities are matched against the token's `sub`. With one provider
+that is unambiguous. With more than one, every rule that grants the
+KnowledgeBase must carry `issuer:`, or the mob is refused, so a `sub`
+from another provider cannot match: the server already refuses
+`subjects:` without `issuer:` in that case, and the refusal names the
+KnowledgeBase. Matching an identity on issuer and subject together is
+not offered yet.
+
 ### Which image a mob runs
 
 `spec.image` is a privilege boundary: without a check, whoever can write
@@ -404,11 +434,11 @@ meerkat-mob#10 tracks these:
   another unit is not yet rewritten to the sibling Service, so a hop
   does not cross processes, and `mount: lazy` is not yet rendered
   (`collections:` has no lazy mount).
-- **Access.** `access.paths` and `access.identities` are not yet mapped
-  to authz rules. Rules only add grants (there is no deny rule), so
-  keeping a KnowledgeBase to its listed identities means narrowing every
-  other rule that names it or `*`, which is a change to the auth block
-  as a whole rather than one more rule.
+- **Access.** `access.paths` is not mapped to anything yet, and
+  `access.identities` only on a dedicated KnowledgeBase (see
+  [Dedicated units and their identities](#dedicated-units-and-their-identities)).
+  On a shared one it is not enforced: its unit serves other
+  KnowledgeBases through the same rules.
 - **Contract and per-unit identity.** `contract` is not rendered,
   because the server's `update:` block is structured and the CRD field
   is free text. Credentials are per mob, so a dedicated KnowledgeBase
