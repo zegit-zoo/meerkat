@@ -220,7 +220,11 @@ func (r *MeerkatMobReconciler) plan(ctx context.Context, mob *v1alpha1.MeerkatMo
 
 	p := &plan{image: image, kbs: len(kbs)}
 	for _, u := range planUnits(mob, kbs) {
-		body, err := renderConfig(&u, auth, obs)
+		ua, err := authFor(&u, auth)
+		if err != nil {
+			return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
+		}
+		body, err := renderConfig(&u, ua, obs)
 		if err != nil {
 			return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
 		}

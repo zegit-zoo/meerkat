@@ -179,8 +179,12 @@ type Access struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=64
 	Paths []string `json:"paths,omitempty"`
-	// Identities lists the principals (authz subjects) that may reach
-	// it; empty means anyone the server's own rules admit.
+	// Identities lists the principals (authz subjects, matched against
+	// the token's sub) that may reach it; empty means anyone the
+	// server's own rules admit. It is enforced for a dedicated
+	// KnowledgeBase only: the operator narrows every rule of its unit
+	// that grants it to these subjects, and refuses the mob when an
+	// anonymous rule grants it or allow_unauthenticated is set.
 	// +optional
 	// +kubebuilder:validation:MaxItems=256
 	Identities []string `json:"identities,omitempty"`
