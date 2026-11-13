@@ -437,8 +437,9 @@ meerkat-mob#10 tracks these:
 - **Access.** `access.paths` is not mapped to anything yet, and
   `access.identities` only on a dedicated KnowledgeBase (see
   [Dedicated units and their identities](#dedicated-units-and-their-identities)).
-  On a shared one it is not enforced: its unit serves other
-  KnowledgeBases through the same rules.
+  On a shared one it is not enforced, because its unit serves other
+  KnowledgeBases through the same rules. The webhook admits such a
+  KnowledgeBase with a warning that says so.
 - **Contract and per-unit identity.** `contract` is not rendered,
   because the server's `update:` block is structured and the CRD field
   is free text. Credentials are per mob, so a dedicated KnowledgeBase

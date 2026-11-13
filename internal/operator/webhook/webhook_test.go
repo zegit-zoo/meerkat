@@ -412,3 +412,25 @@ func TestMeerkatMob_ImagePolicy(t *testing.T) {
 		t.Fatalf("no policy: %v", err)
 	}
 }
+
+func TestKnowledgeBase_IdentitiesOnASharedKBAreAdmittedWithAWarning(t *testing.T) {
+	v := &KnowledgeBaseValidator{Reader: reader(t)}
+	shared := kb("shared", "")
+	shared.Spec.Access = &v1alpha1.Access{Identities: []string{"alice"}}
+	w, err := v.ValidateCreate(context.Background(), shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w) != 1 || !strings.Contains(w[0], "enforced only with placement: dedicated") {
+		t.Fatalf("shared: warnings = %v", w)
+	}
+	// An update that does not touch the tree still warns.
+	if w, err := v.ValidateUpdate(context.Background(), shared, shared); err != nil || len(w) != 1 {
+		t.Fatalf("update: warnings = %v, err %v", w, err)
+	}
+	dedicated := shared.DeepCopy()
+	dedicated.Spec.Placement = v1alpha1.PlacementDedicated
+	if w, err := v.ValidateCreate(context.Background(), dedicated); err != nil || len(w) != 0 {
+		t.Fatalf("dedicated: warnings = %v, err %v", w, err)
+	}
+}

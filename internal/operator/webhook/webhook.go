@@ -73,8 +73,9 @@ func (v *KnowledgeBaseValidator) validate(ctx context.Context, kb *v1alpha1.Know
 	if err := validateSource(&kb.Spec.Source); err != nil {
 		return nil, err
 	}
+	warn := accessWarnings(kb)
 	if !tree {
-		return nil, nil
+		return warn, nil
 	}
 	if p := kb.Spec.Parent; p != "" {
 		// The CRD's pattern says the same; a name no object can have
@@ -88,7 +89,20 @@ func (v *KnowledgeBaseValidator) validate(ctx context.Context, kb *v1alpha1.Know
 		// Fail closed: the tree cannot be checked, so it is not admitted.
 		return nil, fmt.Errorf("listing KnowledgeBases in %q to check the tree: %w", kb.Namespace, err)
 	}
-	return checkTree(kb, list.Items)
+	w, err := checkTree(kb, list.Items)
+	return append(warn, w...), err
+}
+
+// accessWarnings says when access.identities will not be enforced: the
+// operator narrows the rules to them for a dedicated KnowledgeBase only,
+// because a shared one's instance serves others through the same rules
+// (D-11, meerkat-mob#10).
+func accessWarnings(kb *v1alpha1.KnowledgeBase) admission.Warnings {
+	if kb.Spec.Access == nil || len(kb.Spec.Access.Identities) == 0 || kb.Spec.Placement == v1alpha1.PlacementDedicated {
+		return nil
+	}
+	return admission.Warnings{"spec.access.identities is enforced only with placement: dedicated; " +
+		"this KnowledgeBase is shared, so every identity the mob's rules admit can reach it"}
 }
 
 // validateSource repeats the CRD's own rules, so that a cluster that

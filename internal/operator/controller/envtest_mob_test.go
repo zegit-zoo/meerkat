@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/zegit-zoo/meerkat/internal/contentsource"
@@ -711,22 +712,28 @@ func (h *mobHarness) accessIdentities(t *testing.T) {
 
 	// A changed list re-renders the unit; with no identity left in a
 	// rule's subjects, the rule goes.
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "acl-secret"}, secret); err != nil {
-		t.Fatal(err)
-	}
-	secret.Spec.Access.Identities = []string{"bob"}
-	if err := h.c.Update(h.ctx, secret); err != nil {
+	// The reconcilers write status meanwhile, so each edit retries on a
+	// conflict.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "acl-secret"}, secret); err != nil {
+			return err
+		}
+		secret.Spec.Access.Identities = []string{"bob"}
+		return h.c.Update(h.ctx, secret)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	waitSubjects("acl-kb-acl-secret", "team=bob")
 
 	// An anonymous rule publishing the KnowledgeBase cannot be narrowed:
 	// the mob is refused and the last good render stays.
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "acl-auth"}, cm); err != nil {
-		t.Fatal(err)
-	}
-	cm.Data[v1alpha1.AuthConfigMapKey] = auth + "  - name: public\n    anonymous: true\n    collections: [acl-secret]\n"
-	if err := h.c.Update(h.ctx, cm); err != nil {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "acl-auth"}, cm); err != nil {
+			return err
+		}
+		cm.Data[v1alpha1.AuthConfigMapKey] = auth + "  - name: public\n    anonymous: true\n    collections: [acl-secret]\n"
+		return h.c.Update(h.ctx, cm)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	refused := h.waitMob(t, "acl", v1alpha1.ConditionRendered, metav1.ConditionFalse, v1alpha1.ReasonConfigRefused)
