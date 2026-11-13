@@ -6,8 +6,8 @@
 # Two stages for the meerkat image (the builder is split into a shared
 # `source` stage and the compile; `--target operator` builds the
 # operator image, see below):
-#   builder — golang:1.26.10-bookworm, matching go.mod's toolchain
-#             (`toolchain go1.26.10`) exactly, so the binary this image
+#   builder — golang:1.26.11-bookworm, matching go.mod's toolchain
+#             (`toolchain go1.26.11`) exactly, so the binary this image
 #             ships is built with the same compiler `make build`/CI use.
 #   final   — gcr.io/distroless/static-debian12:nonroot: no shell, no
 #             package manager, ca-certificates already present, and
@@ -25,7 +25,7 @@
 # TARGETOS/TARGETARCH are populated automatically by buildx; see
 # .github/workflows/release.yml.
 
-ARG GO_VERSION=1.26.10
+ARG GO_VERSION=1.26.11
 
 # --platform=$BUILDPLATFORM pins the builder to the *host* (runner)
 # architecture regardless of the target platform buildx is currently
@@ -33,7 +33,7 @@ ARG GO_VERSION=1.26.10
 # build` RUN below), so this avoids running the compiler itself under
 # QEMU emulation for the non-native arch — only the trivial final-stage
 # COPY needs to happen per target platform, not the compile.
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS source
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS source
 WORKDIR /src
 
 # Cache module downloads independently of source changes.
