@@ -58,7 +58,7 @@ MCP caller, so:
 `mk ingest --role <researcher|validator|librarian> --from intake`.
 The executor is the existing one — an agent CLI (`opencode run` or
 `claude`) run in the content working copy and told what to do by an
-instruction — so a mongoose skill or any other executor can replace it
+instruction — so any other executor can replace it
 later. What differs per role is the prompt, the instruction and the
 success check. Prompts come from the content repo's
 `ingestion/prompts/<role>.md` when present, else the built-ins in
@@ -358,7 +358,7 @@ listing), `meerkat_librarian_findings_total{kind}`,
 - Automated page moves for a promotion; only the root pointer is filed.
 - Attachments under `raw/<…>/<id>/attachments/`; the layout leaves
   room for them.
-- A mongoose executor; the executor seam is unchanged.
+- A mongoose executor (mongoose is deprecated); the executor seam is unchanged.
 - The copied-authority refactor (replacing pages copied from an
   authority with pointers to the tools it exposes, such as its MCP
   server) is designed, not built, in

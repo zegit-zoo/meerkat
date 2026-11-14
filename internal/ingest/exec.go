@@ -68,8 +68,8 @@ type ExecEnv struct {
 }
 
 // Executor runs a single ingestion Task and reports the outcome. The default
-// implementation spawns `opencode run`; the interface lets a direct-SDK, CI,
-// or mongoose-skill executor drop in without touching the planner or the Run
+// implementation spawns `opencode run`; the interface lets a direct-SDK or CI
+// executor drop in without touching the planner or the Run
 // control loop.
 type Executor interface {
 	// Name identifies the executor for diagnostics.
