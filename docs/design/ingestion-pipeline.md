@@ -19,7 +19,7 @@ Decisions taken (see the design forks):
 
 1. **Pluggable executor.** Define an `Executor` interface; `opencode` is the
    default implementation; the planner output (`Task`) is unchanged so other
-   executors (direct SDK, CI, a mongoose skill) can drop in later.
+   executors (direct SDK, CI) can drop in later.
 2. **Working copy + branch derive from `content-source.yaml`.** Ingest writes
    to the same `git`/`submodule`/`local` source it embeds from; the push
    branch comes from `content.branch` (or `content.ref` if branch-like, else
@@ -118,7 +118,7 @@ type ExecEnv struct {
   CLI: `opencode` (`opencode run --dir <wd>`) and `claude` (Claude Code,
   `claude -p` with cwd = working copy). `--executor opencode|claude` selects
   it; both share the per-page commit/push instruction parameterized by
-  `env.Branch`. A direct-SDK / mongoose-skill executor can implement the same
+  `env.Branch`. A direct-SDK executor can implement the same
   interface without the agent-CLI shape.
 - `Run(ctx, tasks, opts)` builds the default executor when none is supplied,
   preserving the existing concurrency / consecutive-failure / skip-reviewed
@@ -166,10 +166,11 @@ type ExecEnv struct {
 
 ## Open / follow-ups
 
-- **Direct-SDK / mongoose-skill executors** — the interface now has two
+- **Direct-SDK executor** — the interface now has two
   agent-CLI implementations (opencode, claude); a headless in-process
   Anthropic-SDK executor (meerkat fetches sources + writes + pushes in Go,
-  holds an API key) and a mongoose-skill executor remain as follow-ups.
+  holds an API key) remains a follow-up. A mongoose-skill executor was
+  once planned here too; mongoose is deprecated (2026-09-18), so it is dropped.
 - **Multi-host sub-agent fetch tooling** is the sub-agent's concern (gh/glab
   MCP tools); meerkat only conveys `host` in the prompt.
 - **`mk ingest sources` / planner enrichment** generalization beyond category

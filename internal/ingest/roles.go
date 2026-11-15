@@ -29,8 +29,8 @@ import (
 // idempotent. The librarian role is librarian.go.
 //
 // The executor is unchanged — an agent CLI run in the content working
-// copy, told what to do by an instruction — so a mongoose skill or any
-// other executor can replace it later. What changes per role is the
+// copy, told what to do by an instruction — so any other executor can
+// replace it later. What changes per role is the
 // instruction and the success check.
 
 // Role is who an ingest run acts as.

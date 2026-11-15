@@ -1104,7 +1104,7 @@ discovers the set, and what is in each, from the tool list it already
 fetches:
 
 ```text
-Mounted collections: internal — Swish systems and operations;
+Mounted collections: internal — Acme systems and operations;
 cra — EU Cyber Resilience Act guidance.
 ```
 
