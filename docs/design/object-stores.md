@@ -94,6 +94,13 @@ visible by one rename once a completion marker is written.
 - **Interrupted fills are cleaned up.** `.fetch-*` and `.stale-*`
   directories older than a day are removed the next time an entry is
   filled in the same directory.
+- **Nothing leaves the location's directory, and no symlink is
+  followed.** Only a real directory holding a regular completion marker
+  is a cache hit. A symlink at a cache path (or as the marker) is an
+  incomplete leftover: the link itself is moved aside and removed, and
+  the tree it pointed at is left alone. Pruning and staging cleanup only
+  consider real directories directly beside the entry being installed,
+  and removing a tree removes links inside it without following them.
 
 Because an ETag is not guaranteed content-derived under every
 encryption mode, the prefix-mode listing fingerprint for S3 covers

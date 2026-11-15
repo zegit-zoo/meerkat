@@ -41,9 +41,20 @@ func urlCacheDir(sha256hex string) (string, error) {
 
 // isCacheComplete reports whether dir is a fully-extracted, cache-hit-
 // eligible directory (see completionMarker).
+//
+// Neither dir nor its marker may be a symlink: every entry this package
+// installs is a real directory renamed into place, so a link at a cache
+// path was put there by something else, and following it would serve a
+// tree from outside the cache root as a cache hit (meerkat#237). Such a
+// link is treated as an incomplete leftover, which installCacheDir moves
+// aside without following.
 func isCacheComplete(dir string) bool {
-	fi, err := os.Stat(filepath.Join(dir, completionMarker))
-	return err == nil && !fi.IsDir()
+	di, err := os.Lstat(dir)
+	if err != nil || !di.IsDir() {
+		return false
+	}
+	fi, err := os.Lstat(filepath.Join(dir, completionMarker))
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // maxDownloadBytes bounds the raw (compressed) download for a type: url
