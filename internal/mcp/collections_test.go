@@ -47,7 +47,7 @@ func describedRegistry(t *testing.T) *collections.Registry {
 	internal := collections.FromPages("internal", []kb.Page{
 		testPage("systems/paging", "Paging", "who to page during an incident", "systems", "reviewed", "team-a"),
 	})
-	internal.Source.Description = "Swish systems and operations"
+	internal.Source.Description = "Acme systems and operations"
 	internal.Source.Update = &contentsource.UpdateSpec{
 		Method:       contentsource.UpdateMergeRequest,
 		Repo:         "https://github.com/example-org/handbook.git",
@@ -80,7 +80,7 @@ func describedRegistry(t *testing.T) *collections.Registry {
 func TestTools_DescribeCollectionDescriptions(t *testing.T) {
 	reg := describedRegistry(t)
 	const (
-		wantInternal = "internal — Swish systems and operations"
+		wantInternal = "internal — Acme systems and operations"
 		wantCRA      = "cra — EU Cyber Resilience Act guidance"
 	)
 	for _, tool := range []struct {
@@ -150,7 +150,7 @@ func TestTools_SingleCollectionDescriptionStaysAShortPhrase(t *testing.T) {
 	only := collections.FromPages("handbook", []kb.Page{
 		testPage("handbook/onboarding", "Onboarding", "how we onboard", "handbook", "reviewed", "team-a"),
 	})
-	only.Source.Description = "How Swish works, for people and agents"
+	only.Source.Description = "How Acme works, for people and agents"
 	reg, err := collections.New(only)
 	if err != nil {
 		t.Fatalf("collections.New: %v", err)
@@ -158,7 +158,7 @@ func TestTools_SingleCollectionDescriptionStaysAShortPhrase(t *testing.T) {
 	t.Cleanup(func() { _ = reg.Close() })
 
 	arg := collectionArgDescription(t, searchTool(reg))
-	if want := "mounts a single collection (handbook — How Swish works, for people and agents)"; !strings.Contains(arg, want) {
+	if want := "mounts a single collection (handbook — How Acme works, for people and agents)"; !strings.Contains(arg, want) {
 		t.Errorf("collection argument = %q, want it to contain %q", arg, want)
 	}
 	if strings.Contains(arg, "Mounted collections:") || strings.Contains(arg, ";") {

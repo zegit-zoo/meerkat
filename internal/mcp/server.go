@@ -407,7 +407,7 @@ func toolFilter(reg *collections.Registry) mcpserver.ToolFilterFunc {
 // name, and — when the operator configured one — that collection's
 // description after an em dash, entries separated by "; ":
 //
-//	internal — Swish systems and operations; cra — EU Cyber Resilience Act guidance
+//	internal — Acme systems and operations; cra — EU Cyber Resilience Act guidance
 //
 // It is the ONE place this formatting lives. The "collection" argument's
 // description and the tool prose that repeats it are two renderings of
