@@ -199,7 +199,11 @@ copying — usable as a CI lint on `content-source.yaml`.
   falling back to a shared temp directory); the tool checks out the exact
   pinned ref and records the resolved SHA (so a mutated cache is
   detectable via the stamp). The clone URL is passed after `--`, so it is
-  never parsed as a git option.
+  never parsed as a git option. The runtime cache that `url`, `gcs` and
+  `s3` sources are fetched into accepts only real directories with a
+  regular completion marker as cache hits: a symlink at a cache path is
+  replaced, never followed (see
+  [object-stores.md](object-stores.md#the-on-disk-cache)).
 
 ## Migration
 

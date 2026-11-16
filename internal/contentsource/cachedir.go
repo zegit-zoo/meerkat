@@ -98,7 +98,10 @@ func moveAside(dir string) (string, error) {
 
 // cleanStaleStaging removes staging and aside directories under parent
 // older than staleStagingAge: what a process killed mid-fill leaves.
-// Best effort; errors are ignored.
+// Best effort; errors are ignored. Only real directories directly under
+// parent are candidates: DirEntry.IsDir is false for a symlink, so a
+// link named like a staging directory is never followed, and
+// os.RemoveAll removes links inside a tree without following them.
 func cleanStaleStaging(parent string) {
 	entries, err := os.ReadDir(parent)
 	if err != nil {
@@ -122,7 +125,10 @@ func cleanStaleStaging(parent string) {
 // directory holding current (one object-store location's versions) and
 // removes the rest, never current itself. Incomplete entries are left
 // to installCacheDir. Each pruned entry is moved aside before deletion
-// so a half-deleted tree is never visible at a version path.
+// so a half-deleted tree is never visible at a version path. Only real
+// directories that are siblings of current are candidates (a symlinked
+// version is skipped, see isCacheComplete), so nothing outside the
+// location's directory is renamed or removed.
 func pruneCacheVersions(current string, keep int) {
 	if keep < 1 {
 		keep = 1
@@ -142,7 +148,7 @@ func pruneCacheVersions(current string, keep int) {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || p == current || !isCacheComplete(p) {
 			continue
 		}
-		info, err := os.Stat(filepath.Join(p, completionMarker))
+		info, err := os.Lstat(filepath.Join(p, completionMarker))
 		if err != nil {
 			continue
 		}
