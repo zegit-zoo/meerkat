@@ -210,7 +210,7 @@ func (r *MeerkatMobReconciler) plan(ctx context.Context, mob *v1alpha1.MeerkatMo
 	if err != nil {
 		return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
 	}
-	obs := renderTelemetry(mob.Spec.Telemetry)
+	obs := renderObservability(&mob.Spec)
 	if err := checkServiceAccount(mob.Spec.Credentials); err != nil {
 		return nil, &refusal{v1alpha1.ReasonConfigRefused, err.Error()}, nil
 	}

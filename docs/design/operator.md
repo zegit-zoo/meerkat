@@ -111,8 +111,10 @@ admits the same trees the server loads:
   loader refuses such a tree at startup, and the reconciler checks it
   again and reports it (below).
 
-A MeerkatMob is refused for a `scaleToZero.idle` under 1m or a `root`
-that is not an object name, and warned
+A MeerkatMob is refused for a `scaleToZero.idle` under 1m, a `root`
+that is not an object name, or a plaintext `http://`
+`traversalLog.s3.endpoint` without `s3.insecure: true` (the CRD's CEL
+rule refuses it too), and warned
 about when its root does not exist yet or has a parent of its own.
 
 ## The KnowledgeBase reconciler
@@ -297,6 +299,53 @@ apply to the librarian's pods. The librarian reads dedicated
 KnowledgeBases with the mob's identity, which is the identity every
 instance of the mob already uses.
 
+### The traversal log
+
+`spec.traversalLog` turns on the server's traversal log
+(`observability.traversal_log`, [observability](observability.md)) in
+an S3 bucket. Every instance's `content-source.yaml` and the
+librarian's carry the same block, so the instances write one log and
+the librarian reads it. That log is what the librarian's missing-link
+and promotion findings come from. Without it a scheduled run reports
+dangling links, staleness, culls and prompt quality only.
+
+```yaml
+spec:
+  traversalLog:
+    s3: {bucket: telemetry, prefix: mob/, endpoint: https://garage.example, region: garage, pathStyle: true}
+    hmacKeySecretRef: mob-traversal-key   # key: hmac-key, at least 16 bytes
+    query: omit                           # the default; plaintext keeps callers' queries
+    retentionDays: 90                     # unset: the server's default; 0 keeps everything
+```
+
+It sits beside `spec.telemetry`, not inside it. The log holds hashed
+paths and, with `query: plaintext`, callers' queries, so it is a
+sensitive store that is never exported to the OTLP collector. A
+traversal log needs no OTLP endpoint, and it turns no tracing on.
+
+- **The key.** The Secret's `hmac-key` reaches each instance and the
+  librarian as `TRAVERSAL_LOG_HMAC_KEY`, and only that key: the rendered
+  file names the variable, never the key or the Secret. The operator
+  does not read the Secret. A pod whose Secret is missing waits in
+  `CreateContainerConfigError`, and one whose key is under 16 bytes
+  fails at start. Pods read the key at start, and rotating it makes
+  older entries unjoinable, so a rotation needs a rollout restart.
+- **The bucket** is reached with the mob's credentials, as the `s3`
+  sources are (`spec.credentials`). Each object has a unique key, so
+  a Garage bucket is safe for any number of writers. A dedicated
+  unit with `spec.networkPolicy.egress` set needs the bucket's address
+  in its egress rules.
+- **Retention and caps run in each process.** Every instance and every
+  librarian run prunes days older than `retentionDays`. That is the
+  same rule run more than once, and the librarian's only write. The
+  server's daily write caps are left at their defaults and count per
+  process, so a mob of N instances may write up to N times them in a
+  day.
+
+Removing `spec.traversalLog` renders the block and the key's variable
+away, which rolls the instances. The objects already written stay in
+the bucket.
+
 ### Dedicated units and their NetworkPolicy
 
 A unit that serves a `placement: dedicated` KnowledgeBase also gets a
@@ -452,6 +501,6 @@ meerkat-mob#10 tracks these:
 - **Librarian.** A scheduled run is report-only. Filing (`--apply`)
   and rewrites (`--execute`) need a forge token, an intake store and
   an agent executor in the pod, so they are not offered. Missing-link
-  and promotion findings need the traversal log, which the operator
-  does not render yet (`observability.traversal_log`).
+  and promotion findings need `spec.traversalLog`
+  ([the traversal log](#the-traversal-log)).
 - Scale-to-zero, and acceptance on a real k3s cluster.

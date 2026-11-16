@@ -380,6 +380,18 @@ func TestMeerkatMob(t *testing.T) {
 	wantErr(t, err, "insecure: true")
 
 	m = mob("root")
+	m.Spec.TraversalLog = &v1alpha1.TraversalLog{
+		S3:               v1alpha1.S3Source{Bucket: "telemetry", Endpoint: "http://garage:3900"},
+		HMACKeySecretRef: "traversal-key",
+	}
+	_, err = v.ValidateCreate(ctx, m)
+	wantErr(t, err, "s3.insecure: true")
+	m.Spec.TraversalLog.S3.Insecure = true
+	if _, err := v.ValidateCreate(ctx, m); err != nil {
+		t.Fatalf("plaintext traversal log with insecure: %v", err)
+	}
+
+	m = mob("root")
 	m.Spec.Librarian = &v1alpha1.Librarian{Schedule: "@daily please"}
 	_, err = v.ValidateCreate(ctx, m)
 	wantErr(t, err, "five-field")

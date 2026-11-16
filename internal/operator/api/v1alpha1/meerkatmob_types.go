@@ -91,6 +91,15 @@ type MeerkatMobSpec struct {
 	// +optional
 	Librarian *Librarian `json:"librarian,omitempty"`
 
+	// TraversalLog turns on the server's traversal log on every
+	// instance and gives the librarian the same log to read, so its
+	// missing-link and promotion findings have paths to work from. It is
+	// kept apart from Telemetry on purpose: the log holds hashed paths
+	// and, with query: plaintext, callers' queries, and it is never
+	// exported to the OTLP collector.
+	// +optional
+	TraversalLog *TraversalLog `json:"traversalLog,omitempty"`
+
 	// Credentials are what the instances authenticate to their object
 	// stores with. They are referenced, never written here.
 	// +optional
@@ -147,6 +156,57 @@ const (
 	S3SecretAccessKeyKey = "AWS_SECRET_ACCESS_KEY" //nolint:gosec // G101: false positive — a Secret key name, not a credential.
 	S3SessionTokenKey    = "AWS_SESSION_TOKEN"     //nolint:gosec // G101: false positive — a Secret key name, not a credential.
 )
+
+// TraversalLogHMACKeyKey is the key an instance reads the traversal
+// log's hashing key from, in the Secret TraversalLog.HMACKeySecretRef
+// names.
+const TraversalLogHMACKeyKey = "hmac-key"
+
+// What a traversal log entry keeps of the caller's initial query, as
+// the server's observability.traversal_log.query.
+const (
+	TraversalQueryOmit      = "omit"
+	TraversalQueryPlaintext = "plaintext"
+)
+
+// TraversalLog is the server's observability.traversal_log in an S3
+// bucket: one object per reported retrieval session, with every
+// collection name and page ID replaced by an HMAC of it. Every instance
+// of the mob writes it and the librarian reads it. The instances reach
+// the bucket with the mob's credentials, as they reach their s3
+// sources.
+// +kubebuilder:validation:XValidation:rule="!has(self.s3.endpoint) || !self.s3.endpoint.startsWith('http://') || (has(self.s3.insecure) && self.s3.insecure)",message="a plaintext http:// s3.endpoint needs s3.insecure: true"
+type TraversalLog struct {
+	// S3 is the bucket and prefix the log lives under; the server
+	// writes below <prefix>telemetry/paths/. Every object has a unique
+	// key, so a Garage bucket is safe for any number of instances.
+	S3 S3Source `json:"s3"`
+
+	// HMACKeySecretRef names a Secret, in the mob's namespace, whose
+	// hmac-key holds the hashing key: at least 16 bytes. Only that key
+	// reaches the pods. The operator never reads the Secret, so a pod
+	// waits until it exists, and an instance whose key is short fails
+	// at start. Rotating the key makes older entries unjoinable, and
+	// pods read it at start, so a rotation needs a restart.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	HMACKeySecretRef string `json:"hmacKeySecretRef"`
+
+	// Query is what an entry keeps of the caller's initial query and
+	// other free text: omit (the default) stores none of it, plaintext
+	// stores it for the librarian's query analysis.
+	// +optional
+	// +kubebuilder:default=omit
+	// +kubebuilder:validation:Enum=omit;plaintext
+	Query string `json:"query,omitempty"`
+
+	// RetentionDays deletes the log's days older than this. Unset means
+	// the server's default (90 days); 0 keeps everything.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	RetentionDays *int32 `json:"retentionDays,omitempty"`
+}
 
 // Credentials point the instances at a static S3 key or a cloud
 // workload identity, or both.
