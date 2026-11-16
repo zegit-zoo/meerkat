@@ -191,10 +191,9 @@ func (h *mobHarness) perKB(t *testing.T) {
 	}
 
 	// A hand edit is put back: the reconciler owns the Deployment.
-	d.Spec.Template.Spec.Containers[0].Image = "ghcr.io/attacker/meerkat:1"
-	if err := h.c.Update(h.ctx, &d); err != nil {
-		t.Fatal(err)
-	}
+	h.edit(t, "tree-kb-platform", &d, func() {
+		d.Spec.Template.Spec.Containers[0].Image = "ghcr.io/attacker/meerkat:1"
+	})
 	eventually(t, "the hand-edited image is put back", func() (bool, string) {
 		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "tree-kb-platform"}, &d); err != nil {
 			return false, err.Error()
@@ -215,15 +214,28 @@ func (h *mobHarness) perKB(t *testing.T) {
 	h.waitRendered(t, got, "tree-kb-flux,tree-kb-platform,tree-kb-root,tree-kb-vendors")
 }
 
+// edit reads the object named name in mobNS into obj, applies change and
+// writes it back. The reconcilers write status in the meantime, which
+// moves the resourceVersion between the read and the write, so the edit
+// is retried on a conflict (meerkat#230).
+func (h *mobHarness) edit(t *testing.T, name string, obj client.Object, change func()) {
+	t.Helper()
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: name}, obj); err != nil {
+			return err
+		}
+		change()
+		return h.c.Update(h.ctx, obj)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (h *mobHarness) toSingle(t *testing.T) {
 	var mob v1alpha1.MeerkatMob
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "tree"}, &mob); err != nil {
-		t.Fatal(err)
-	}
-	mob.Spec.Placement = v1alpha1.PlacementSingle
-	if err := h.c.Update(h.ctx, &mob); err != nil {
-		t.Fatal(err)
-	}
+	h.edit(t, "tree", &mob, func() {
+		mob.Spec.Placement = v1alpha1.PlacementSingle
+	})
 	got := h.waitMob(t, "tree", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered)
 	if got.Status.Instances != 1 || got.Status.KnowledgeBases != 4 {
 		t.Errorf("status = %+v", got.Status)
@@ -249,12 +261,15 @@ func (h *mobHarness) toSingle(t *testing.T) {
 func (h *mobHarness) available(t *testing.T) {
 	// envtest runs no Deployment controller: write the status a rolled
 	// out Deployment would have.
+	// The reconciler may write the Deployment meanwhile: retry on a conflict.
 	var d appsv1.Deployment
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "tree-all"}, &d); err != nil {
-		t.Fatal(err)
-	}
-	d.Status = appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}
-	if err := h.c.Status().Update(h.ctx, &d); err != nil {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "tree-all"}, &d); err != nil {
+			return err
+		}
+		d.Status = appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}
+		return h.c.Status().Update(h.ctx, &d)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	h.waitMob(t, "tree", v1alpha1.ConditionAvailable, metav1.ConditionTrue, v1alpha1.ReasonAvailable)
@@ -267,13 +282,9 @@ func (h *mobHarness) rootMissing(t *testing.T) {
 	}
 	h.waitRendered(t, h.waitMob(t, "other", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered), "other-all")
 
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "other"}, mob); err != nil {
-		t.Fatal(err)
-	}
-	mob.Spec.Root = "gone"
-	if err := h.c.Update(h.ctx, mob); err != nil {
-		t.Fatal(err)
-	}
+	h.edit(t, "other", mob, func() {
+		mob.Spec.Root = "gone"
+	})
 	got := h.waitMob(t, "other", v1alpha1.ConditionRendered, metav1.ConditionFalse, v1alpha1.ReasonRootMissing)
 	h.waitMob(t, "other", v1alpha1.ConditionAvailable, metav1.ConditionUnknown, v1alpha1.ReasonNotRendered)
 	// What the last good spec rendered keeps running.
@@ -372,14 +383,10 @@ func (h *mobHarness) credentialsAndSizing(t *testing.T) {
 	}
 
 	// Raising maxResidentBytes resizes the instance.
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "solo"}, kb); err != nil {
-		t.Fatal(err)
-	}
-	more := resource.MustParse("128Mi")
-	kb.Spec.Resources.MaxResidentBytes = &more
-	if err := h.c.Update(h.ctx, kb); err != nil {
-		t.Fatal(err)
-	}
+	h.edit(t, "solo", kb, func() {
+		more := resource.MustParse("128Mi")
+		kb.Spec.Resources.MaxResidentBytes = &more
+	})
 	eventually(t, "a larger maxResidentBytes raises the limit", func() (bool, string) {
 		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "sized-all"}, &d); err != nil {
 			return false, err.Error()
@@ -389,15 +396,11 @@ func (h *mobHarness) credentialsAndSizing(t *testing.T) {
 	})
 
 	// Its own resources.instance replaces the mob's for a one-KB unit.
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "solo"}, kb); err != nil {
-		t.Fatal(err)
-	}
-	kb.Spec.Resources.Instance = &corev1.ResourceRequirements{
-		Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
-	}
-	if err := h.c.Update(h.ctx, kb); err != nil {
-		t.Fatal(err)
-	}
+	h.edit(t, "solo", kb, func() {
+		kb.Spec.Resources.Instance = &corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+		}
+	})
 	eventually(t, "resources.instance replaces spec.resources", func() (bool, string) {
 		if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "sized-all"}, &d); err != nil {
 			return false, err.Error()
@@ -539,22 +542,14 @@ func (h *mobHarness) dedicatedNetworkPolicy(t *testing.T) {
 
 	// Under perKB the unit keeps its name when the KnowledgeBase stops
 	// being dedicated: the policy goes, the Deployment stays.
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "iso"}, mob); err != nil {
-		t.Fatal(err)
-	}
-	mob.Spec.Placement = v1alpha1.PlacementPerKB
-	if err := h.c.Update(h.ctx, mob); err != nil {
-		t.Fatal(err)
-	}
+	h.edit(t, "iso", mob, func() {
+		mob.Spec.Placement = v1alpha1.PlacementPerKB
+	})
 	h.waitRendered(t, got, "iso-kb-iso-root,iso-kb-iso-secret")
 	h.waitPolicies(t, got, "iso-kb-iso-secret")
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "iso-secret"}, secret); err != nil {
-		t.Fatal(err)
-	}
-	secret.Spec.Placement = v1alpha1.PlacementShared
-	if err := h.c.Update(h.ctx, secret); err != nil {
-		t.Fatal(err)
-	}
+	h.edit(t, "iso-secret", secret, func() {
+		secret.Spec.Placement = v1alpha1.PlacementShared
+	})
 	h.waitPolicies(t, got, "")
 	h.waitRendered(t, got, "iso-kb-iso-root,iso-kb-iso-secret")
 }
@@ -609,13 +604,9 @@ func (h *mobHarness) librarian(t *testing.T) {
 
 	// Five fields get past the webhook; the API server's cron parser
 	// does not take them.
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "lib"}, mob); err != nil {
-		t.Fatal(err)
-	}
-	mob.Spec.Librarian.Schedule = "61 3 * * *"
-	if err := h.c.Update(h.ctx, mob); err != nil {
-		t.Fatal(err)
-	}
+	h.edit(t, "lib", mob, func() {
+		mob.Spec.Librarian.Schedule = "61 3 * * *"
+	})
 	refused := h.waitMob(t, "lib", v1alpha1.ConditionRendered, metav1.ConditionFalse, v1alpha1.ReasonConfigRefused)
 	if msg := meta.FindStatusCondition(refused.Status.Conditions, v1alpha1.ConditionRendered).Message; !strings.Contains(msg, "spec.librarian") {
 		t.Errorf("refusal message = %q", msg)
@@ -625,13 +616,9 @@ func (h *mobHarness) librarian(t *testing.T) {
 	}
 	h.waitRendered(t, got, "lib-all")
 
-	if err := h.c.Get(h.ctx, types.NamespacedName{Namespace: mobNS, Name: "lib"}, mob); err != nil {
-		t.Fatal(err)
-	}
-	mob.Spec.Librarian = nil
-	if err := h.c.Update(h.ctx, mob); err != nil {
-		t.Fatal(err)
-	}
+	h.edit(t, "lib", mob, func() {
+		mob.Spec.Librarian = nil
+	})
 	h.waitMob(t, "lib", v1alpha1.ConditionRendered, metav1.ConditionTrue, v1alpha1.ReasonRendered)
 	eventually(t, "the librarian is pruned", func() (bool, string) {
 		errCJ := h.c.Get(h.ctx, key, &batchv1.CronJob{})
