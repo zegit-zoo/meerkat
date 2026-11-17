@@ -110,6 +110,14 @@ type snapshot struct {
 	// outside the once is a data race, and a telemetry decision must not
 	// be the thing that introduces one.
 	indexed atomic.Bool
+
+	// lease holds the on-disk cache version fsys reads from against
+	// pruning (meerkat#240), for as long as this snapshot has a
+	// reference: released with the last one, so a reader still draining
+	// an old generation keeps its files. nil for a source with no
+	// prunable cache. A snapshot built over another one's fsys retains
+	// that one's lease.
+	lease *contentsource.CacheLease
 }
 
 // acquire returns the snapshot serving right now, with a reference held
@@ -148,6 +156,7 @@ func (s *snapshot) releaseErr() error {
 	if s.refs.Add(-1) != 0 {
 		return nil
 	}
+	s.lease.Release()
 	// Consume the once so that a build racing us to zero has finished
 	// before we read s.index. At zero there is no reader left to start a
 	// new one, so an unconsumed once here means the index was never built
@@ -164,6 +173,7 @@ func (s *snapshot) releaseErr() error {
 // already produced rather than leaving it to the garbage collector,
 // which would not close it at all.
 func (s *snapshot) discard() {
+	s.lease.Release()
 	s.once.Do(func() {})
 	if s.index != nil {
 		_ = s.index.Close()
@@ -549,7 +559,7 @@ func (c *Collection) ReloadStatuses() []ReloadStatus { return c.status.statuses(
 // could point them anywhere else.
 var (
 	probeVersion   = contentsource.ObjectVersion
-	resolveContent = contentsource.FetchObject
+	resolveContent = contentsource.FetchObjectLeased
 )
 
 // ReloadContent re-resolves the collection's content source and, when
@@ -629,13 +639,21 @@ func (c *Collection) ReloadContent(ctx context.Context) (refresh.Outcome, error)
 	// trace that reads "mount happened inside resolve" is worse than no
 	// trace.
 	resolveCtx, resolveSpan := telemetry.Span(ctx, telemetry.PhaseResolve)
-	dir, resolved, err := resolveContent(resolveCtx, src)
+	dir, resolved, lease, err := resolveContent(resolveCtx, src)
 	if err != nil {
 		telemetry.Fail(resolveSpan, telemetry.OutcomeError)
 		return refresh.Outcome{}, c.contentFailed(fmt.Errorf("resolve: %w", err))
 	}
 	resolveSpan.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
 	resolveSpan.End()
+	// The new version stays leased while it is being mounted and indexed,
+	// then by the snapshot that serves it; every failure below releases it.
+	leased := false
+	defer func() {
+		if !leased {
+			lease.Release()
+		}
+	}()
 
 	fsys, err := phase(ctx, telemetry.PhaseMount, func(context.Context) (fs.FS, error) {
 		return kbdir.FSLayout(dir, src.Layout)
@@ -657,6 +675,7 @@ func (c *Collection) ReloadContent(ctx context.Context) (refresh.Outcome, error)
 	if err != nil {
 		return refresh.Outcome{}, c.contentFailed(err)
 	}
+	next.lease, leased = lease, true
 	if err := c.commitPhase(ctx, next, nil); err != nil {
 		next.discard()
 		return refresh.Outcome{}, c.contentFailed(err)
@@ -939,6 +958,9 @@ func (c *Collection) ReloadMemory(ctx context.Context) (refresh.Outcome, error) 
 	}
 	next, berr := newBuiltSnapshot(ctx, cur.fsys, cur.provenance, cur.version,
 		mergeOverlayMap(pages, overlay, kb.Unfiltered()))
+	if berr == nil {
+		next.lease = cur.lease.Retain()
+	}
 	cur.release()
 	if berr != nil {
 		return refresh.Outcome{}, c.memoryFailed(berr)

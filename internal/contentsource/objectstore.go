@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -126,11 +127,52 @@ func (s Source) IsObjectStore() bool {
 // runtime resolution and hot reload use; FetchGCS / FetchS3 are the
 // per-type names.
 func FetchObject(ctx context.Context, src Source) (dir, version string, err error) {
+	dir, version, lease, err := FetchObjectLeased(ctx, src)
+	lease.Release()
+	return dir, version, err
+}
+
+// FetchObjectLeased is FetchObject for a caller that serves the
+// directory: the returned lease keeps every meerkat process from
+// pruning that version until the caller releases it (meerkat#240). The
+// lease may be nil (a read-only cache), and releasing nil is a no-op.
+// A caller that never releases it holds the version until the process
+// exits, which is the safe default.
+func FetchObjectLeased(ctx context.Context, src Source) (dir, version string, lease *CacheLease, err error) {
 	kind, ok := kindFor(src.Type)
 	if !ok {
-		return "", "", fmt.Errorf("FetchObject: type %q is not an object-store source", src.Type)
+		return "", "", nil, fmt.Errorf("FetchObject: type %q is not an object-store source", src.Type)
 	}
 	return fetchStore(ctx, src, kind)
+}
+
+// leaseCacheHit leases cacheDir when it is a complete entry. hit is
+// false when it is not, or when it was pruned or replaced before the
+// lease was held: the caller then fetches it again.
+func leaseCacheHit(cacheDir string) (lease *CacheLease, hit bool, err error) {
+	if !isCacheComplete(cacheDir) {
+		return nil, false, nil
+	}
+	lease, err = acquireCacheLease(cacheDir)
+	switch {
+	case err == nil:
+		return lease, true, nil
+	case errors.Is(err, errLeaseLost):
+		return nil, false, nil
+	default:
+		return nil, false, err
+	}
+}
+
+// leaseAndPrune leases a version this process has just installed and
+// only then prunes the location, so the prune can never take it.
+func leaseAndPrune(cacheDir, version string) (string, string, *CacheLease, error) {
+	lease, err := acquireCacheLease(cacheDir)
+	if err != nil {
+		return "", "", nil, err
+	}
+	pruneCacheVersions(cacheDir, cacheKeepVersions)
+	return cacheDir, version, lease, nil
 }
 
 // ObjectVersion returns the version token an object-store source
@@ -223,16 +265,19 @@ func safeVersionSegment(version string) string {
 // Skip-if-cached comes first in both modes, and a cache hit does no
 // network I/O beyond the one metadata call needed to learn the current
 // version — or none at all when the version is pinned in the config.
-func fetchStore(ctx context.Context, src Source, kind storeKind) (dir, version string, err error) {
+//
+// The returned lease holds the version against pruning by any meerkat
+// process until it is released (meerkat#240).
+func fetchStore(ctx context.Context, src Source, kind storeKind) (dir, version string, lease *CacheLease, err error) {
 	// Re-check the shape here as well as in Validate: the fetch paths
 	// below must not be reachable with a half-specified source if this
 	// is ever called directly.
 	if err := kind.validate(src, "content"); err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	client, err := kind.newClient(ctx, src)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	defer func() { _ = client.Close() }()
 
@@ -244,36 +289,40 @@ func fetchStore(ctx context.Context, src Source, kind storeKind) (dir, version s
 
 // fetchBundle implements object mode: one .tar.gz bundle, cached by the
 // object's version token.
-func fetchBundle(ctx context.Context, client objectStore, src Source, kind storeKind) (dir, version string, err error) {
+func fetchBundle(ctx context.Context, client objectStore, src Source, kind storeKind) (dir, version string, lease *CacheLease, err error) {
 	version = kind.pinnedVersion(src)
 	if version == "" {
 		attrs, aerr := storeOp(ctx, kind, "attrs", func() (storedObject, error) {
 			return client.Attrs(ctx, src.Bucket, src.Object)
 		})
 		if aerr != nil {
-			return "", "", fmt.Errorf("%s://%s/%s: %w", kind.scheme, src.Bucket, src.Object, aerr)
+			return "", "", nil, fmt.Errorf("%s://%s/%s: %w", kind.scheme, src.Bucket, src.Object, aerr)
 		}
 		version = attrs.Version
 	}
 	if version == "" {
-		return "", "", fmt.Errorf("%s://%s/%s: backend returned no version token for the object", kind.scheme, src.Bucket, src.Object)
+		return "", "", nil, fmt.Errorf("%s://%s/%s: backend returned no version token for the object", kind.scheme, src.Bucket, src.Object)
 	}
 
 	cacheDir, err := storeCacheDir(src, kind, version)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	if isCacheComplete(cacheDir) {
+	hitLease, hit, err := leaseCacheHit(cacheDir)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if hit {
 		// Immutable by version: a restart on the same version is free,
 		// exactly as a type: url restart on the same digest is.
 		telemetry.Record(ctx).CacheLookup(kind.objectType, telemetry.CacheHit)
-		return cacheDir, version, nil
+		return cacheDir, version, hitLease, nil
 	}
 	telemetry.Record(ctx).CacheLookup(kind.objectType, telemetry.CacheMiss)
 
 	tmpFile, digest, err := downloadStoreToTemp(ctx, client, kind, src.Bucket, src.Object, version)
 	if err != nil {
-		return "", "", fmt.Errorf("%s://%s/%s@%s: %w", kind.scheme, src.Bucket, src.Object, version, err)
+		return "", "", nil, fmt.Errorf("%s://%s/%s@%s: %w", kind.scheme, src.Bucket, src.Object, version, err)
 	}
 	defer func() { _ = os.Remove(tmpFile) }()
 	if info, serr := os.Stat(tmpFile); serr == nil {
@@ -284,7 +333,7 @@ func fetchBundle(ctx context.Context, client objectStore, src Source, kind store
 	// the bytes), but when an operator does pin one, it is verified
 	// BEFORE anything is extracted or cached — same rule as type: url.
 	if src.SHA256 != "" && digest != strings.ToLower(src.SHA256) {
-		return "", "", fmt.Errorf("sha256 mismatch for %s://%s/%s@%s: got %s, want %s — refusing to extract or cache",
+		return "", "", nil, fmt.Errorf("sha256 mismatch for %s://%s/%s@%s: got %s, want %s — refusing to extract or cache",
 			kind.scheme, src.Bucket, src.Object, version, digest, strings.ToLower(src.SHA256))
 	}
 
@@ -292,35 +341,38 @@ func fetchBundle(ctx context.Context, client objectStore, src Source, kind store
 		return extractTarGz(tmpFile, tmpDir)
 	})
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	pruneCacheVersions(cacheDir, cacheKeepVersions)
-	return cacheDir, version, nil
+	return leaseAndPrune(cacheDir, version)
 }
 
 // fetchPrefixTree implements prefix mode: every object under a prefix,
 // laid out as a directory tree, cached by a fingerprint over the whole
 // listing.
-func fetchPrefixTree(ctx context.Context, client objectStore, src Source, kind storeKind) (dir, version string, err error) {
+func fetchPrefixTree(ctx context.Context, client objectStore, src Source, kind storeKind) (dir, version string, lease *CacheLease, err error) {
 	objs, err := storeOp(ctx, kind, "list", func() ([]storedObject, error) {
 		return client.Objects(ctx, src.Bucket, src.Prefix)
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("%s://%s/%s*: %w", kind.scheme, src.Bucket, src.Prefix, err)
+		return "", "", nil, fmt.Errorf("%s://%s/%s*: %w", kind.scheme, src.Bucket, src.Prefix, err)
 	}
 	objs, err = fetchableListing(objs, src, kind, true)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	version = listingFingerprint(objs, kind.fingerprintSize)
 
 	cacheDir, err := storeCacheDir(src, kind, version)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	if isCacheComplete(cacheDir) {
+	hitLease, hit, err := leaseCacheHit(cacheDir)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if hit {
 		telemetry.Record(ctx).CacheLookup(kind.prefixType, telemetry.CacheHit)
-		return cacheDir, version, nil
+		return cacheDir, version, hitLease, nil
 	}
 	telemetry.Record(ctx).CacheLookup(kind.prefixType, telemetry.CacheMiss)
 
@@ -332,12 +384,11 @@ func fetchPrefixTree(ctx context.Context, client objectStore, src Source, kind s
 	})
 	if err != nil {
 		telemetry.Fail(span, telemetry.OutcomeError)
-		return "", "", err
+		return "", "", nil, err
 	}
 	span.SetAttributes(telemetry.Outcome(telemetry.OutcomeOK))
 	span.End()
-	pruneCacheVersions(cacheDir, cacheKeepVersions)
-	return cacheDir, version, nil
+	return leaseAndPrune(cacheDir, version)
 }
 
 // storeVersion is the shared body of GCSVersion / S3Version: the

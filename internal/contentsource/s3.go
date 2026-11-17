@@ -148,7 +148,9 @@ func FetchS3(ctx context.Context, src Source) (dir, version string, err error) {
 	if src.Type != TypeS3 {
 		return "", "", fmt.Errorf("FetchS3: type %q is not %q", src.Type, TypeS3)
 	}
-	return fetchStore(ctx, src, s3Kind)
+	dir, version, lease, err := fetchStore(ctx, src, s3Kind)
+	lease.Release()
+	return dir, version, err
 }
 
 // S3Version returns the version token a type: s3 source resolves to

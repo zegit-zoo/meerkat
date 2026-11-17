@@ -128,7 +128,8 @@ func cleanStaleStaging(parent string) {
 // so a half-deleted tree is never visible at a version path. Only real
 // directories that are siblings of current are candidates (a symlinked
 // version is skipped, see isCacheComplete), so nothing outside the
-// location's directory is renamed or removed.
+// location's directory is renamed or removed. A version some process
+// holds a CacheLease on is skipped (see pruneVersion).
 func pruneCacheVersions(current string, keep int) {
 	if keep < 1 {
 		keep = 1
@@ -160,8 +161,26 @@ func pruneCacheVersions(current string, keep int) {
 		if i < keep-1 {
 			continue
 		}
-		if aside, err := moveAside(v.path); err == nil {
-			_ = os.RemoveAll(aside)
-		}
+		pruneVersion(v.path)
+	}
+}
+
+// pruneVersion removes one old version unless a reader leases it
+// (meerkat#240): a process still serving that tree keeps it, however
+// old it is, and the next prune after it lets go removes it.
+func pruneVersion(dir string) {
+	lock, ok := tryPruneLock(dir)
+	if !ok {
+		return
+	}
+	if !pruneHoldsLockAcrossRename {
+		lock.release()
+	}
+	aside, err := moveAside(dir)
+	if pruneHoldsLockAcrossRename {
+		lock.release()
+	}
+	if err == nil {
+		_ = os.RemoveAll(aside)
 	}
 }

@@ -91,8 +91,10 @@ Culling is about memory. The on-disk content cache that object-store
 sources are fetched into is bounded separately: after a new version of
 a gcs/s3 location is installed, only the newest `cache.keep_versions`
 (default 2) versions of that location are kept, in every deployment
-form, not only `tree:`. A complete entry is never replaced by a
-concurrent fill, and a symlink is never followed out of the cache. See [object-stores.md](object-stores.md#the-on-disk-cache).
+form, not only `tree:`. A version some process still serves is kept
+past that limit, through a lease the kernel drops if the process dies.
+A complete entry is never replaced by a concurrent fill, and a symlink
+is never followed out of the cache. See [object-stores.md](object-stores.md#the-on-disk-cache).
 
 ## Temperatures and warm start
 

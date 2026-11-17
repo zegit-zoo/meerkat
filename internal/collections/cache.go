@@ -213,6 +213,14 @@ func (r *Registry) mount(ctx context.Context, c *Collection, trigger string, cul
 	if err != nil {
 		return fmt.Errorf("mount %q: %w", c.Name, err)
 	}
+	// The resolved cache version stays leased while it is mounted, then by
+	// the snapshot that serves it (meerkat#240); a failed mount releases it.
+	leased := false
+	defer func() {
+		if !leased {
+			rc.Lease.Release()
+		}
+	}()
 	if rc.Dir == "" {
 		return fmt.Errorf("mount %q: source resolves to no directory", c.Name)
 	}
@@ -249,6 +257,7 @@ func (r *Registry) mount(ctx context.Context, c *Collection, trigger string, cul
 		size = snap.index.SizeEstimate()
 	}
 	c.residentBytes.Store(size)
+	snap.lease, leased = rc.Lease, true
 	c.install(snap)
 	if src.Type == contentsource.TypeLocal && src.Refreshable() {
 		c.localDir.Store(rc.Dir)

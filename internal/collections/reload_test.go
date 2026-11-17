@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -51,6 +52,39 @@ type fakeSource struct {
 	// resolveGate, when non-nil, is received from inside resolve — the
 	// hook that holds a rebuild open while something else happens.
 	resolveGate chan struct{}
+	// leased, when set, makes every resolve hand out a real cache lease
+	// on the version's directory (meerkat#240); issued records the last
+	// one per directory.
+	leased bool
+	issued map[string]*contentsource.CacheLease
+	// afterLease, when set, runs on a resolved directory after it was
+	// leased and before resolve returns it.
+	afterLease func(dir string)
+}
+
+// leaseFor leases dir the way contentsource.FetchObjectLeased leases a
+// cache version, when the test asked for leases; nil otherwise.
+func (f *fakeSource) leaseFor(dir string) *contentsource.CacheLease {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.leased {
+		return nil
+	}
+	marker := filepath.Join(dir, ".meerkat-complete")
+	if err := os.WriteFile(marker, []byte("test\n"), 0o600); err != nil {
+		f.t.Errorf("mark %s complete: %v", dir, err)
+		return nil
+	}
+	l, err := contentsource.LeaseCacheDir(dir)
+	if err != nil {
+		f.t.Errorf("lease %s: %v", dir, err)
+		return nil
+	}
+	if f.issued == nil {
+		f.issued = map[string]*contentsource.CacheLease{}
+	}
+	f.issued[dir] = l
+	return l
 }
 
 func newFakeSource(t *testing.T) *fakeSource {
@@ -100,7 +134,7 @@ func (f *fakeSource) probe(context.Context, contentsource.Source) (string, error
 	return f.version, nil
 }
 
-func (f *fakeSource) resolve(context.Context, contentsource.Source) (string, string, error) {
+func (f *fakeSource) resolve(context.Context, contentsource.Source) (string, string, *contentsource.CacheLease, error) {
 	f.mu.Lock()
 	f.resolves++
 	gate, err, version := f.resolveGate, f.resolveErr, f.version
@@ -110,9 +144,13 @@ func (f *fakeSource) resolve(context.Context, contentsource.Source) (string, str
 		<-gate
 	}
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
-	return dir, version, nil
+	lease := f.leaseFor(dir)
+	if f.afterLease != nil {
+		f.afterLease(dir)
+	}
+	return dir, version, lease, nil
 }
 
 func (f *fakeSource) counts() (probes, resolves int) {
@@ -152,7 +190,7 @@ func refreshableCollection(t *testing.T, f *fakeSource, policy string) *Collecti
 	f.mu.Unlock()
 
 	reg, err := Open(context.Background(), []contentsource.ResolvedCollection{
-		{Name: "handbook", Dir: dir, Source: src, Provenance: "gcs://example-kb/handbook/live/*@" + version, Version: version},
+		{Name: "handbook", Dir: dir, Source: src, Provenance: "gcs://example-kb/handbook/live/*@" + version, Version: version, Lease: f.leaseFor(dir)},
 		// A second collection so Open gives each its own filesystem — the
 		// multi-collection shape a hosted deployment is in.
 		{Name: "static", Dir: t.TempDir(), Source: contentsource.Source{Type: contentsource.TypeLocal, Layout: contentsource.MergeLayout(contentsource.Layout{})}, Provenance: "disk:x"},
