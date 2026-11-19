@@ -165,6 +165,11 @@ type ResolvedCollection struct {
 	// generation must recognise it as current and do no work, rather than
 	// re-resolving once on principle.
 	Version string
+	// Lease holds Dir against pruning by any meerkat process while it is
+	// served (meerkat#240): set for a gcs/s3 source, nil otherwise. Whoever
+	// serves Dir owns it and releases it when it stops; an unreleased
+	// lease holds the version until the process exits.
+	Lease *CacheLease
 	// Tree is this collection's place in a `tree:` deployment; nil for
 	// a flat content: or collections: configuration. See tree.go.
 	Tree *TreeNode
@@ -310,11 +315,11 @@ func resolveSourceInner(ctx context.Context, src Source, cfgPath string) (Resolv
 		}
 		return ResolvedCollection{Dir: dir, Source: src, Provenance: URLProvenance(src)}, nil
 	case TypeGCS, TypeS3:
-		dir, version, ferr := FetchObject(ctx, src)
+		dir, version, lease, ferr := FetchObjectLeased(ctx, src)
 		if ferr != nil {
 			return ResolvedCollection{}, fmt.Errorf("content-source.yaml (%s): %w", cfgPath, ferr)
 		}
-		return ResolvedCollection{Dir: dir, Source: src, Provenance: ObjectProvenance(src, version), Version: version}, nil
+		return ResolvedCollection{Dir: dir, Source: src, Provenance: ObjectProvenance(src, version), Version: version, Lease: lease}, nil
 	case TypeGit, TypeSubmodule:
 		return ResolvedCollection{}, fmt.Errorf(
 			"content-source.yaml (%s): type %q is build-time only (it needs git and a working tree) — "+

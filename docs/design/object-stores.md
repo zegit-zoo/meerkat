@@ -91,6 +91,22 @@ visible by one rename once a completion marker is written.
   being served and the one it replaced) are kept. A pruned entry is
   moved aside before it is deleted, so a half-deleted tree is never
   visible at a version path.
+- **A version a process still serves is never pruned** (meerkat#240).
+  Each process holds a lease on the version it serves: an OS advisory
+  lock (`flock` on Linux and macOS, `LockFileEx` on Windows) on a
+  `.meerkat-lease` file inside the version directory, shared, for as
+  long as a snapshot of that version has a reader. A prune takes a
+  non-blocking exclusive lock and skips the version when that fails, so
+  a long-running process on an old version keeps it however many newer
+  ones are installed, and the next prune after it lets go removes it.
+  The kernel drops the lock with the process, so a reader that crashed
+  or was killed stops protecting its version at once; there is no
+  stale-lease timeout. The lease file follows the rules below: it is
+  never a symlink, it must be a regular file inside the version
+  directory, and a reader re-checks after locking that the path still
+  holds that file and a complete tree, fetching again otherwise. A cache
+  the process cannot write (a read-only volume) is served without a
+  lease, since no prune can remove it either.
 - **Interrupted fills are cleaned up.** `.fetch-*` and `.stale-*`
   directories older than a day are removed the next time an entry is
   filled in the same directory.

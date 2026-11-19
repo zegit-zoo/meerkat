@@ -834,7 +834,9 @@ invalidates it. Either way a restart on unchanged content is a cache hit;
 overwriting the object publishes new content on the next start, with the
 previous generation's cache entry left intact for a rollback. Only the newest
 `cache.keep_versions` (default 2) versions of a location are kept, and older
-ones are pruned when a new version is installed. A configured `sha256:` is
+ones are pruned when a new version is installed, except a version a running
+process still serves, which it holds with a lock the kernel releases if the
+process dies. A configured `sha256:` is
 part of the cache key, so it is checked on a cached version too, not only on
 the first download.
 

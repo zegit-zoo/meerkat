@@ -585,7 +585,7 @@ func (c *Collection) Close() error {
 
 	c.snapMu.Lock()
 	old := c.snap
-	c.snap = &snapshot{fsys: old.fsys, provenance: old.provenance, version: old.version}
+	c.snap = &snapshot{fsys: old.fsys, provenance: old.provenance, version: old.version, lease: old.lease.Retain()}
 	c.snap.refs.Store(1)
 	c.snapMu.Unlock()
 	// Drops the collection's own reference; the index closes once the
@@ -944,6 +944,9 @@ func Open(ctx context.Context, resolved []contentsource.ResolvedCollection) (*Re
 			}
 		}
 		c := newCollection(rc.Name, rc.Provenance, version, fsys)
+		// The serving snapshot owns the resolved cache version's lease
+		// (meerkat#240); a reload releases it with the snapshot.
+		c.snap.lease = rc.Lease
 		c.Source = rc.Source
 		if rc.Source.Type == contentsource.TypeLocal && rc.Source.Refreshable() {
 			c.localDir.Store(rc.Dir)

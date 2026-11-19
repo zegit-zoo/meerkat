@@ -155,5 +155,7 @@ func FetchGCS(ctx context.Context, src Source) (dir, version string, err error) 
 	if src.Type != TypeGCS {
 		return "", "", fmt.Errorf("FetchGCS: type %q is not %q", src.Type, TypeGCS)
 	}
-	return fetchStore(ctx, src, gcsKind)
+	dir, version, lease, err := fetchStore(ctx, src, gcsKind)
+	lease.Release()
+	return dir, version, err
 }
