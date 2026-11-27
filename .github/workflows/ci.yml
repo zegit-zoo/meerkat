@@ -38,7 +38,23 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version-file: go.mod
-          cache: true
+          # Not setup-go's cache: its key is the same for every job, and on a key hit
+          # it never saves again, so whichever job saved first decides what every job
+          # restores. That cache lacked about 150 of go.sum's modules and every
+          # source-built tool, so each job downloaded them again (zegit-zoo/corporate#224).
+          cache: false
+
+      # One cache per job: each holds exactly the modules, build cache and .tools/
+      # binaries that job uses. The key covers go.mod (toolchain), go.sum and the
+      # Makefile, where the tool pins (golangci-lint, gosec, gitleaks, govulncheck) live.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            .tools
+          key: go-${{ runner.os }}-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-
 
       - name: Sync kb content
         run: make sync
@@ -86,7 +102,16 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false  # per-job cache below; see the Lint job
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            .tools
+          key: go-${{ runner.os }}-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-
 
       - name: Run tests with coverage (enforce floor)
         run: make cover-check
@@ -106,7 +131,16 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false  # per-job cache below; see the Lint job
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            .tools
+          key: go-${{ runner.os }}-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-
 
       - name: Operator tests against a real API server
         run: make test-envtest
@@ -121,7 +155,16 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false  # per-job cache below; see the Lint job
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            .tools
+          key: go-${{ runner.os }}-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-
 
       - name: govulncheck
         run: make vuln
@@ -137,7 +180,16 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false  # per-job cache below; see the Lint job
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            .tools
+          key: go-${{ runner.os }}-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-
 
       # No sync step: the gosec target already depends on `sync`, so the
       # embed dirs are populated before the scan walks them.
@@ -213,7 +265,16 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false  # per-job cache below; see the Lint job
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            .tools
+          key: go-${{ runner.os }}-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-
 
       - name: Scan for secrets
         run: make gitleaks
@@ -241,7 +302,16 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false  # per-job cache below; see the Lint job
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            .tools
+          key: go-${{ runner.os }}-${{ github.job }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile') }}
+          restore-keys: go-${{ runner.os }}-${{ github.job }}-
 
       - name: Sync kb content
         run: make sync
